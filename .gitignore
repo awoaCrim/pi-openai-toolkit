@@ -1,0 +1,8 @@
+coverage/
+node_modules/
+*.tgz
+
+# Local Trellis workflow files
+/.trellis/
+/.agents/
+/AGENTS.md
