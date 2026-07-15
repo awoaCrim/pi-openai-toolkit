@@ -1,6 +1,6 @@
 {
   "name": "@lll9p/pi-better-compaction",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "Better compaction for pi: native /responses/compact replay for OpenAI Responses APIs, plus a configurable compaction model driving pi's native summarization everywhere else.",
   "author": "Lilin Lao",
@@ -14,7 +14,8 @@
   },
   "homepage": "https://github.com/lll9p/pi-better-compaction#readme",
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "keywords": [
     "pi-package",
