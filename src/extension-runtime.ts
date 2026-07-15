@@ -105,7 +105,7 @@ async function runResponsesNativeCompact(
 		baseUrl: runtime.baseUrl,
 	});
 
-	let requestSource: "session-context" | "latest-native-replay";
+	let requestSource: "session-context" | "non-native-session-context" | "latest-native-replay";
 	let request: NativeCompactionRequestBody;
 	if (latestNativeCompaction.ok) {
 		const liveTailEntries = branchEntries.slice(latestNativeCompaction.index + 1);
@@ -119,8 +119,13 @@ async function runResponsesNativeCompact(
 			input,
 			instructions,
 		};
-	} else if (latestNativeCompaction.reason === "no-compaction") {
-		requestSource = "session-context";
+	} else if (
+		latestNativeCompaction.reason === "no-compaction" ||
+		(latestNativeCompaction.reason === "latest-compaction-not-native" &&
+			config.allowCompactionContinuityBreak)
+	) {
+		requestSource =
+			latestNativeCompaction.reason === "no-compaction" ? "session-context" : "non-native-session-context";
 		request = serializeMessagesToCompactRequest({
 			model: runtime.currentModel,
 			messages: ctx.sessionManager.buildSessionContext().messages,

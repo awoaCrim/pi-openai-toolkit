@@ -32,6 +32,11 @@ export type DebugArtifactKind =
 export type ExtensionConfig = {
 	enabled: boolean;
 	/**
+	 * Allow a Responses session whose latest compaction was not created by this extension
+	 * to restart native compaction from Pi's current serialized session context.
+	 */
+	allowCompactionContinuityBreak: boolean;
+	/**
 	 * "provider/model-id" used for native-method fallback compaction (non-Responses APIs,
 	 * or when the compact endpoint fails). Unset = current model via pi's default path.
 	 */
@@ -284,6 +289,7 @@ export function createNativeCompactionResult(
 
 export const DEFAULT_EXTENSION_CONFIG: ExtensionConfig = {
 	enabled: true,
+	allowCompactionContinuityBreak: false,
 	compactionModel: undefined,
 	compactionThinkingLevel: "off",
 	responsesCompactApis: [...RESPONSES_COMPACT_CAPABLE_APIS],

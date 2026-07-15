@@ -30,6 +30,7 @@ describe("loadExtensionConfig", () => {
 		expect(loaded.source).toBeUndefined();
 		expect(loaded.warnings).toEqual([]);
 		expect(loaded.config.enabled).toBe(true);
+		expect(loaded.config.allowCompactionContinuityBreak).toBe(false);
 		expect(loaded.config.compactionModel).toBeUndefined();
 		expect(loaded.config.compactionThinkingLevel).toBe("off");
 		expect(loaded.config.responsesCompactApis).toEqual([...DEFAULT_EXTENSION_CONFIG.responsesCompactApis]);
@@ -39,6 +40,7 @@ describe("loadExtensionConfig", () => {
 		const configPath = writeTempConfig(
 			JSON.stringify({
 				enabled: true,
+				allowCompactionContinuityBreak: true,
 				compactionModel: " google/gemini-2.5-flash ",
 				compactionThinkingLevel: "medium",
 				responsesCompactApis: ["openai-responses"],
@@ -52,6 +54,7 @@ describe("loadExtensionConfig", () => {
 
 		expect(loaded.source).toBe(configPath);
 		expect(loaded.warnings).toEqual([]);
+		expect(loaded.config.allowCompactionContinuityBreak).toBe(true);
 		expect(loaded.config.compactionModel).toBe("google/gemini-2.5-flash");
 		expect(loaded.config.compactionThinkingLevel).toBe("medium");
 		expect(loaded.config.responsesCompactApis).toEqual(["openai-responses"]);
@@ -72,6 +75,7 @@ describe("loadExtensionConfig", () => {
 		const configPath = writeTempConfig(
 			JSON.stringify({
 				enabled: "yes",
+				allowCompactionContinuityBreak: "yes",
 				compactionModel: 42,
 				compactionThinkingLevel: "ultra",
 				responsesCompactApis: ["openai-responses", "anthropic-messages"],
@@ -82,11 +86,12 @@ describe("loadExtensionConfig", () => {
 		const loaded = loadExtensionConfig(configPath);
 
 		expect(loaded.config.enabled).toBe(true);
+		expect(loaded.config.allowCompactionContinuityBreak).toBe(false);
 		expect(loaded.config.compactionModel).toBeUndefined();
 		expect(loaded.config.compactionThinkingLevel).toBe("off");
 		// The valid entry is kept; the incapable API is dropped with a warning.
 		expect(loaded.config.responsesCompactApis).toEqual(["openai-responses"]);
-		expect(loaded.warnings.length).toBe(5);
+		expect(loaded.warnings.length).toBe(6);
 	});
 
 	test("malformed JSON warns and yields defaults", () => {
