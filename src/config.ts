@@ -117,6 +117,9 @@ export function loadExtensionConfig(configPath: string = CONFIG_PATH): LoadedExt
 		source = configPath;
 
 		resolved.enabled = toBoolean(raw.enabled, "enabled", warnings) ?? resolved.enabled;
+		resolved.allowCompactionContinuityBreak =
+			toBoolean(raw.allowCompactionContinuityBreak, "allowCompactionContinuityBreak", warnings) ??
+			resolved.allowCompactionContinuityBreak;
 		resolved.notifyOnLoad = toBoolean(raw.notifyOnLoad, "notifyOnLoad", warnings) ?? resolved.notifyOnLoad;
 		resolved.debug = toBoolean(raw.debug, "debug", warnings) ?? resolved.debug;
 		resolved.logProviderPayloads =

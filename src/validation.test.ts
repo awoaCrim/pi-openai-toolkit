@@ -622,6 +622,58 @@ test("session_before_compact falls through to the configured-model fallback when
 	expect(fallbackCalls).toHaveLength(1);
 });
 
+test("continuity-break opt-in restarts native compaction from Pi's current session context", async () => {
+	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
+		config: { allowCompactionContinuityBreak: true },
+	});
+	const model = { ...defaultModel };
+	const olderUser = createUserEntry("older_recovery_user", "Context retained by Pi after its earlier compaction.");
+	const nonNativeCompaction: TestSessionEntry = {
+		type: "compaction",
+		id: "non_native_recovery_compaction",
+		timestamp: nextTimestamp(),
+		summary: "Legacy Pi summary used as the recovery baseline",
+		firstKeptEntryId: olderUser.id,
+		tokensBefore: 512,
+	};
+	const currentUser = createUserEntry("current_recovery_user", "Continue from the compacted Pi session.");
+	const sessionContextMessages = [
+		createCompactionSummaryMessage(nonNativeCompaction),
+		toReplayMessage(olderUser),
+		toReplayMessage(currentUser),
+	];
+	const event = {
+		signal: new AbortController().signal,
+		customInstructions: undefined,
+		preparation: {
+			tokensBefore: 768,
+			firstKeptEntryId: currentUser.id,
+			previousSummary: nonNativeCompaction.summary,
+			messagesToSummarize: [],
+			turnPrefixMessages: [],
+		},
+	};
+
+	const result = (await sessionBeforeCompact(
+		event,
+		createContext({
+			branchEntries: [olderUser, nonNativeCompaction, currentUser],
+			model,
+			systemPrompt: "Current instructions for continuity recovery",
+			sessionContextMessages,
+		}),
+	)) as { compaction: Record<string, unknown> };
+
+	expect(compactCalls).toHaveLength(1);
+	expect(fallbackCalls).toHaveLength(0);
+	const compactRequest = compactCalls[0]?.request as { model: string; instructions: string; input: unknown[] };
+	expect(compactRequest.model).toBe(model.id);
+	expect(compactRequest.instructions).toBe("Current instructions for continuity recovery");
+	expect(compactRequest.input).toEqual(await serializeResponsesInput(model, sessionContextMessages));
+	expect(JSON.stringify(compactRequest.input)).toContain("Legacy Pi summary used as the recovery baseline");
+	expect(result.compaction.firstKeptEntryId).toBe(currentUser.id);
+});
+
 test("first post-compaction turn rewrites to fresh preamble + opaque compacted window + live tail without duplication", async () => {
 	const { beforeProviderRequest } = await loadHookHarness();
 	const model = { ...defaultModel };
