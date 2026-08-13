@@ -1,9 +1,10 @@
 import type { ResponsesCompatibleRequestPayload } from "./runtime";
 
 /**
- * Fields the latest codex_rs CompactionInput accepts beyond model/input/instructions.
- * The compact endpoint has no payload of its own at session_before_compact time, so we
- * mirror them from the most recent live provider request for the same model/session.
+ * Explicit allowlist of fields mirrored from the latest live Responses request.
+ * remote_compaction_v2 has no provider payload at session_before_compact time, so
+ * the extension reuses only these compact-relevant fields for the same runtime identity.
+ * `stream`, `store`, `input`, and trigger semantics are always forced separately.
  */
 export type CompactionRequestExtras = {
 	tools?: unknown[];
@@ -14,9 +15,16 @@ export type CompactionRequestExtras = {
 	text?: Record<string, unknown>;
 };
 
-type CachedRequestContext = {
+export type RequestContextIdentity = {
+	provider: string;
+	api: string;
 	model: string;
+	baseUrl: string;
 	sessionId?: string;
+};
+
+type CachedRequestContext = {
+	identity: RequestContextIdentity;
 	extras: CompactionRequestExtras;
 };
 
@@ -26,13 +34,31 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+function sameIdentity(cachedIdentity: RequestContextIdentity, current: RequestContextIdentity): boolean {
+	return (
+		cachedIdentity.provider === current.provider &&
+		cachedIdentity.api === current.api &&
+		cachedIdentity.model === current.model &&
+		cachedIdentity.baseUrl === current.baseUrl &&
+		cachedIdentity.sessionId === current.sessionId
+	);
+}
+
 /**
  * Remember compact-relevant fields from a live Responses request payload.
  * Purely additive metadata: failures are swallowed so caching can never
  * break the provider request path.
  */
-export function rememberRequestContext(payload: ResponsesCompatibleRequestPayload, sessionId?: string): void {
+export function rememberRequestContext(
+	payload: ResponsesCompatibleRequestPayload,
+	identity: RequestContextIdentity,
+): void {
 	try {
+		if (payload.model !== identity.model) {
+			cached = undefined;
+			return;
+		}
+
 		const extras: CompactionRequestExtras = {};
 		if (Array.isArray(payload.tools)) {
 			extras.tools = structuredClone(payload.tools);
@@ -54,8 +80,7 @@ export function rememberRequestContext(payload: ResponsesCompatibleRequestPayloa
 		}
 
 		cached = {
-			model: payload.model,
-			sessionId,
+			identity: structuredClone(identity),
 			extras,
 		};
 	} catch {
@@ -63,12 +88,9 @@ export function rememberRequestContext(payload: ResponsesCompatibleRequestPayloa
 	}
 }
 
-/** Return cached extras when they were captured for the same model (and session, when known). */
-export function getCompactionRequestExtras(model: string, sessionId?: string): CompactionRequestExtras | undefined {
-	if (!cached || cached.model !== model) {
-		return undefined;
-	}
-	if (cached.sessionId !== undefined && sessionId !== undefined && cached.sessionId !== sessionId) {
+/** Return cached extras only for the exact provider/API/model/base URL/session identity. */
+export function getCompactionRequestExtras(identity: RequestContextIdentity): CompactionRequestExtras | undefined {
+	if (!cached || !sameIdentity(cached.identity, identity)) {
 		return undefined;
 	}
 

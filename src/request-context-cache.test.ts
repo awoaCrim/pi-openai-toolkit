@@ -3,7 +3,16 @@ import {
 	clearRequestContextCache,
 	getCompactionRequestExtras,
 	rememberRequestContext,
+	type RequestContextIdentity,
 } from "./request-context-cache";
+
+const identity: RequestContextIdentity = {
+	provider: "openai",
+	api: "openai-responses",
+	model: "gpt-5-mini",
+	baseUrl: "https://api.example.com/v1",
+	sessionId: "session-1",
+};
 
 beforeEach(() => {
 	clearRequestContextCache();
@@ -27,10 +36,10 @@ describe("request context cache", () => {
 				prompt_cache_key: "session-1",
 				text: { verbosity: "low" },
 			},
-			"session-1",
+			identity,
 		);
 
-		const extras = getCompactionRequestExtras("gpt-5-mini", "session-1");
+		const extras = getCompactionRequestExtras(identity);
 		expect(extras).toEqual({
 			tools: [{ type: "function", name: "read" }],
 			parallel_tool_calls: true,
@@ -44,44 +53,49 @@ describe("request context cache", () => {
 		expect(extras && "tool_choice" in extras).toBe(false);
 	});
 
-	test("misses when the model differs", () => {
-		rememberRequestContext({ model: "gpt-5-mini", input: [], reasoning: { effort: "low" } }, "session-1");
+	test("misses when the runtime identity differs", () => {
+		rememberRequestContext({ model: identity.model, input: [], reasoning: { effort: "low" } }, identity);
 
-		expect(getCompactionRequestExtras("gpt-5.1", "session-1")).toBeUndefined();
+		expect(getCompactionRequestExtras({ ...identity, provider: "proxy" })).toBeUndefined();
+		expect(getCompactionRequestExtras({ ...identity, api: "openai-codex-responses" })).toBeUndefined();
+		expect(getCompactionRequestExtras({ ...identity, model: "gpt-5.1" })).toBeUndefined();
+		expect(getCompactionRequestExtras({ ...identity, baseUrl: "https://other.example.com/v1" })).toBeUndefined();
+		expect(getCompactionRequestExtras({ ...identity, sessionId: "session-2" })).toBeUndefined();
 	});
 
-	test("misses when the session differs", () => {
-		rememberRequestContext({ model: "gpt-5-mini", input: [], reasoning: { effort: "low" } }, "session-1");
+	test("requires matching absence of a session id", () => {
+		const noSession = { ...identity, sessionId: undefined };
+		rememberRequestContext({ model: identity.model, input: [], parallel_tool_calls: false }, noSession);
 
-		expect(getCompactionRequestExtras("gpt-5-mini", "session-2")).toBeUndefined();
+		expect(getCompactionRequestExtras(noSession)).toEqual({ parallel_tool_calls: false });
+		expect(getCompactionRequestExtras(identity)).toBeUndefined();
 	});
 
-	test("matches when either side has no session id", () => {
-		rememberRequestContext({ model: "gpt-5-mini", input: [], parallel_tool_calls: false });
+	test("drops payloads whose model disagrees with the identity", () => {
+		rememberRequestContext({ model: "gpt-5.1", input: [], reasoning: { effort: "low" } }, identity);
 
-		expect(getCompactionRequestExtras("gpt-5-mini", "session-1")).toEqual({ parallel_tool_calls: false });
-		expect(getCompactionRequestExtras("gpt-5-mini")).toEqual({ parallel_tool_calls: false });
+		expect(getCompactionRequestExtras(identity)).toBeUndefined();
 	});
 
 	test("returns isolated clones so later mutation cannot corrupt the cache", () => {
-		rememberRequestContext({ model: "gpt-5-mini", input: [], tools: [{ name: "read" }] });
+		rememberRequestContext({ model: identity.model, input: [], tools: [{ name: "read" }] }, identity);
 
-		const first = getCompactionRequestExtras("gpt-5-mini");
+		const first = getCompactionRequestExtras(identity);
 		(first!.tools![0] as Record<string, unknown>).name = "mutated";
 
-		expect(getCompactionRequestExtras("gpt-5-mini")).toEqual({ tools: [{ name: "read" }] });
+		expect(getCompactionRequestExtras(identity)).toEqual({ tools: [{ name: "read" }] });
 	});
 
 	test("empty extras are still valid (payload had none of the fields)", () => {
-		rememberRequestContext({ model: "gpt-5-mini", input: [] });
+		rememberRequestContext({ model: identity.model, input: [] }, identity);
 
-		expect(getCompactionRequestExtras("gpt-5-mini")).toEqual({});
+		expect(getCompactionRequestExtras(identity)).toEqual({});
 	});
 
 	test("clearRequestContextCache empties the cache", () => {
-		rememberRequestContext({ model: "gpt-5-mini", input: [], parallel_tool_calls: true });
+		rememberRequestContext({ model: identity.model, input: [], parallel_tool_calls: true }, identity);
 		clearRequestContextCache();
 
-		expect(getCompactionRequestExtras("gpt-5-mini")).toBeUndefined();
+		expect(getCompactionRequestExtras(identity)).toBeUndefined();
 	});
 });

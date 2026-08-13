@@ -1,17 +1,22 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { CompactionEntry, CompactionResult, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-export const EXTENSION_ID = "pi-better-compaction";
-export const DEFAULT_ARTIFACT_ROOT = "~/.pi/agent/artifacts/pi-better-compaction";
+export const EXTENSION_ID = "pi-better-compaction-v2";
+export const DEFAULT_ARTIFACT_ROOT = "~/.pi/agent/artifacts/pi-better-compaction-v2";
 export const REDACTED_VALUE = "[REDACTED]";
 /**
  * APIs the extension knows how to build a `/responses/compact` URL for.
  * `responsesCompactApis` in config.json may only narrow this set.
  */
 export const RESPONSES_COMPACT_CAPABLE_APIS = ["openai-responses", "openai-codex-responses"] as const;
-export const NATIVE_COMPACTION_STRATEGY = "openai-native-compact-v1";
-/** Used as CompactionEntry.summary only when no summary text could be extracted from the compact response. */
-export const NATIVE_COMPACTION_FALLBACK_SUMMARY = "[OpenAI native compaction checkpoint]";
+export const LEGACY_NATIVE_COMPACTION_STRATEGY = "openai-native-compact-v1";
+export const REMOTE_V2_COMPACTION_STRATEGY = "openai-remote-compaction-v2";
+export const NATIVE_COMPACTION_STRATEGY = REMOTE_V2_COMPACTION_STRATEGY;
+/**
+ * Pi currently requires CompactionResult.summary to be text. This marker is only a
+ * replay shim; the provider receives the opaque item from details.compactedWindow.
+ */
+export const NATIVE_COMPACTION_FALLBACK_SUMMARY = "[OpenAI remote v2 opaque compaction checkpoint]";
 
 export const THINKING_LEVELS: readonly ThinkingLevel[] = [
 	"off",
@@ -96,7 +101,9 @@ export type RedactOptions = {
 	placeholder?: string;
 };
 
-export type NativeCompactionStrategy = typeof NATIVE_COMPACTION_STRATEGY;
+export type NativeCompactionStrategy =
+	| typeof LEGACY_NATIVE_COMPACTION_STRATEGY
+	| typeof REMOTE_V2_COMPACTION_STRATEGY;
 
 export type NativeCompactionRequestMeta = {
 	tokensBefore?: number;
@@ -235,18 +242,19 @@ export function isNativeCompactionIdentity(value: unknown): value is NativeCompa
 }
 
 export function isNativeCompactionDetails(value: unknown): value is NativeCompactionDetails {
-	if (!isRecord(value)) {
+	if (!isRecord(value) || !isNativeCompactionIdentity(value)) {
 		return false;
 	}
 
+	const candidate = value as Record<string, unknown>;
 	return (
-		value.strategy === NATIVE_COMPACTION_STRATEGY &&
-		isNativeCompactionIdentity(value) &&
-		Array.isArray(value.compactedWindow) &&
-		value.compactedWindow.every(isCompactedWindowItem) &&
-		isNonEmptyString(value.createdAt) &&
-		(value.compactResponseId === undefined || isNonEmptyString(value.compactResponseId)) &&
-		(value.requestMeta === undefined || isNativeCompactionRequestMeta(value.requestMeta))
+		(candidate.strategy === LEGACY_NATIVE_COMPACTION_STRATEGY ||
+			candidate.strategy === REMOTE_V2_COMPACTION_STRATEGY) &&
+		Array.isArray(candidate.compactedWindow) &&
+		candidate.compactedWindow.every(isCompactedWindowItem) &&
+		isNonEmptyString(candidate.createdAt) &&
+		(candidate.compactResponseId === undefined || isNonEmptyString(candidate.compactResponseId)) &&
+		(candidate.requestMeta === undefined || isNativeCompactionRequestMeta(candidate.requestMeta))
 	);
 }
 

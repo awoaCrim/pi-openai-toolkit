@@ -7,22 +7,24 @@ import {
 	REDACTED_VALUE,
 	type ArtifactContext,
 	type ArtifactPaths,
+	type ArtifactSessionInfo,
 	type DebugArtifactEnvelope,
 	type DebugArtifactKind,
 	type ExtensionConfig,
 	type RedactOptions,
 } from "./types";
 
-const SENSITIVE_KEY_RE = /(authorization|api[-_]?key|token|secret|password|cookie|set-cookie|signature|credential|oauth|auth)/i;
+const SENSITIVE_KEY_RE = /(authorization|api[-_]?key|token|secret|password|cookie|set-cookie|signature|credential|oauth|auth|encrypted[_-]?content)/i;
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._\-+/=]+/gi;
 const OPENAI_KEY_RE = /\bsk-[A-Za-z0-9\-_]+\b/g;
 const HEADER_TOKEN_RE = /\b(x-api-key|api-key|authorization)\b\s*[:=]\s*[^\s,;]+/gi;
+const SENSITIVE_QUERY_RE = /([?&](?:api[-_]?key|access[-_]?token|token|secret|signature|credential|password)=)[^&#\s]*/gi;
 
 function ensureDir(dirPath: string) {
 	fs.mkdirSync(dirPath, { recursive: true });
 }
 
-function toSessionInfo(context: ArtifactContext) {
+function toSessionInfo(context: ArtifactContext): ArtifactSessionInfo {
 	const maybeExtensionContext = context as Pick<ExtensionContext, "cwd" | "sessionManager">;
 	const sessionManager = maybeExtensionContext.sessionManager;
 	if (sessionManager) {
@@ -46,7 +48,8 @@ function redactInlineSecrets(value: string, placeholder: string): string {
 	return value
 		.replace(BEARER_RE, `Bearer ${placeholder}`)
 		.replace(OPENAI_KEY_RE, placeholder)
-		.replace(HEADER_TOKEN_RE, (_match, key: string) => `${key}: ${placeholder}`);
+		.replace(HEADER_TOKEN_RE, (_match, key: string) => `${key}: ${placeholder}`)
+		.replace(SENSITIVE_QUERY_RE, (_match, prefix: string) => `${prefix}${placeholder}`);
 }
 
 function shouldRedactKey(key: string): boolean {

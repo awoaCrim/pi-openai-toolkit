@@ -37,9 +37,37 @@ describe("resolveNativeCompactionEnvironment", () => {
 				headers: {
 					"x-test-request-header": "present",
 				},
+				responsesPath: "responses",
+				responsesUrl: "https://example.com/v1/responses",
 				compactPath: "responses/compact",
 				compactUrl: "https://example.com/v1/responses/compact",
 			}),
+		});
+	});
+
+	test("returns auth-resolution-failed when credential lookup throws", async () => {
+		const resolution = await resolveNativeCompactionEnvironment({
+			model: {
+				provider: "openai",
+				api: "openai-responses",
+				id: "gpt-5.4",
+				baseUrl: "https://example.com/v1",
+			},
+			modelRegistry: {
+				async getApiKeyAndHeaders() {
+					throw new Error("credential lookup failed");
+				},
+			},
+		} as any);
+
+		expect(resolution).toEqual({
+			ok: false,
+			reason: "auth-resolution-failed",
+			errorMessage: "credential lookup failed",
+			provider: "openai",
+			api: "openai-responses",
+			model: "gpt-5.4",
+			baseUrl: "https://example.com/v1",
 		});
 	});
 
@@ -109,6 +137,8 @@ describe("resolveNativeCompactionEnvironment", () => {
 				headers: {
 					"x-proxy-header": "proxy-value",
 				},
+				responsesPath: "responses",
+				responsesUrl: "https://proxy.example.com/v1/responses",
 				compactPath: "responses/compact",
 				compactUrl: "https://proxy.example.com/v1/responses/compact",
 			}),
