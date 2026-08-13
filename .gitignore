@@ -1,5 +1,6 @@
 coverage/
 node_modules/
+.pi/
 *.tgz
 
 # Local Trellis workflow files

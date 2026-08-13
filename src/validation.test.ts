@@ -353,8 +353,8 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 		},
 	}));
 
-	mock.module("./compact-client", () => ({
-		executeNativeCompaction: async (args: Record<string, unknown>) => {
+	mock.module("./remote-v2-client", () => ({
+		executeRemoteV2Compaction: async (args: Record<string, unknown>) => {
 			compactCalls.push(args);
 			return (
 				options.compactResult ?? {
@@ -1064,16 +1064,9 @@ test("non-Responses model routes straight to the native-method fallback", async 
 	expect(result.compaction).toEqual(fallbackResult);
 });
 
-test("responses compact stores the extracted assistant summary text as the entry summary", async () => {
+test("remote v2 stores an opaque checkpoint marker instead of inventing a readable summary", async () => {
 	const compactedWindow = [
 		{ type: "compaction", encrypted_content: "opaque" },
-		{
-			type: "message",
-			role: "assistant",
-			status: "completed",
-			id: "cmp_summary",
-			content: [{ type: "output_text", text: "Compaction covered the auth refactor.", annotations: [] }],
-		},
 	];
 	const { sessionBeforeCompact } = await loadHookHarness({
 		compactResult: {
@@ -1082,8 +1075,7 @@ test("responses compact stores the extracted assistant summary text as the entry
 			compactedWindow,
 			compactResponseId: "resp_summary",
 			createdAt: nextTimestamp(),
-			summaryText: "Compaction covered the auth refactor.",
-			response: { id: "resp_summary", output: compactedWindow },
+			response: { id: "resp_summary", status: "completed", output: compactedWindow },
 		},
 	});
 	const model = { ...defaultModel };
@@ -1105,5 +1097,5 @@ test("responses compact stores the extracted assistant summary text as the entry
 		createContext({ model, sessionContextMessages: [toReplayMessage(user)] }),
 	)) as { compaction: Record<string, unknown> };
 
-	expect(result.compaction.summary).toBe("Compaction covered the auth refactor.");
+	expect(result.compaction.summary).toBe(NATIVE_COMPACTION_FALLBACK_SUMMARY);
 });

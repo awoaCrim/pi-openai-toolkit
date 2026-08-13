@@ -272,13 +272,12 @@ function transformMessagesForResponses(messages: Message[]): Message[] {
 				continue;
 			}
 
-			const normalizedContent = message.content.flatMap((block) => {
-				if (block.type !== "thinking") {
-					return [block];
+			const normalizedContent: AssistantMessage["content"] = [];
+			for (const block of message.content) {
+				if (block.type !== "thinking" || block.thinkingSignature) {
+					normalizedContent.push(block);
 				}
-
-				return block.thinkingSignature ? [block] : [];
-			});
+			}
 
 			const normalizedAssistantMessage: AssistantMessage = {
 				...message,

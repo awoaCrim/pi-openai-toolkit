@@ -425,7 +425,15 @@ function buildNativeReplaySegmentsInternal<TApi extends Api>(args: {
 		};
 	}
 
-	const compactedWindow = cloneOpaqueCompactedWindow(args.compactionEntry.details.compactedWindow);
+	const details = args.compactionEntry.details;
+	if (!details) {
+		return {
+			ok: false,
+			reason: "invalid-compacted-window",
+		};
+	}
+
+	const compactedWindow = cloneOpaqueCompactedWindow(details.compactedWindow);
 	if (!compactedWindow) {
 		return {
 			ok: false,

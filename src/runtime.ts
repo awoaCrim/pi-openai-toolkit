@@ -2,6 +2,8 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { RESPONSES_COMPACT_CAPABLE_APIS } from "./types";
 
+const OPENAI_RESPONSES_PATH = "responses";
+const CODEX_RESPONSES_PATH = "codex/responses";
 const OPENAI_COMPACT_PATH = "responses/compact";
 const CODEX_COMPACT_PATH = "codex/responses/compact";
 
@@ -15,6 +17,7 @@ type NativeCompactionFailureReason =
 	| "unsupported-api"
 	| "missing-base-url"
 	| "missing-api-key"
+	| "auth-resolution-failed"
 	| "unsupported-payload"
 	| "payload-model-mismatch";
 
@@ -38,6 +41,8 @@ export type NativeCompactionRuntime = {
 	baseUrl: string;
 	apiKey: string;
 	headers?: Record<string, string>;
+	responsesPath: string;
+	responsesUrl: string;
 	compactPath: string;
 	compactUrl: string;
 	payload?: ResponsesCompatibleRequestPayload;
@@ -51,6 +56,7 @@ export type NativeCompactionEnvironmentFailure = {
 	api?: string;
 	model?: string;
 	baseUrl?: string;
+	errorMessage?: string;
 };
 
 export type NativeCompactionEnvironmentSuccess = {
@@ -74,23 +80,36 @@ export function normalizeBaseUrl(baseUrl: string | undefined | null): string | u
 	return normalized ? normalized : undefined;
 }
 
-function buildOpenAICompactUrl(baseUrl: string): string {
+function buildOpenAIResponsesUrl(baseUrl: string): string {
 	const normalized = normalizeBaseUrl(baseUrl) ?? baseUrl;
-	if (normalized.endsWith("/responses")) {
-		return `${normalized}/compact`;
+	return normalized.endsWith("/responses") ? normalized : `${normalized}/${OPENAI_RESPONSES_PATH}`;
+}
+
+function buildCodexResponsesUrl(baseUrl: string): string {
+	const normalized = normalizeBaseUrl(baseUrl) ?? baseUrl;
+	if (normalized.endsWith("/codex/responses")) {
+		return normalized;
 	}
-	return `${normalized}/${OPENAI_COMPACT_PATH}`;
+	if (normalized.endsWith("/codex")) {
+		return `${normalized}/responses`;
+	}
+	return `${normalized}/${CODEX_RESPONSES_PATH}`;
+}
+
+function buildOpenAICompactUrl(baseUrl: string): string {
+	return `${buildOpenAIResponsesUrl(baseUrl)}/compact`;
 }
 
 function buildCodexCompactUrl(baseUrl: string): string {
-	const normalized = normalizeBaseUrl(baseUrl) ?? baseUrl;
-	if (normalized.endsWith("/codex/responses")) {
-		return `${normalized}/compact`;
-	}
-	if (normalized.endsWith("/codex")) {
-		return `${normalized}/responses/compact`;
-	}
-	return `${normalized}/${CODEX_COMPACT_PATH}`;
+	return `${buildCodexResponsesUrl(baseUrl)}/compact`;
+}
+
+export function buildResponsesUrl(baseUrl: string, api: ResponsesCompactApi): string {
+	return api === "openai-codex-responses" ? buildCodexResponsesUrl(baseUrl) : buildOpenAIResponsesUrl(baseUrl);
+}
+
+export function buildResponsesPath(api: ResponsesCompactApi): string {
+	return api === "openai-codex-responses" ? CODEX_RESPONSES_PATH : OPENAI_RESPONSES_PATH;
 }
 
 export function buildCompactUrl(baseUrl: string, api: ResponsesCompactApi): string {
@@ -214,7 +233,19 @@ export async function resolveNativeCompactionEnvironment(
 		requestPayload = payload;
 	}
 
-	const { apiKey, headers } = await resolveRequestAuth(ctx, currentModel);
+	let auth: { apiKey?: string; headers?: Record<string, string> };
+	try {
+		auth = await resolveRequestAuth(ctx, currentModel);
+	} catch (error) {
+		return {
+			ok: false,
+			reason: "auth-resolution-failed",
+			errorMessage: error instanceof Error ? error.message : String(error),
+			...descriptor,
+		};
+	}
+
+	const { apiKey, headers } = auth;
 	if (!apiKey) {
 		return {
 			ok: false,
@@ -232,6 +263,8 @@ export async function resolveNativeCompactionEnvironment(
 			baseUrl: descriptor.baseUrl,
 			apiKey,
 			headers,
+			responsesPath: buildResponsesPath(descriptor.api),
+			responsesUrl: buildResponsesUrl(descriptor.baseUrl, descriptor.api),
 			compactPath: buildCompactPath(descriptor.api),
 			compactUrl: buildCompactUrl(descriptor.baseUrl, descriptor.api),
 			payload: requestPayload,

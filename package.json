@@ -1,18 +1,19 @@
 {
-  "name": "@lll9p/pi-better-compaction",
-  "version": "0.2.1",
+  "name": "pi-remote-compact",
+  "version": "0.3.0",
+  "private": false,
   "type": "module",
-  "description": "Better compaction for pi: native /responses/compact replay for OpenAI Responses APIs, plus a configurable compaction model driving pi's native summarization everywhere else.",
-  "author": "Lilin Lao",
+  "description": "Pi extension using remote_compaction_v2 over Responses SSE with opaque replay and native fallback.",
+  "author": "awoaCrim and contributors",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lll9p/pi-better-compaction.git"
+    "url": "git+https://github.com/awoaCrim/pi-remote-compact.git"
   },
   "bugs": {
-    "url": "https://github.com/lll9p/pi-better-compaction/issues"
+    "url": "https://github.com/awoaCrim/pi-remote-compact/issues"
   },
-  "homepage": "https://github.com/lll9p/pi-better-compaction#readme",
+  "homepage": "https://github.com/awoaCrim/pi-remote-compact#readme",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
@@ -39,22 +40,30 @@
     "src/extension-runtime.ts",
     "src/native-fallback.ts",
     "src/payload-rewrite.ts",
+    "src/remote-v2-client.ts",
     "src/request-context-cache.ts",
     "src/runtime.ts",
     "src/serializer.ts",
     "src/supported-environment.ts",
     "src/types.ts",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "tsconfig.check.json"
   ],
   "scripts": {
     "test": "bun test",
     "test:coverage": "bun test --coverage --coverage-reporter=text --coverage-reporter=lcov && node ./scripts/check-lcov.mjs ./coverage/lcov.info",
-    "test:pi": "bun test ./test/pi-smoke.test.ts"
+    "test:pi": "bun test ./test/pi-smoke.test.ts",
+    "typecheck": "tsc -p tsconfig.check.json"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": ">=0.80.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.4",
+    "bun": "1.2.23",
+    "typescript": "5.9.3"
   }
 }

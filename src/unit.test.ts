@@ -1,6 +1,8 @@
 import { afterEach, expect, mock, test } from "bun:test";
 import { executeNativeCompaction, extractCompactedSummaryText } from "./compact-client";
-import { buildCompactUrl } from "./runtime";
+import { redactValue } from "./debug";
+import { executeRemoteV2Compaction } from "./remote-v2-client";
+import { buildCompactUrl, buildResponsesUrl } from "./runtime";
 
 const baseModel = {
 	provider: "openai",
@@ -41,7 +43,28 @@ afterEach(() => {
 	mock.restore();
 });
 
-test("buildCompactUrl uses codex compact path for openai-codex responses", () => {
+test("debug redaction hides opaque content and sensitive URL query parameters", () => {
+	expect(
+		redactValue({
+			encrypted_content: "opaque-secret",
+			url: "https://proxy.example/v1/responses?api_key=query-secret&mode=v2",
+		}),
+	).toEqual({
+		encrypted_content: "[REDACTED]",
+		url: "https://proxy.example/v1/responses?api_key=[REDACTED]&mode=v2",
+	});
+});
+
+test("buildCompactUrl and buildResponsesUrl select OpenAI/Codex paths", () => {
+	expect(buildResponsesUrl("https://api.openai.com/v1", "openai-responses")).toBe(
+		"https://api.openai.com/v1/responses",
+	);
+	expect(buildResponsesUrl("https://api.openai.com/v1/responses", "openai-responses")).toBe(
+		"https://api.openai.com/v1/responses",
+	);
+	expect(buildResponsesUrl("https://chatgpt.com/backend-api", "openai-codex-responses")).toBe(
+		"https://chatgpt.com/backend-api/codex/responses",
+	);
 	expect(buildCompactUrl("https://api.openai.com/v1", "openai-responses")).toBe(
 		"https://api.openai.com/v1/responses/compact",
 	);
@@ -78,6 +101,8 @@ test("executeNativeCompaction propagates resolved request headers and codex auth
 				"x-test-model-header": "present",
 				"x-test-runtime-header": "resolved",
 			},
+			responsesPath: "codex/responses",
+			responsesUrl: buildResponsesUrl("https://chatgpt.com/backend-api", "openai-codex-responses"),
 			compactPath: "codex/responses/compact",
 			compactUrl: buildCompactUrl("https://chatgpt.com/backend-api", "openai-codex-responses"),
 			currentModel: {
@@ -106,6 +131,97 @@ test("executeNativeCompaction propagates resolved request headers and codex auth
 	expect(headers.get("originator")).toBe("pi");
 	expect(headers.get("openai-beta")).toBe("responses=experimental");
 	expect(headers.get("content-type")).toBe("application/json");
+});
+
+test("executeRemoteV2Compaction sends a trigger and accepts exactly one completed opaque item", async () => {
+	let requestBody: Record<string, unknown> = {};
+	const opaque = { type: "compaction", id: "cmp_v2", encrypted_content: "opaque-v2" };
+	globalThis.fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
+		expect(String(url)).toBe("https://proxy.example.com/v1/responses");
+		requestBody = JSON.parse(String(init?.body));
+		return new Response(
+			[
+				`event: response.created\ndata: ${JSON.stringify({ type: "response.created", response: { id: "resp_v2", status: "in_progress", output: [] } })}`,
+				`event: keepalive\ndata: ${JSON.stringify({ type: "keepalive" })}`,
+				`event: response.output_item.done\ndata: ${JSON.stringify({ type: "response.output_item.done", item: opaque })}`,
+				`event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { id: "resp_v2", created_at: 1_800_000_000, status: "completed", output: [opaque], usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 } } })}`,
+			].join("\n\n"),
+			{ status: 200, headers: { "content-type": "text/event-stream" } },
+		);
+	}) as typeof fetch;
+
+	const result = await executeRemoteV2Compaction({
+		runtime: {
+			provider: "custom-newapi",
+			api: "openai-responses",
+			model: "gpt-5.6-luna",
+			baseUrl: "https://proxy.example.com/v1",
+			apiKey: "sk-test",
+			responsesPath: "responses",
+			responsesUrl: buildResponsesUrl("https://proxy.example.com/v1", "openai-responses"),
+			compactPath: "responses/compact",
+			compactUrl: buildCompactUrl("https://proxy.example.com/v1", "openai-responses"),
+			currentModel: { ...baseModel, provider: "custom-newapi", id: "gpt-5.6-luna", name: "gpt-5.6-luna", baseUrl: "https://proxy.example.com/v1" } as never,
+		},
+		request: {
+			model: "gpt-5.6-luna",
+			instructions: "compact this",
+			input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
+			tools: [{ type: "function", name: "read" }],
+			parallel_tool_calls: true,
+		},
+	});
+
+	expect(result.ok).toBe(true);
+	if (result.ok) {
+		expect(result.compactedWindow).toEqual([opaque]);
+		expect(result.compactResponseId).toBe("resp_v2");
+		expect(result.usage?.total_tokens).toBe(15);
+	}
+	expect(requestBody.stream).toBe(true);
+	expect(requestBody.store).toBe(false);
+	expect(requestBody.input).toEqual([
+		{ role: "user", content: [{ type: "input_text", text: "hello" }] },
+		{ type: "compaction_trigger" },
+	]);
+});
+
+test("executeRemoteV2Compaction rejects missing completed events and malformed opaque items", async () => {
+	const runtime = {
+		provider: "custom-newapi",
+		api: "openai-responses",
+		model: "gpt-5.6-luna",
+		baseUrl: "https://proxy.example.com/v1",
+		apiKey: "sk-test",
+		responsesPath: "responses",
+		responsesUrl: buildResponsesUrl("https://proxy.example.com/v1", "openai-responses"),
+		compactPath: "responses/compact",
+		compactUrl: buildCompactUrl("https://proxy.example.com/v1", "openai-responses"),
+		currentModel: { ...baseModel, provider: "custom-newapi", id: "gpt-5.6-luna", name: "gpt-5.6-luna", baseUrl: "https://proxy.example.com/v1" },
+	} as never;
+	const request = {
+		model: "gpt-5.6-luna",
+		instructions: "compact this",
+		input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
+	} as never;
+
+	globalThis.fetch = mock(async () =>
+		new Response(`event: response.output_item.done\ndata: ${JSON.stringify({ type: "response.output_item.done", item: { type: "compaction", encrypted_content: "opaque" } })}\n\n`, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		}),
+	) as typeof fetch;
+	const missingCompleted = await executeRemoteV2Compaction({ runtime, request });
+	expect(missingCompleted).toEqual(expect.objectContaining({ ok: false, reason: "missing-completed-event" }));
+
+	globalThis.fetch = mock(async () =>
+		new Response(`event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { id: "resp_bad", status: "completed", output: [{ type: "compaction", encrypted_content: "" }] } })}\n\n`, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		}),
+	) as typeof fetch;
+	const malformed = await executeRemoteV2Compaction({ runtime, request });
+	expect(malformed).toEqual(expect.objectContaining({ ok: false, reason: "malformed-compaction-item" }));
 });
 
 test("serializer sanitizes unpaired surrogates in instructions and message content", async () => {
@@ -202,6 +318,8 @@ test("executeNativeCompaction serializes codex-aligned passthrough fields and ex
 			model: "gpt-5-mini",
 			baseUrl: "https://api.openai.com/v1",
 			apiKey: "sk-test",
+			responsesPath: "responses",
+			responsesUrl: buildResponsesUrl("https://api.openai.com/v1", "openai-responses"),
 			compactPath: "responses/compact",
 			compactUrl: buildCompactUrl("https://api.openai.com/v1", "openai-responses"),
 			currentModel: baseModel as never,

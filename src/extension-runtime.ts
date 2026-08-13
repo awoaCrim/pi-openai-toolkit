@@ -5,7 +5,6 @@ import type {
 	ExtensionContext,
 	SessionBeforeCompactEvent,
 } from "@earendil-works/pi-coding-agent";
-import { executeNativeCompaction } from "./compact-client";
 import { loadExtensionConfig } from "./config";
 import { writeDebugArtifact } from "./debug";
 import { resolveLatestNativeCompactionEntry } from "./details-store";
@@ -15,6 +14,7 @@ import {
 	serializeLiveTailToResponsesInput,
 } from "./payload-rewrite";
 import { getCompactionRequestExtras, rememberRequestContext } from "./request-context-cache";
+import { executeRemoteV2Compaction } from "./remote-v2-client";
 import {
 	isResponsesCompatiblePayload,
 	resolveNativeCompactionEnvironment,
@@ -109,9 +109,13 @@ async function runResponsesNativeCompact(
 	let request: NativeCompactionRequestBody;
 	if (latestNativeCompaction.ok) {
 		const liveTailEntries = branchEntries.slice(latestNativeCompaction.index + 1);
+		const details = latestNativeCompaction.entry.details;
+		if (!details) {
+			return { outcome: "failed" };
+		}
 		requestSource = "latest-native-replay";
 		const input: ResponsesInputItem[] = [
-			...(cloneOpaqueWindow(latestNativeCompaction.entry.details.compactedWindow) as ResponsesInputItem[]),
+			...(cloneOpaqueWindow(details.compactedWindow) as ResponsesInputItem[]),
 			...serializeLiveTailToResponsesInput({ model: runtime.currentModel, entries: liveTailEntries }),
 		];
 		request = {
@@ -126,16 +130,23 @@ async function runResponsesNativeCompact(
 	) {
 		requestSource =
 			latestNativeCompaction.reason === "no-compaction" ? "session-context" : "non-native-session-context";
+		const sessionManagerWithContext = ctx.sessionManager as typeof ctx.sessionManager & {
+			buildSessionContext?: () => { messages: Parameters<typeof serializeMessagesToCompactRequest>[0]["messages"] };
+		};
+		const messages = sessionManagerWithContext.buildSessionContext?.().messages ?? [
+			...event.preparation.messagesToSummarize,
+			...event.preparation.turnPrefixMessages,
+		];
 		request = serializeMessagesToCompactRequest({
 			model: runtime.currentModel,
-			messages: ctx.sessionManager.buildSessionContext().messages,
+			messages,
 			instructions,
 		});
 	} else {
 		writeDebugArtifact(
 			"compaction-event",
 			{
-				event: "session_before_compact.responses-compact-skip",
+				event: "session_before_compact.remote-v2-skip",
 				reason: latestNativeCompaction.reason,
 				provider: runtime.provider,
 				api: runtime.api,
@@ -152,12 +163,18 @@ async function runResponsesNativeCompact(
 
 	// Mirror the latest codex_rs CompactionInput fields captured from the most
 	// recent live provider request for this model (tools, reasoning, etc.).
-	const extras = getCompactionRequestExtras(runtime.model, getSessionId(ctx));
+	const extras = getCompactionRequestExtras({
+		provider: runtime.provider,
+		api: runtime.api,
+		model: runtime.model,
+		baseUrl: runtime.baseUrl,
+		sessionId: getSessionId(ctx),
+	});
 	if (extras) {
 		request = { ...request, ...extras };
 	}
 
-	const compactResult = await executeNativeCompaction({
+	const compactResult = await executeRemoteV2Compaction({
 		runtime,
 		request,
 		signal: event.signal,
@@ -169,7 +186,7 @@ async function runResponsesNativeCompact(
 		writeDebugArtifact(
 			"compaction-event",
 			{
-				event: "session_before_compact.responses-compact-failure",
+				event: "session_before_compact.remote-v2-failure",
 				reason: compactResult.reason,
 				status: compactResult.status,
 				errorMessage: compactResult.errorMessage,
@@ -213,13 +230,12 @@ async function runResponsesNativeCompact(
 		firstKeptEntryId: event.preparation.firstKeptEntryId,
 		tokensBefore: event.preparation.tokensBefore,
 		details,
-		summary: compactResult.summaryText,
 	});
 
 	writeDebugArtifact(
 		"compaction-event",
 		{
-			event: "session_before_compact.responses-compact-success",
+			event: "session_before_compact.remote-v2-success",
 			provider: runtime.provider,
 			api: runtime.api,
 			model: runtime.model,
@@ -228,7 +244,6 @@ async function runResponsesNativeCompact(
 			requestExtras: extras ? Object.keys(extras) : [],
 			compactResponseId: compactResult.compactResponseId,
 			compactedItems: compactResult.compactedWindow.length,
-			summaryExtracted: Boolean(compactResult.summaryText),
 			firstKeptEntryId: event.preparation.firstKeptEntryId,
 		},
 		config,
@@ -265,7 +280,7 @@ async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx:
 		return { cancel: true };
 	}
 
-	// Branch 1: Responses-family APIs use the native /responses/compact endpoint.
+	// Branch 1: Responses-family APIs use remote_compaction_v2 on the normal Responses stream.
 	const resolution = await resolveNativeCompactionEnvironment(ctx, {
 		enabled: config.enabled,
 		responsesCompactApis: config.responsesCompactApis,
@@ -283,12 +298,13 @@ async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx:
 		writeDebugArtifact(
 			"compaction-event",
 			{
-				event: "session_before_compact.responses-compact-unavailable",
+				event: "session_before_compact.remote-v2-unavailable",
 				reason: resolution.reason,
 				provider: resolution.provider,
 				api: resolution.api,
 				model: resolution.model,
 				baseUrl: resolution.baseUrl,
+				errorMessage: resolution.errorMessage,
 			},
 			config,
 			ctx,
@@ -351,9 +367,18 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 	}
 
 	// Capture compact-relevant request fields (tools, reasoning, ...) for the next
-	// /responses/compact call, regardless of whether this request gets rewritten.
+	// remote_compaction_v2 call, regardless of whether this request gets rewritten.
 	if (isResponsesCompatiblePayload(event.payload)) {
-		rememberRequestContext(event.payload, getSessionId(ctx));
+		const descriptor = ctx.model;
+		if (descriptor?.provider && descriptor.api && descriptor.baseUrl) {
+			rememberRequestContext(event.payload, {
+				provider: descriptor.provider,
+				api: descriptor.api,
+				model: descriptor.id,
+				baseUrl: descriptor.baseUrl.replace(/\/+$/, ""),
+				sessionId: getSessionId(ctx),
+			});
+		}
 	}
 
 	const resolution = await resolveNativeCompactionEnvironment(
@@ -374,6 +399,7 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 				api: resolution.api,
 				model: resolution.model,
 				baseUrl: resolution.baseUrl,
+				errorMessage: resolution.errorMessage,
 				currentModel: getCurrentModelDebugInfo(ctx),
 				payload: event.payload,
 			},
@@ -384,6 +410,10 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 	}
 
 	const runtime = resolution.runtime;
+	const payload = runtime.payload;
+	if (!payload) {
+		return undefined;
+	}
 	const branchEntries = ctx.sessionManager.getBranch();
 	const latestNativeCompaction = resolveLatestNativeCompactionEntry(branchEntries, {
 		provider: runtime.provider,
@@ -404,7 +434,7 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 				branchEntries: branchEntries.length,
 				latestCompactionIndex: latestNativeCompaction.latestCompactionIndex,
 				latestCompactionIdentity: getCompactionIdentityDebugInfo(latestNativeCompaction.latestCompaction),
-				payload: runtime.payload,
+				payload,
 			},
 			config,
 			ctx,
@@ -415,7 +445,7 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 	const latestNativeCompactionEntry = latestNativeCompaction.entry;
 	const rewrite = rewriteResponsesPayloadWithNativeReplay({
 		model: runtime.currentModel,
-		payload: runtime.payload,
+		payload,
 		branchEntries,
 		compactionEntry: latestNativeCompactionEntry,
 	});
@@ -431,7 +461,7 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 				baseUrl: runtime.baseUrl,
 				compactionEntryId: latestNativeCompactionEntry.id,
 				parity: rewrite.parity,
-				payload: runtime.payload,
+				payload,
 			},
 			config,
 			ctx,
@@ -450,7 +480,7 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 			compactionEntryId: latestNativeCompactionEntry.id,
 			boundaryIndex: rewrite.segments.boundaryIndex,
 			firstKeptEntryIndex: rewrite.segments.firstKeptEntryIndex,
-			originalInputItems: runtime.payload.input.length,
+			originalInputItems: payload.input.length,
 			rewrittenInputItems: rewrite.rewrittenPayload.input.length,
 			freshPreambleItems: rewrite.segments.freshPreamble.length,
 			trailingPreambleItems: rewrite.segments.trailingPreamble.length,
@@ -459,7 +489,7 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 			compactedItems: rewrite.segments.compactedWindow.length,
 			postCompactionTailItems: rewrite.segments.postCompactionTail.input.length,
 			payload: rewrite.rewrittenPayload,
-			originalPayload: runtime.payload,
+			originalPayload: payload,
 		},
 		config,
 		ctx,

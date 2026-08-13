@@ -1,5 +1,6 @@
 export {
 	buildCompactUrl,
+	buildResponsesUrl,
 	getNativeCompactionRuntime,
 	getRuntimeModelDescriptor,
 	isResponsesCompatiblePayload,
