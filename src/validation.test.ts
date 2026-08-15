@@ -347,7 +347,7 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 				},
 				webSearch: {
 					...DEFAULT_WEB_SEARCH_CONFIG,
-					apis: [...DEFAULT_WEB_SEARCH_CONFIG.apis],
+					models: [...DEFAULT_WEB_SEARCH_CONFIG.models],
 				},
 			},
 			source: undefined,
@@ -730,8 +730,8 @@ test("first post-compaction turn rewrites to fresh preamble + opaque compacted w
 	const expectedTail = await serializeResponsesInput(model, [toReplayMessage(currentUser)]);
 	const expectedInput = [payload.input[0], ...compactedWindow, ...expectedTail];
 	const liveSearch = transformWebSearchPayload({
-		api: model.api,
-		config: { ...DEFAULT_WEB_SEARCH_CONFIG, apis: [...DEFAULT_WEB_SEARCH_CONFIG.apis] },
+		model,
+		config: { ...DEFAULT_WEB_SEARCH_CONFIG, models: [`${model.provider}/${model.id}`] },
 		payload: rewritten,
 	});
 	const finalPayload = liveSearch.payload as {

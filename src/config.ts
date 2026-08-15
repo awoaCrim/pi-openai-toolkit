@@ -14,7 +14,6 @@ import {
 	type ToolkitConfig,
 	type WebSearchConfig,
 } from "./types";
-import { WEB_SEARCH_CAPABLE_APIS } from "./web-search/types";
 
 export const CONFIG_DIR = path.join(os.homedir(), ".pi", "agent", "extensions", TOOLKIT_ID);
 export const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
@@ -33,7 +32,7 @@ const COMPACTION_FIELDS = new Set([
 	"redactSensitiveData",
 	"artifactRoot",
 ]);
-const WEB_SEARCH_FIELDS = new Set(["enabled", "apis"]);
+const WEB_SEARCH_FIELDS = new Set(["enabled", "models"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
@@ -138,6 +137,16 @@ function toSupportedApis(
 	return accepted;
 }
 
+function toModelAllowlist(value: unknown, fieldPath: string, warnings: string[]): string[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+		warnings.push(`Ignoring ${fieldPath}: expected a string array.`);
+		return undefined;
+	}
+
+	return [...new Set(value.map((entry) => entry.trim()).filter(Boolean))];
+}
+
 function cloneDefaults(): ToolkitConfig {
 	return {
 		compaction: {
@@ -146,7 +155,7 @@ function cloneDefaults(): ToolkitConfig {
 		},
 		webSearch: {
 			...DEFAULT_WEB_SEARCH_CONFIG,
-			apis: [...DEFAULT_WEB_SEARCH_CONFIG.apis],
+			models: [...DEFAULT_WEB_SEARCH_CONFIG.models],
 		},
 	};
 }
@@ -211,9 +220,9 @@ function applyWebSearchConfig(
 	warnUnknownFields(raw, WEB_SEARCH_FIELDS, "webSearch", warnings);
 	resolved.enabled = toBoolean(raw.enabled, "webSearch.enabled", warnings) ?? resolved.enabled;
 
-	const apis = toSupportedApis(raw.apis, "webSearch.apis", WEB_SEARCH_CAPABLE_APIS, warnings);
-	if (apis !== undefined) {
-		resolved.apis = apis;
+	const models = toModelAllowlist(raw.models, "webSearch.models", warnings);
+	if (models !== undefined) {
+		resolved.models = models;
 	}
 }
 

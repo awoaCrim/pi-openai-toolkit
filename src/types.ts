@@ -62,8 +62,8 @@ export type CompactionConfig = {
 
 export type WebSearchConfig = {
 	enabled: boolean;
-	/** Narrowed subset of the Web Search APIs implemented by this package. */
-	apis: string[];
+	/** Exact provider/model keys allowed to use toolkit-native Web Search. */
+	models: string[];
 };
 
 export type ToolkitConfig = {
@@ -324,7 +324,7 @@ export const DEFAULT_COMPACTION_CONFIG: CompactionConfig = {
 
 export const DEFAULT_WEB_SEARCH_CONFIG: WebSearchConfig = {
 	enabled: true,
-	apis: ["openai-responses"],
+	models: [],
 };
 
 export const DEFAULT_TOOLKIT_CONFIG: ToolkitConfig = {

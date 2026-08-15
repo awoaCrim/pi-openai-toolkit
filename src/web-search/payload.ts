@@ -1,7 +1,8 @@
 import type { WebSearchConfig } from "../types";
 import {
 	WEB_SEARCH_SOURCE_INCLUDE,
-	isWebSearchEnabledForApi,
+	isWebSearchEnabledForModel,
+	type WebSearchModel,
 	type WebSearchPayloadTransform,
 } from "./types";
 
@@ -20,16 +21,16 @@ function isNativeWebSearchTool(tool: unknown): boolean {
 }
 
 export function transformWebSearchPayload(args: {
-	api: string | undefined;
+	model: WebSearchModel | undefined;
 	config: WebSearchConfig;
 	payload: unknown;
 }): WebSearchPayloadTransform {
-	const { api, config, payload } = args;
+	const { model, config, payload } = args;
 	if (!config.enabled) {
 		return { payload, outcome: "disabled", changed: false };
 	}
-	if (!isWebSearchEnabledForApi(api, config)) {
-		return { payload, outcome: "unsupported-api", changed: false };
+	if (!isWebSearchEnabledForModel(model, config)) {
+		return { payload, outcome: "unsupported-model", changed: false };
 	}
 	if (!isRecord(payload)) {
 		return { payload, outcome: "non-object-payload", changed: false };
@@ -40,10 +41,6 @@ export function transformWebSearchPayload(args: {
 		return { payload, outcome: "invalid-tools", changed: false };
 	}
 	const tools = toolsValue ?? [];
-	if (tools.some(isLocalWebSearchFunction)) {
-		return { payload, outcome: "local-function-conflict", changed: false };
-	}
-
 	const includeValue = payload.include;
 	if (includeValue !== undefined && !Array.isArray(includeValue)) {
 		return { payload, outcome: "invalid-include", changed: false };
@@ -51,7 +48,12 @@ export function transformWebSearchPayload(args: {
 	const include = includeValue ?? [];
 	const normalizedTools: unknown[] = [];
 	let nativeToolCount = 0;
+	let localToolRemoved = false;
 	for (const tool of tools) {
+		if (isLocalWebSearchFunction(tool)) {
+			localToolRemoved = true;
+			continue;
+		}
 		if (isNativeWebSearchTool(tool)) {
 			nativeToolCount += 1;
 			if (nativeToolCount > 1) continue;
@@ -76,7 +78,7 @@ export function transformWebSearchPayload(args: {
 		normalizedInclude.push(WEB_SEARCH_SOURCE_INCLUDE);
 	}
 
-	const toolsChanged = !hasNativeTool || nativeToolCount > 1;
+	const toolsChanged = localToolRemoved || !hasNativeTool || nativeToolCount > 1;
 	const includeChanged = sourceIncludeCount !== 1;
 	if (!toolsChanged && !includeChanged) {
 		return { payload, outcome: "existing-native-tool", changed: false };

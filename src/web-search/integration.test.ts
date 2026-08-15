@@ -9,7 +9,8 @@ import {
 import { transformWebSearchPayload } from "./payload";
 import { WEB_SEARCH_SOURCE_INCLUDE } from "./types";
 
-const enabled = { enabled: true, apis: ["openai-responses"] };
+const enabled = { enabled: true, models: ["newapi/gpt-5.5"] };
+const model = { provider: "newapi", api: "openai-responses", id: "gpt-5.5" };
 const identity = {
 	provider: "newapi",
 	api: "openai-responses",
@@ -46,7 +47,7 @@ describe("Compaction and Web Search integration", () => {
 			input: [{ type: "compaction", encrypted_content: "opaque" }, originalPayload.input[0]],
 		};
 		const live = transformWebSearchPayload({
-			api: "openai-responses",
+			model,
 			config: enabled,
 			payload: replayRewrittenPayload,
 		});
@@ -64,14 +65,16 @@ describe("Compaction and Web Search integration", () => {
 		expect(compactExtras).not.toHaveProperty("include");
 	});
 
-	test("a local web_search function remains authoritative across the ordering seam", () => {
+	test("toolkit Web Search takes precedence without polluting compaction extras", () => {
 		const localTool = { type: "function", name: "web_search", description: "local search" };
 		const payload = { model: "gpt-5.5", input: [], tools: [localTool] };
 		rememberRequestContext(payload, identity);
 
-		const live = transformWebSearchPayload({ api: "openai-responses", config: enabled, payload });
+		const live = transformWebSearchPayload({ model, config: enabled, payload });
 
-		expect(live).toEqual({ payload, outcome: "local-function-conflict", changed: false });
+		expect((live.payload as { tools: unknown[] }).tools).toEqual([{ type: "web_search" }]);
+		expect((live.payload as { include: unknown[] }).include).toEqual([WEB_SEARCH_SOURCE_INCLUDE]);
+		expect(live.changed).toBe(true);
 		expect(getCompactionRequestExtras(identity)?.tools).toEqual([localTool]);
 	});
 });
