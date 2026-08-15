@@ -1,12 +1,14 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { CompactionEntry, CompactionResult, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-export const EXTENSION_ID = "pi-better-compaction-v2";
-export const DEFAULT_ARTIFACT_ROOT = "~/.pi/agent/artifacts/pi-better-compaction-v2";
+export const TOOLKIT_ID = "pi-openai-toolkit";
+export const COMPACTION_EXTENSION_ID = `${TOOLKIT_ID}:compaction`;
+export const WEB_SEARCH_EXTENSION_ID = `${TOOLKIT_ID}:web-search`;
+export const DEFAULT_ARTIFACT_ROOT = "~/.pi/agent/artifacts/pi-openai-toolkit/compaction";
 export const REDACTED_VALUE = "[REDACTED]";
 /**
  * APIs the extension knows how to build a `/responses/compact` URL for.
- * `responsesCompactApis` in config.json may only narrow this set.
+ * `compaction.responsesApis` in config.json may only narrow this set.
  */
 export const RESPONSES_COMPACT_CAPABLE_APIS = ["openai-responses", "openai-codex-responses"] as const;
 export const LEGACY_NATIVE_COMPACTION_STRATEGY = "openai-native-compact-v1";
@@ -34,7 +36,7 @@ export type DebugArtifactKind =
 	| "compaction-event"
 	| "lifecycle";
 
-export type ExtensionConfig = {
+export type CompactionConfig = {
 	enabled: boolean;
 	/**
 	 * Allow a Responses session whose latest compaction was not created by this extension
@@ -45,11 +47,11 @@ export type ExtensionConfig = {
 	 * "provider/model-id" used for native-method fallback compaction (non-Responses APIs,
 	 * or when the compact endpoint fails). Unset = current model via pi's default path.
 	 */
-	compactionModel?: string;
+	model?: string;
 	/** Thinking level passed to pi's native compact() when the fallback model runs. */
-	compactionThinkingLevel: ThinkingLevel;
-	/** Subset of RESPONSES_COMPACT_CAPABLE_APIS that should use the compact endpoint. */
-	responsesCompactApis: string[];
+	thinkingLevel: ThinkingLevel;
+	/** Subset of RESPONSES_COMPACT_CAPABLE_APIS that should use remote compaction. */
+	responsesApis: string[];
 	notifyOnLoad: boolean;
 	debug: boolean;
 	logProviderPayloads: boolean;
@@ -58,8 +60,19 @@ export type ExtensionConfig = {
 	artifactRoot: string;
 };
 
-export type LoadedExtensionConfig = {
-	config: ExtensionConfig;
+export type WebSearchConfig = {
+	enabled: boolean;
+	/** Narrowed subset of the Web Search APIs implemented by this package. */
+	apis: string[];
+};
+
+export type ToolkitConfig = {
+	compaction: CompactionConfig;
+	webSearch: WebSearchConfig;
+};
+
+export type LoadedToolkitConfig = {
+	config: ToolkitConfig;
 	/** Path of the config file that was applied, if it existed and parsed. */
 	source?: string;
 	warnings: string[];
@@ -295,16 +308,26 @@ export function createNativeCompactionResult(
 	};
 }
 
-export const DEFAULT_EXTENSION_CONFIG: ExtensionConfig = {
+export const DEFAULT_COMPACTION_CONFIG: CompactionConfig = {
 	enabled: true,
 	allowCompactionContinuityBreak: false,
-	compactionModel: undefined,
-	compactionThinkingLevel: "off",
-	responsesCompactApis: [...RESPONSES_COMPACT_CAPABLE_APIS],
+	model: undefined,
+	thinkingLevel: "off",
+	responsesApis: [...RESPONSES_COMPACT_CAPABLE_APIS],
 	notifyOnLoad: false,
 	debug: false,
 	logProviderPayloads: false,
 	logCompactResponses: false,
 	redactSensitiveData: true,
 	artifactRoot: DEFAULT_ARTIFACT_ROOT,
+};
+
+export const DEFAULT_WEB_SEARCH_CONFIG: WebSearchConfig = {
+	enabled: true,
+	apis: ["openai-responses"],
+};
+
+export const DEFAULT_TOOLKIT_CONFIG: ToolkitConfig = {
+	compaction: DEFAULT_COMPACTION_CONFIG,
+	webSearch: DEFAULT_WEB_SEARCH_CONFIG,
 };

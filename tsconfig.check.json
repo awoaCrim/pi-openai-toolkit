@@ -12,7 +12,8 @@
     "typeRoots": ["./node_modules/@types"]
   },
   "include": [
-    "index.ts",
+    "extensions/compaction.ts",
+    "extensions/web-search.ts",
     "src/compact-client.ts",
     "src/config.ts",
     "src/debug.ts",
@@ -26,6 +27,10 @@
     "src/runtime.ts",
     "src/serializer.ts",
     "src/supported-environment.ts",
-    "src/types.ts"
+    "src/types.ts",
+    "src/web-search/extension.ts",
+    "src/web-search/payload.ts",
+    "src/web-search/prompt.ts",
+    "src/web-search/types.ts"
   ]
 }

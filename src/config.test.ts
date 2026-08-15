@@ -2,13 +2,13 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { loadExtensionConfig } from "./config";
-import { DEFAULT_EXTENSION_CONFIG } from "./types";
+import { CONFIG_PATH, loadToolkitConfig } from "./config";
+import { DEFAULT_COMPACTION_CONFIG, DEFAULT_WEB_SEARCH_CONFIG } from "./types";
 
 let tempDirs: string[] = [];
 
 function writeTempConfig(content: string): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-better-compaction-config-"));
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-openai-toolkit-config-"));
 	tempDirs.push(dir);
 	const configPath = path.join(dir, "config.json");
 	fs.writeFileSync(configPath, content, "utf8");
@@ -22,91 +22,161 @@ afterEach(() => {
 	tempDirs = [];
 });
 
-describe("loadExtensionConfig", () => {
-	test("missing file yields defaults without warnings", () => {
-		const missingPath = path.join(os.tmpdir(), "pi-better-compaction-missing", "config.json");
-		const loaded = loadExtensionConfig(missingPath);
+describe("loadToolkitConfig", () => {
+	test("uses the new canonical config path", () => {
+		expect(CONFIG_PATH).toBe(
+			path.join(os.homedir(), ".pi", "agent", "extensions", "pi-openai-toolkit", "config.json"),
+		);
+	});
+
+	test("missing file yields independent defaults without warnings", () => {
+		const missingPath = path.join(os.tmpdir(), "pi-openai-toolkit-missing", "config.json");
+		const loaded = loadToolkitConfig(missingPath);
 
 		expect(loaded.source).toBeUndefined();
 		expect(loaded.warnings).toEqual([]);
-		expect(loaded.config.enabled).toBe(true);
-		expect(loaded.config.allowCompactionContinuityBreak).toBe(false);
-		expect(loaded.config.compactionModel).toBeUndefined();
-		expect(loaded.config.compactionThinkingLevel).toBe("off");
-		expect(loaded.config.responsesCompactApis).toEqual([...DEFAULT_EXTENSION_CONFIG.responsesCompactApis]);
+		expect(loaded.config.compaction.enabled).toBe(true);
+		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(false);
+		expect(loaded.config.compaction.model).toBeUndefined();
+		expect(loaded.config.compaction.thinkingLevel).toBe("off");
+		expect(loaded.config.compaction.responsesApis).toEqual([
+			...DEFAULT_COMPACTION_CONFIG.responsesApis,
+		]);
+		expect(loaded.config.webSearch).toEqual({
+			...DEFAULT_WEB_SEARCH_CONFIG,
+			apis: [...DEFAULT_WEB_SEARCH_CONFIG.apis],
+		});
 	});
 
-	test("config file overrides defaults", () => {
+	test("nested feature sections override defaults", () => {
 		const configPath = writeTempConfig(
 			JSON.stringify({
-				enabled: true,
-				allowCompactionContinuityBreak: true,
-				compactionModel: " google/gemini-2.5-flash ",
-				compactionThinkingLevel: "medium",
-				responsesCompactApis: ["openai-responses"],
-				debug: true,
-				notifyOnLoad: true,
-				artifactRoot: "~/artifacts/pbc",
+				compaction: {
+					enabled: true,
+					allowCompactionContinuityBreak: true,
+					model: " google/gemini-2.5-flash ",
+					thinkingLevel: "medium",
+					responsesApis: ["openai-responses"],
+					debug: true,
+					notifyOnLoad: true,
+					artifactRoot: "~/artifacts/pot",
+				},
+				webSearch: {
+					enabled: false,
+					apis: [],
+				},
 			}),
 		);
 
-		const loaded = loadExtensionConfig(configPath);
+		const loaded = loadToolkitConfig(configPath);
 
 		expect(loaded.source).toBe(configPath);
 		expect(loaded.warnings).toEqual([]);
-		expect(loaded.config.allowCompactionContinuityBreak).toBe(true);
-		expect(loaded.config.compactionModel).toBe("google/gemini-2.5-flash");
-		expect(loaded.config.compactionThinkingLevel).toBe("medium");
-		expect(loaded.config.responsesCompactApis).toEqual(["openai-responses"]);
-		expect(loaded.config.debug).toBe(true);
-		expect(loaded.config.notifyOnLoad).toBe(true);
-		expect(loaded.config.artifactRoot).toBe(path.join(os.homedir(), "artifacts/pbc"));
+		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(true);
+		expect(loaded.config.compaction.model).toBe("google/gemini-2.5-flash");
+		expect(loaded.config.compaction.thinkingLevel).toBe("medium");
+		expect(loaded.config.compaction.responsesApis).toEqual(["openai-responses"]);
+		expect(loaded.config.compaction.debug).toBe(true);
+		expect(loaded.config.compaction.notifyOnLoad).toBe(true);
+		expect(loaded.config.compaction.artifactRoot).toBe(path.join(os.homedir(), "artifacts/pot"));
+		expect(loaded.config.webSearch).toEqual({ enabled: false, apis: [] });
 	});
 
-	test("compactionModel null clears the spec", () => {
-		const configPath = writeTempConfig(JSON.stringify({ compactionModel: null }));
-		const loaded = loadExtensionConfig(configPath);
+	test("compaction.model null clears the fallback spec", () => {
+		const configPath = writeTempConfig(JSON.stringify({ compaction: { model: null } }));
+		const loaded = loadToolkitConfig(configPath);
 
-		expect(loaded.config.compactionModel).toBeUndefined();
+		expect(loaded.config.compaction.model).toBeUndefined();
 		expect(loaded.warnings).toEqual([]);
 	});
 
-	test("invalid fields warn and fall back to defaults", () => {
+	test("invalid fields warn and fall back per field while valid API entries remain", () => {
 		const configPath = writeTempConfig(
 			JSON.stringify({
-				enabled: "yes",
-				allowCompactionContinuityBreak: "yes",
-				compactionModel: 42,
-				compactionThinkingLevel: "ultra",
-				responsesCompactApis: ["openai-responses", "anthropic-messages"],
-				artifactRoot: "",
+				compaction: {
+					enabled: "yes",
+					allowCompactionContinuityBreak: "yes",
+					model: 42,
+					thinkingLevel: "ultra",
+					responsesApis: ["openai-responses", "anthropic-messages"],
+					artifactRoot: "",
+				},
+				webSearch: {
+					enabled: "yes",
+					apis: ["openai-responses", "azure-openai-responses"],
+				},
 			}),
 		);
 
-		const loaded = loadExtensionConfig(configPath);
+		const loaded = loadToolkitConfig(configPath);
 
-		expect(loaded.config.enabled).toBe(true);
-		expect(loaded.config.allowCompactionContinuityBreak).toBe(false);
-		expect(loaded.config.compactionModel).toBeUndefined();
-		expect(loaded.config.compactionThinkingLevel).toBe("off");
-		// The valid entry is kept; the incapable API is dropped with a warning.
-		expect(loaded.config.responsesCompactApis).toEqual(["openai-responses"]);
-		expect(loaded.warnings.length).toBe(6);
+		expect(loaded.config.compaction.enabled).toBe(true);
+		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(false);
+		expect(loaded.config.compaction.model).toBeUndefined();
+		expect(loaded.config.compaction.thinkingLevel).toBe("off");
+		expect(loaded.config.compaction.responsesApis).toEqual(["openai-responses"]);
+		expect(loaded.config.webSearch).toEqual({ enabled: true, apis: ["openai-responses"] });
+		expect(loaded.warnings).toContain(
+			'Ignoring webSearch.apis entry "azure-openai-responses": only openai-responses are supported.',
+		);
+		expect(loaded.warnings.length).toBeGreaterThanOrEqual(8);
+	});
+
+	test("unknown fields and malformed feature sections warn without changing defaults", () => {
+		const configPath = writeTempConfig(
+			JSON.stringify({
+				legacyEnabled: false,
+				compaction: false,
+				webSearch: { futureOption: true },
+			}),
+		);
+		const loaded = loadToolkitConfig(configPath);
+
+		expect(loaded.config.compaction.enabled).toBe(true);
+		expect(loaded.config.webSearch.enabled).toBe(true);
+		expect(loaded.warnings).toEqual([
+			"Ignoring legacyEnabled: unknown field.",
+			"Ignoring compaction: expected a JSON object.",
+			"Ignoring webSearch.futureOption: unknown field.",
+		]);
+	});
+
+	test("legacy flat configuration is not treated as a runtime fallback", () => {
+		const configPath = writeTempConfig(
+			JSON.stringify({
+				enabled: false,
+				compactionModel: "google/gemini-2.5-flash",
+				artifactRoot: "legacy-artifacts",
+			}),
+		);
+		const loaded = loadToolkitConfig(configPath);
+
+		expect(loaded.config.compaction.enabled).toBe(true);
+		expect(loaded.config.compaction.model).toBeUndefined();
+		expect(loaded.config.compaction.artifactRoot).toContain(
+			path.join(".pi", "agent", "artifacts", "pi-openai-toolkit", "compaction"),
+		);
+		expect(loaded.warnings).toHaveLength(3);
 	});
 
 	test("malformed JSON warns and yields defaults", () => {
 		const configPath = writeTempConfig("{ not json");
-		const loaded = loadExtensionConfig(configPath);
+		const loaded = loadToolkitConfig(configPath);
 
 		expect(loaded.source).toBeUndefined();
-		expect(loaded.warnings.length).toBe(1);
-		expect(loaded.config.enabled).toBe(true);
+		expect(loaded.warnings).toHaveLength(1);
+		expect(loaded.config.compaction.enabled).toBe(true);
+		expect(loaded.config.webSearch.enabled).toBe(true);
 	});
 
 	test("relative artifactRoot resolves against the config directory", () => {
-		const configPath = writeTempConfig(JSON.stringify({ artifactRoot: "artifacts" }));
-		const loaded = loadExtensionConfig(configPath);
+		const configPath = writeTempConfig(
+			JSON.stringify({ compaction: { artifactRoot: "artifacts" } }),
+		);
+		const loaded = loadToolkitConfig(configPath);
 
-		expect(loaded.config.artifactRoot).toBe(path.resolve(path.dirname(configPath), "artifacts"));
+		expect(loaded.config.compaction.artifactRoot).toBe(
+			path.resolve(path.dirname(configPath), "artifacts"),
+		);
 	});
 });

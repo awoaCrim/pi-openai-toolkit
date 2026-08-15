@@ -1,19 +1,19 @@
 {
-  "name": "pi-remote-compact",
+  "name": "pi-openai-toolkit",
   "version": "0.3.0",
   "private": false,
   "type": "module",
-  "description": "Pi extension using remote_compaction_v2 over Responses SSE with opaque replay and native fallback.",
+  "description": "OpenAI-focused Pi toolkit providing remote Responses compaction and native Web Search.",
   "author": "awoaCrim and contributors",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/awoaCrim/pi-remote-compact.git"
+    "url": "git+https://github.com/awoaCrim/pi-openai-toolkit.git"
   },
   "bugs": {
-    "url": "https://github.com/awoaCrim/pi-remote-compact/issues"
+    "url": "https://github.com/awoaCrim/pi-openai-toolkit/issues"
   },
-  "homepage": "https://github.com/awoaCrim/pi-remote-compact#readme",
+  "homepage": "https://github.com/awoaCrim/pi-openai-toolkit#readme",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
@@ -23,16 +23,19 @@
     "pi-extension",
     "openai",
     "compaction",
+    "web-search",
     "codex",
     "responses"
   ],
   "pi": {
     "extensions": [
-      "./index.ts"
+      "./extensions/compaction.ts",
+      "./extensions/web-search.ts"
     ]
   },
   "files": [
-    "index.ts",
+    "extensions/compaction.ts",
+    "extensions/web-search.ts",
     "src/compact-client.ts",
     "src/config.ts",
     "src/debug.ts",
@@ -47,8 +50,13 @@
     "src/serializer.ts",
     "src/supported-environment.ts",
     "src/types.ts",
+    "src/web-search/extension.ts",
+    "src/web-search/payload.ts",
+    "src/web-search/prompt.ts",
+    "src/web-search/types.ts",
     "README.md",
     "LICENSE",
+    "NOTICE",
     "tsconfig.check.json"
   ],
   "scripts": {

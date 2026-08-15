@@ -2,7 +2,7 @@ import { writeDebugArtifact } from "./debug";
 import { mergeProviderHeaders } from "./provider-headers";
 import type { NativeCompactionRuntime } from "./runtime";
 import type { NativeCompactionRequestBody, ResponsesInputItem } from "./serializer";
-import type { ArtifactContext, ExtensionConfig } from "./types";
+import type { ArtifactContext, CompactionConfig } from "./types";
 
 const JSON_CONTENT_TYPE = "application/json";
 const SSE_CONTENT_TYPE = "text/event-stream";
@@ -70,7 +70,7 @@ export type ExecuteRemoteV2CompactionOptions = {
 	runtime: NativeCompactionRuntime;
 	request: NativeCompactionRequestBody;
 	signal?: AbortSignal;
-	settings?: ExtensionConfig;
+	settings?: CompactionConfig;
 	context?: ArtifactContext;
 };
 
@@ -233,7 +233,7 @@ function getErrorMessage(value: unknown): string | undefined {
 
 function writeCompactArtifact(
 	data: unknown,
-	settings: ExtensionConfig | undefined,
+	settings: CompactionConfig | undefined,
 	context: ArtifactContext | undefined,
 ): void {
 	if (!settings || !context) {
