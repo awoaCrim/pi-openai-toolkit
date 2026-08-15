@@ -55,6 +55,7 @@
     "src/web-search/prompt.ts",
     "src/web-search/types.ts",
     "README.md",
+    "README_zh.md",
     "LICENSE",
     "NOTICE",
     "tsconfig.check.json"
