@@ -17,10 +17,22 @@
 
 ## Installation
 
-### Install via Pi Package Manager (recommended)
+### Install the published package globally (recommended)
 
 ```bash
-pi install npm:pi-openai-toolkit
+pi install npm:pi-openai-toolkit@0.3.0
+```
+
+This adds the package to Pi's global settings. Verify the installation with:
+
+```bash
+pi list
+```
+
+To install it only for the current project, use:
+
+```bash
+pi install npm:pi-openai-toolkit@0.3.0 --local
 ```
 
 ### Git installation (alternative / development)
@@ -57,6 +69,12 @@ Configuration file location:
 
 ```text
 ~/.pi/agent/extensions/pi-openai-toolkit/config.json
+```
+
+On Windows:
+
+```text
+C:\Users\<user>\.pi\agent\extensions\pi-openai-toolkit\config.json
 ```
 
 ### Example `config.json`
