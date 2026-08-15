@@ -20,6 +20,7 @@
     "src/extension-runtime.ts",
     "src/native-fallback.ts",
     "src/payload-rewrite.ts",
+    "src/provider-headers.ts",
     "src/remote-v2-client.ts",
     "src/request-context-cache.ts",
     "src/runtime.ts",

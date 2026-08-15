@@ -186,6 +186,64 @@ test("executeRemoteV2Compaction sends a trigger and accepts exactly one complete
 	]);
 });
 
+test("executeRemoteV2Compaction honors nullable provider header overrides", async () => {
+	let requestHeaders: Headers | undefined;
+	const opaque = { type: "compaction", encrypted_content: "opaque-v2" };
+	globalThis.fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+		requestHeaders = new Headers(init?.headers);
+		return new Response(
+			`event: response.completed\ndata: ${JSON.stringify({
+				type: "response.completed",
+				response: { id: "resp_headers", status: "completed", output: [opaque] },
+			})}\n\n`,
+			{ status: 200, headers: { "content-type": "text/event-stream" } },
+		);
+	}) as typeof fetch;
+
+	const result = await executeRemoteV2Compaction({
+		runtime: {
+			provider: "custom-newapi",
+			api: "openai-responses",
+			model: "gpt-5.6-luna",
+			baseUrl: "https://proxy.example.com/v1",
+			apiKey: "sk-test",
+			headers: {
+				"X-SHARED": "auth-value",
+				"X-DELETE": null,
+				"x-auth-only": "auth-only",
+			},
+			responsesPath: "responses",
+			responsesUrl: buildResponsesUrl("https://proxy.example.com/v1", "openai-responses"),
+			compactPath: "responses/compact",
+			compactUrl: buildCompactUrl("https://proxy.example.com/v1", "openai-responses"),
+			currentModel: {
+				...baseModel,
+				provider: "custom-newapi",
+				id: "gpt-5.6-luna",
+				name: "gpt-5.6-luna",
+				baseUrl: "https://proxy.example.com/v1",
+				headers: {
+					"x-shared": "model-value",
+					"x-delete": "delete-me",
+					"x-model-only": "model-only",
+				},
+			} as never,
+		},
+		request: {
+			model: "gpt-5.6-luna",
+			instructions: "compact this",
+			input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
+		},
+	});
+
+	expect(result.ok).toBe(true);
+	expect(requestHeaders?.get("x-shared")).toBe("auth-value");
+	expect(requestHeaders?.get("x-delete")).toBeNull();
+	expect(requestHeaders?.get("x-model-only")).toBe("model-only");
+	expect(requestHeaders?.get("x-auth-only")).toBe("auth-only");
+	expect([...(requestHeaders?.values() ?? [])]).not.toContain("null");
+});
+
 test("executeRemoteV2Compaction rejects missing completed events and malformed opaque items", async () => {
 	const runtime = {
 		provider: "custom-newapi",

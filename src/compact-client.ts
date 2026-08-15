@@ -1,4 +1,5 @@
 import { writeDebugArtifact } from "./debug";
+import { mergeProviderHeaders } from "./provider-headers";
 import type { NativeCompactionRuntime } from "./runtime";
 import type { NativeCompactionRequestBody } from "./serializer";
 import type { ArtifactContext, ExtensionConfig } from "./types";
@@ -144,10 +145,7 @@ function buildCodexUserAgent(): string {
 }
 
 function toHeaders(runtime: NativeCompactionRuntime): Record<string, string> {
-	const headers = new Headers(runtime.currentModel.headers ?? {});
-	for (const [key, value] of Object.entries(runtime.headers ?? {})) {
-		headers.set(key, value);
-	}
+	const headers = new Headers(mergeProviderHeaders(runtime.currentModel.headers, runtime.headers));
 	headers.set("accept", JSON_CONTENT_TYPE);
 	headers.set("content-type", JSON_CONTENT_TYPE);
 	if (!headers.has("authorization")) {
