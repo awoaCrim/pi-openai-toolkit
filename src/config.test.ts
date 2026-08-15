@@ -44,7 +44,7 @@ describe("loadToolkitConfig", () => {
 		]);
 		expect(loaded.config.webSearch).toEqual({
 			...DEFAULT_WEB_SEARCH_CONFIG,
-			apis: [...DEFAULT_WEB_SEARCH_CONFIG.apis],
+			models: [...DEFAULT_WEB_SEARCH_CONFIG.models],
 		});
 	});
 
@@ -63,7 +63,7 @@ describe("loadToolkitConfig", () => {
 				},
 				webSearch: {
 					enabled: false,
-					apis: [],
+					models: [" provider/model ", "provider/model", ""],
 				},
 			}),
 		);
@@ -79,7 +79,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.debug).toBe(true);
 		expect(loaded.config.compaction.notifyOnLoad).toBe(true);
 		expect(loaded.config.compaction.artifactRoot).toBe(path.join(os.homedir(), "artifacts/pot"));
-		expect(loaded.config.webSearch).toEqual({ enabled: false, apis: [] });
+		expect(loaded.config.webSearch).toEqual({ enabled: false, models: ["provider/model"] });
 	});
 
 	test("compaction.model null clears the fallback spec", () => {
@@ -103,7 +103,7 @@ describe("loadToolkitConfig", () => {
 				},
 				webSearch: {
 					enabled: "yes",
-					apis: ["openai-responses", "azure-openai-responses"],
+					models: [" provider/model ", "provider/model", ""],
 				},
 			}),
 		);
@@ -115,11 +115,8 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.model).toBeUndefined();
 		expect(loaded.config.compaction.thinkingLevel).toBe("off");
 		expect(loaded.config.compaction.responsesApis).toEqual(["openai-responses"]);
-		expect(loaded.config.webSearch).toEqual({ enabled: true, apis: ["openai-responses"] });
-		expect(loaded.warnings).toContain(
-			'Ignoring webSearch.apis entry "azure-openai-responses": only openai-responses are supported.',
-		);
-		expect(loaded.warnings.length).toBeGreaterThanOrEqual(8);
+		expect(loaded.config.webSearch).toEqual({ enabled: true, models: ["provider/model"] });
+		expect(loaded.warnings.length).toBeGreaterThanOrEqual(7);
 	});
 
 	test("unknown fields and malformed feature sections warn without changing defaults", () => {
@@ -127,7 +124,7 @@ describe("loadToolkitConfig", () => {
 			JSON.stringify({
 				legacyEnabled: false,
 				compaction: false,
-				webSearch: { futureOption: true },
+				webSearch: { futureOption: true, apis: ["openai-responses"] },
 			}),
 		);
 		const loaded = loadToolkitConfig(configPath);
@@ -138,6 +135,7 @@ describe("loadToolkitConfig", () => {
 			"Ignoring legacyEnabled: unknown field.",
 			"Ignoring compaction: expected a JSON object.",
 			"Ignoring webSearch.futureOption: unknown field.",
+			"Ignoring webSearch.apis: unknown field.",
 		]);
 	});
 

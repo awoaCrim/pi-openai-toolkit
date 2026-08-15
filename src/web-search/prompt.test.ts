@@ -1,21 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import { appendWebSearchPrompt, WEB_SEARCH_PROMPT_SECTION } from "./prompt";
 
-const enabled = { enabled: true, apis: ["openai-responses"] };
+const model = { provider: "newapi", api: "openai-responses", id: "gpt-5.5" };
+const codexModel = { provider: "newapi", api: "openai-codex-responses", id: "gpt-5.5" };
+const enabled = { enabled: true, models: ["newapi/gpt-5.5"] };
 
 describe("appendWebSearchPrompt", () => {
-	test("adds guidance exactly once for supported turns", () => {
+	test("adds guidance exactly once for allowlisted supported turns", () => {
 		const first = appendWebSearchPrompt({
-			api: "openai-responses",
+			model,
 			config: enabled,
 			systemPrompt: "Base prompt",
-			activeToolNames: [],
 		});
 		const second = appendWebSearchPrompt({
-			api: "openai-responses",
+			model,
 			config: enabled,
 			systemPrompt: first,
-			activeToolNames: [],
 		});
 
 		expect(first).toBe(`Base prompt\n\n${WEB_SEARCH_PROMPT_SECTION}`);
@@ -23,30 +23,37 @@ describe("appendWebSearchPrompt", () => {
 		expect(first.match(/## Web Search/g)).toHaveLength(1);
 	});
 
-	test("omits guidance when disabled, unsupported, or a local conflict is active", () => {
+	test("adds guidance for allowlisted openai-codex-responses turns", () => {
+		expect(
+			appendWebSearchPrompt({
+				model: codexModel,
+				config: enabled,
+				systemPrompt: "Base prompt",
+			}),
+		).toContain("## Web Search");
+	});
+
+	test("omits guidance when disabled, unlisted, or unsupported", () => {
 		const base = "Base prompt";
 		expect(
 			appendWebSearchPrompt({
-				api: "openai-responses",
+				model,
 				config: { ...enabled, enabled: false },
 				systemPrompt: base,
-				activeToolNames: [],
 			}),
 		).toBe(base);
 		expect(
 			appendWebSearchPrompt({
-				api: "openai-codex-responses",
+				model: { ...model, id: "gpt-5.6" },
 				config: enabled,
 				systemPrompt: base,
-				activeToolNames: [],
 			}),
 		).toBe(base);
 		expect(
 			appendWebSearchPrompt({
-				api: "openai-responses",
+				model: { ...model, api: "anthropic-messages" },
 				config: enabled,
 				systemPrompt: base,
-				activeToolNames: ["read", "web_search"],
 			}),
 		).toBe(base);
 	});

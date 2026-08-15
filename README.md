@@ -13,11 +13,17 @@
 `pi-openai-toolkit` is an all-in-one OpenAI enhancement package for **Pi (>= 0.84.x)**. It bundles two high-performance extensions designed for OpenAI Responses endpoints:
 
 1. **Remote Responses Compaction v2** (`extensions/compaction.ts`): Server-side opaque context compaction using the `remote_compaction_v2` SSE streaming protocol. Preserves context fidelity without lossy text re-summarization.
-2. **Native Hosted Web Search** (`extensions/web-search.ts`): Frictionless OpenAI hosted web search injection directly on `openai-responses` turns with URL citations and source grounding, requiring zero custom tool scaffolding.
+2. **Model-Scoped Web Search** (`extensions/web-search.ts`): Toolkit-owned hosted Web Search for an exact `provider/model-id` allowlist configured with `webSearch.models`, across the supported `openai-responses` and `openai-codex-responses` APIs.
 
 ## Installation
 
-### Install via Pi Package Manager (Git)
+### Install via Pi Package Manager (recommended)
+
+```bash
+pi install npm:pi-openai-toolkit
+```
+
+### Git installation (alternative / development)
 
 ```bash
 pi install git:github.com/awoaCrim/pi-openai-toolkit
@@ -53,7 +59,7 @@ Configuration file location:
 ~/.pi/agent/extensions/pi-openai-toolkit/config.json
 ```
 
-### Default `config.json`
+### Example `config.json`
 
 ```json
 {
@@ -75,8 +81,8 @@ Configuration file location:
   },
   "webSearch": {
     "enabled": true,
-    "apis": [
-      "openai-responses"
+    "models": [
+      "uwoacrimson/gpt-5.6-luna"
     ]
   }
 }
@@ -100,7 +106,7 @@ Configuration file location:
 #### `webSearch`
 
 - `enabled` (*boolean*, default: `true`): Enable or disable native OpenAI Web Search injection.
-- `apis` (*string[]*): Supported Web Search API list. Currently restricted to `["openai-responses"]`.
+- `models` (*string[]*): Exact `provider/model-id` allowlist. Toolkit Web Search is used only for listed models running on `openai-responses` or `openai-codex-responses`. An empty list disables toolkit Web Search for all models.
 
 ---
 
@@ -132,15 +138,15 @@ Content-Type: application/json
   2. Gateway failure or non-Responses model &rarr; Configured `compaction.model` fallback.
   3. Otherwise &rarr; Pi default native text compaction.
 
-### 2. Native Web Search Injection
+### 2. Model-Scoped Web Search
 
-For `openai-responses` sessions, the extension hooks into `before_provider_request` and `before_agent_start`:
+For allowlisted models using `openai-responses` or `openai-codex-responses`, the extension hooks into `before_provider_request` and `before_agent_start`:
 
 - Injects `{ "type": "web_search" }` tool definition into the payload.
 - Appends `web_search_call.action.sources` to the Responses `include` array.
 - Appends concise search prompting to the system instructions.
 - **Zero-Latency**: Uses Pi's existing connection, auth headers, and base URL without standalone HTTP overhead.
-- **Local Tool Precedence**: If a local tool named `web_search` exists in Pi, native search automatically yields to prevent duplicate tool collisions.
+- **Toolkit Ownership**: For an eligible model, the outgoing payload removes the local function tool named `web_search` so native search is the only search path. Switching to an ineligible model restores that local tool's previous active state.
 
 ---
 

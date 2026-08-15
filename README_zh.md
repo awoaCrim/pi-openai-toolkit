@@ -13,11 +13,17 @@
 `pi-openai-toolkit` 是专为 **Pi (>= 0.84.x)** 打造的 OpenAI 全功能增强工具包，集成了两项针对 OpenAI Responses 协议的核心扩展：
 
 1. **远端无损压缩 (Remote Compaction v2)** (`extensions/compaction.ts`): 基于 `remote_compaction_v2` SSE 流式协议实现的服务端密文无损会话压缩，彻底告别会话变长后丢失细节的文本二次摘要。
-2. **原生联网搜索 (Native Web Search)** (`extensions/web-search.ts`): 在 `openai-responses` 请求中直接激活 OpenAI 托管原生联网搜索，支持 URL 引用与来源溯源，无需配置第三方搜索函数工具。
+2. **按模型启用的联网搜索** (`extensions/web-search.ts`): 通过 `webSearch.models` 精确匹配 `provider/model-id`，由 Toolkit 为符合条件的 `openai-responses` 与 `openai-codex-responses` 会话提供并拥有原生联网搜索。
 
 ## 安装使用
 
 ### 通过 Pi 安装 (推荐)
+
+```bash
+pi install npm:pi-openai-toolkit
+```
+
+### Git 安装（替代 / 开发路径）
 
 ```bash
 pi install git:github.com/awoaCrim/pi-openai-toolkit
@@ -53,7 +59,7 @@ pi --no-extensions -e /本地绝对路径/pi-openai-toolkit/extensions/web-searc
 ~/.pi/agent/extensions/pi-openai-toolkit/config.json
 ```
 
-### 完整默认配置
+### 配置示例
 
 ```json
 {
@@ -75,8 +81,8 @@ pi --no-extensions -e /本地绝对路径/pi-openai-toolkit/extensions/web-searc
   },
   "webSearch": {
     "enabled": true,
-    "apis": [
-      "openai-responses"
+    "models": [
+      "uwoacrimson/gpt-5.6-luna"
     ]
   }
 }
@@ -100,7 +106,7 @@ pi --no-extensions -e /本地绝对路径/pi-openai-toolkit/extensions/web-searc
 #### `webSearch`（联网搜索配置）
 
 - `enabled` (*boolean*, 默认 `true`): 是否启用原生 OpenAI 联网搜索注入。
-- `apis` (*string[]*): 支持联网搜索的 API 列表（目前限定为 `["openai-responses"]`）。
+- `models` (*string[]*): 精确的 `provider/model-id` 模型白名单。只有列表中的模型在 `openai-responses` 或 `openai-codex-responses` 端点上运行时，才会使用 Toolkit Web Search。空列表表示所有模型都不启用 Toolkit Web Search。
 
 ---
 
@@ -132,15 +138,15 @@ Content-Type: application/json
   2. 网关不支持或报错 &rarr; 降级调用用户指定的 `compaction.model`；
   3. 未配置降级模型 &rarr; 回退至 Pi 默认的当前模型摘要压缩。
 
-### 2. Native Web Search（原生托管联网搜索）
+### 2. 按模型启用的联网搜索
 
-对于启用的 `openai-responses` 会话，扩展直接拦截请求载荷：
+对于白名单中的 `openai-responses` 或 `openai-codex-responses` 模型，扩展直接拦截请求载荷：
 
 - 自动向 `tools` 注入 `{ "type": "web_search" }`；
 - 自动向 `include` 数组追加 `web_search_call.action.sources`；
 - 注入规范、去重的搜索引导 System Prompt；
 - **零额外网络延迟**：复用 Pi 当前活跃的 Provider 配置、认证凭据与 Base URL；
-- **本地工具冲突避让**：当检测到 Pi 中已注册名为 `web_search` 的本地 Function Tool 时，原生搜索自动让出，避免重复搜索工具冲突。
+- **Toolkit 接管搜索**：对于符合条件的模型，发给 Provider 的载荷会移除名为 `web_search` 的本地 Function Tool，只保留原生搜索；切换到不符合条件的模型后，会恢复该本地工具原先的 active 状态。
 
 ---
 

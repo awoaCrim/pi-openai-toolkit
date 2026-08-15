@@ -6,16 +6,17 @@ import { WEB_SEARCH_SOURCE_INCLUDE } from "./types";
 type Handler = (event: any, ctx: any) => unknown;
 
 function createHarness(args: {
-	allTools?: Array<{ name: string }>;
 	activeTools?: string[];
 	webSearch?: Partial<typeof DEFAULT_WEB_SEARCH_CONFIG>;
 } = {}) {
 	const handlers = new Map<string, Handler>();
-	const notifications: Array<[string, string]> = [];
+	let activeTools = [...(args.activeTools ?? [])];
 	const pi = {
 		on: (event: string, handler: Handler) => handlers.set(event, handler),
-		getAllTools: () => args.allTools ?? [],
-		getActiveTools: () => args.activeTools ?? [],
+		getActiveTools: () => activeTools,
+		setActiveTools: (names: string[]) => {
+			activeTools = [...names];
+		},
 	};
 	registerWebSearchExtension(
 		pi as never,
@@ -27,7 +28,7 @@ function createHarness(args: {
 				},
 				webSearch: {
 					...DEFAULT_WEB_SEARCH_CONFIG,
-					apis: [...DEFAULT_WEB_SEARCH_CONFIG.apis],
+					models: ["newapi/gpt-5.5"],
 					...(args.webSearch ?? {}),
 				},
 			},
@@ -36,59 +37,93 @@ function createHarness(args: {
 	);
 	const ctx = {
 		hasUI: true,
-		model: { api: "openai-responses" },
+		model: { provider: "newapi", api: "openai-responses", id: "gpt-5.5" },
 		ui: {
-			notify: (message: string, level: string) => notifications.push([message, level]),
+			notify: () => undefined,
 		},
 	};
-	return { handlers, notifications, ctx };
+	return { handlers, ctx, getActiveTools: () => activeTools };
 }
 
 describe("Web Search extension", () => {
-	test("warns once when a local web_search tool is registered", () => {
-		const { handlers, notifications, ctx } = createHarness({
-			allTools: [{ name: "read" }, { name: "web_search" }],
-		});
+	test("gives toolkit ownership to an eligible model", () => {
+		const { handlers, ctx, getActiveTools } = createHarness({ activeTools: ["read", "web_search"] });
 		const sessionStart = handlers.get("session_start")!;
-
 		sessionStart({ type: "session_start", reason: "startup" }, ctx);
-		sessionStart({ type: "session_start", reason: "reload" }, ctx);
 
-		expect(notifications).toHaveLength(1);
-		expect(notifications[0]?.[0]).toContain("local web_search tool detected");
-		expect(notifications[0]?.[1]).toBe("warning");
-	});
+		expect(getActiveTools()).toEqual(["read"]);
 
-	test("registers prompt and payload hooks with raw replacement return shapes", () => {
-		const { handlers, ctx } = createHarness();
 		const beforeAgentStart = handlers.get("before_agent_start")!;
 		const beforeProviderRequest = handlers.get("before_provider_request")!;
-
 		const promptResult = beforeAgentStart({ systemPrompt: "Base prompt" }, ctx) as {
 			systemPrompt: string;
 		};
 		const payloadResult = beforeProviderRequest(
-			{ payload: { model: "gpt-5.5", input: [] } },
+			{
+				payload: {
+					model: "gpt-5.5",
+					input: [],
+					tools: [{ type: "function", name: "web_search" }],
+				},
+			},
 			ctx,
 		) as Record<string, unknown>;
 
 		expect(promptResult.systemPrompt).toContain("## Web Search");
 		expect(payloadResult.tools).toEqual([{ type: "web_search" }]);
 		expect(payloadResult.include).toEqual([WEB_SEARCH_SOURCE_INCLUDE]);
-		expect(payloadResult).not.toHaveProperty("payload");
 	});
 
-	test("active and provider-payload conflicts suppress native behavior", () => {
-		const { handlers, ctx } = createHarness({ activeTools: ["web_search"] });
+	test("restores and reclaims the local tool when the model changes", () => {
+		const { handlers, ctx, getActiveTools } = createHarness({ activeTools: ["read", "web_search"] });
+		const sessionStart = handlers.get("session_start")!;
+		const modelSelect = handlers.get("model_select")!;
+
+		sessionStart({ type: "session_start", reason: "startup" }, ctx);
+		expect(getActiveTools()).toEqual(["read"]);
+
+		modelSelect(
+			{
+				model: { provider: "newapi", api: "openai-completions", id: "gpt-5.5" },
+			},
+			ctx,
+		);
+		expect(getActiveTools()).toEqual(["read", "web_search"]);
+
+		modelSelect({ model: ctx.model }, ctx);
+		expect(getActiveTools()).toEqual(["read"]);
+	});
+
+	test("does not activate a local tool that was initially inactive", () => {
+		const { handlers, ctx, getActiveTools } = createHarness({ activeTools: ["read"] });
+		const sessionStart = handlers.get("session_start")!;
+		const modelSelect = handlers.get("model_select")!;
+
+		sessionStart({ type: "session_start", reason: "startup" }, ctx);
+		modelSelect(
+			{
+				model: { provider: "newapi", api: "openai-completions", id: "gpt-5.5" },
+			},
+			ctx,
+		);
+
+		expect(getActiveTools()).toEqual(["read"]);
+	});
+
+	test("leaves unlisted models and their local tools unchanged", () => {
+		const { handlers, ctx, getActiveTools } = createHarness({
+			activeTools: ["read", "web_search"],
+			webSearch: { models: ["newapi/other-model"] },
+		});
 		const beforeAgentStart = handlers.get("before_agent_start")!;
 		const beforeProviderRequest = handlers.get("before_provider_request")!;
-		const localPayload = {
-			model: "gpt-5.5",
-			input: [],
-			tools: [{ type: "function", name: "web_search" }],
-		};
 
 		expect(beforeAgentStart({ systemPrompt: "Base prompt" }, ctx)).toBeUndefined();
-		expect(beforeProviderRequest({ payload: localPayload }, ctx)).toBeUndefined();
+		expect(
+			beforeProviderRequest({
+				payload: { model: "gpt-5.5", input: [], tools: [{ type: "function", name: "web_search" }] },
+			}, ctx),
+		).toBeUndefined();
+		expect(getActiveTools()).toEqual(["read", "web_search"]);
 	});
 });
