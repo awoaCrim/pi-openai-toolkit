@@ -172,7 +172,7 @@ describe("resolveNativeCompactionEnvironment", () => {
 		});
 	});
 
-	test("honors responsesCompactApis narrowing from config", async () => {
+	test("honors compaction.responsesApis narrowing from config", async () => {
 		const resolution = await resolveNativeCompactionEnvironment(
 			{
 				model: {
@@ -188,7 +188,7 @@ describe("resolveNativeCompactionEnvironment", () => {
 				},
 			} as any,
 			{
-				responsesCompactApis: ["openai-codex-responses"],
+				responsesApis: ["openai-codex-responses"],
 			},
 		);
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { DEFAULT_EXTENSION_CONFIG, type ExtensionConfig } from "./types";
+import { DEFAULT_COMPACTION_CONFIG, type CompactionConfig } from "./types";
 
 let importCounter = 0;
 
@@ -56,10 +56,10 @@ function createEvent(signal?: AbortSignal) {
 	} as never;
 }
 
-function createConfig(overrides: Partial<ExtensionConfig> = {}): ExtensionConfig {
+function createConfig(overrides: Partial<CompactionConfig> = {}): CompactionConfig {
 	return {
-		...DEFAULT_EXTENSION_CONFIG,
-		responsesCompactApis: [...DEFAULT_EXTENSION_CONFIG.responsesCompactApis],
+		...DEFAULT_COMPACTION_CONFIG,
+		responsesApis: [...DEFAULT_COMPACTION_CONFIG.responsesApis],
 		...overrides,
 	};
 }
@@ -94,7 +94,7 @@ describe("parseModelSpec", () => {
 });
 
 describe("runNativeFallbackCompaction", () => {
-	test("returns no-model-configured when compactionModel is unset", async () => {
+	test("returns no-model-configured when compaction.model is unset", async () => {
 		const { runNativeFallbackCompaction } = await loadNativeFallbackModule();
 
 		const result = await runNativeFallbackCompaction({
@@ -112,7 +112,7 @@ describe("runNativeFallbackCompaction", () => {
 		const result = await runNativeFallbackCompaction({
 			ctx: createCtx({}),
 			event: createEvent(),
-			config: createConfig({ compactionModel: "not-a-spec" }),
+			config: createConfig({ model: "not-a-spec" }),
 		});
 
 		expect(result).toEqual({ ok: false, reason: "invalid-model-spec", modelSpec: "not-a-spec" });
@@ -124,7 +124,7 @@ describe("runNativeFallbackCompaction", () => {
 		const result = await runNativeFallbackCompaction({
 			ctx: createCtx({ registryModels: [] }),
 			event: createEvent(),
-			config: createConfig({ compactionModel: "google/gemini-2.5-flash" }),
+			config: createConfig({ model: "google/gemini-2.5-flash" }),
 		});
 
 		expect(result).toEqual({ ok: false, reason: "model-not-found", modelSpec: "google/gemini-2.5-flash" });
@@ -137,7 +137,7 @@ describe("runNativeFallbackCompaction", () => {
 		const result = await runNativeFallbackCompaction({
 			ctx: createCtx({ currentModel: model, registryModels: [model] }),
 			event: createEvent(),
-			config: createConfig({ compactionModel: "anthropic/claude-fable-5" }),
+			config: createConfig({ model: "anthropic/claude-fable-5" }),
 		});
 
 		expect(result).toEqual({
@@ -157,7 +157,7 @@ describe("runNativeFallbackCompaction", () => {
 				auth: { ok: false, error: "no API key configured" },
 			}),
 			event: createEvent(),
-			config: createConfig({ compactionModel: "google/gemini-2.5-flash" }),
+			config: createConfig({ model: "google/gemini-2.5-flash" }),
 		});
 
 		expect(result).toEqual({
@@ -192,7 +192,7 @@ describe("runNativeFallbackCompaction", () => {
 				},
 			}),
 			event,
-			config: createConfig({ compactionModel: "google/gemini-2.5-flash", compactionThinkingLevel: "low" }),
+			config: createConfig({ model: "google/gemini-2.5-flash", thinkingLevel: "low" }),
 			compactFn: (async (...args: unknown[]) => {
 				compactCalls.push(args);
 				return compactionResult;
@@ -226,7 +226,7 @@ describe("runNativeFallbackCompaction", () => {
 				registryModels: [{ provider: "google", id: "gemini-2.5-flash" }],
 			}),
 			event: createEvent(),
-			config: createConfig({ compactionModel: "google/gemini-2.5-flash" }),
+			config: createConfig({ model: "google/gemini-2.5-flash" }),
 			compactFn: (async () => {
 				throw new DOMException("The operation was aborted.", "AbortError");
 			}) as never,
@@ -247,7 +247,7 @@ describe("runNativeFallbackCompaction", () => {
 				registryModels: [{ provider: "google", id: "gemini-2.5-flash" }],
 			}),
 			event: createEvent(),
-			config: createConfig({ compactionModel: "google/gemini-2.5-flash" }),
+			config: createConfig({ model: "google/gemini-2.5-flash" }),
 			compactFn: (async () => {
 				throw new Error("Summarization failed: rate limited");
 			}) as never,
@@ -269,7 +269,7 @@ describe("runNativeFallbackCompaction", () => {
 				registryModels: [{ provider: "google", id: "gemini-2.5-flash" }],
 			}),
 			event: createEvent(),
-			config: createConfig({ compactionModel: "google/gemini-2.5-flash" }),
+			config: createConfig({ model: "google/gemini-2.5-flash" }),
 			compactFn: (async () => ({
 				summary: "   ",
 				firstKeptEntryId: "entry-keep",

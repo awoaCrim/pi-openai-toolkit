@@ -24,7 +24,7 @@ type NativeCompactionFailureReason =
 export type NativeCompactionSupportOptions = {
 	enabled?: boolean;
 	/** Which Responses APIs should use the compact endpoint; defaults to all capable APIs. */
-	responsesCompactApis?: readonly string[];
+	responsesApis?: readonly string[];
 };
 
 export type ResponsesCompatibleRequestPayload = {
@@ -195,7 +195,7 @@ export async function resolveNativeCompactionEnvironment(
 	// The compact endpoint is selected purely by API family: any provider speaking
 	// openai-responses/openai-codex-responses gets a native compact attempt and fails
 	// open (to the fallback model or pi's default) when the endpoint is missing.
-	const configuredApis = normalizeConfiguredApis(options.responsesCompactApis);
+	const configuredApis = normalizeConfiguredApis(options.responsesApis);
 	if (!configuredApis.has(descriptor.api) || !isSupportedApi(descriptor.api)) {
 		return {
 			ok: false,

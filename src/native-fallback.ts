@@ -6,7 +6,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ProviderHeaders } from "@earendil-works/pi-ai";
 import { mergeProviderHeaders } from "./provider-headers";
-import type { ExtensionConfig } from "./types";
+import type { CompactionConfig } from "./types";
 
 export type ParsedModelSpec = {
 	provider: string;
@@ -82,13 +82,13 @@ function toErrorMessage(error: unknown): string {
 export async function runNativeFallbackCompaction(args: {
 	ctx: ExtensionContext;
 	event: SessionBeforeCompactEvent;
-	config: ExtensionConfig;
+	config: CompactionConfig;
 	compactFn?: NativeCompactFn;
 }): Promise<NativeFallbackResult> {
 	const { ctx, event, config } = args;
 	const compactFn = args.compactFn ?? compact;
 
-	const spec = config.compactionModel?.trim();
+	const spec = config.model?.trim();
 	if (!spec) {
 		return { ok: false, reason: "no-model-configured" };
 	}
@@ -125,7 +125,7 @@ export async function runNativeFallbackCompaction(args: {
 			mergeProviderHeaders(auth.headers),
 			event.customInstructions,
 			event.signal,
-			config.compactionThinkingLevel,
+			config.thinkingLevel,
 			undefined,
 			auth.env,
 		);

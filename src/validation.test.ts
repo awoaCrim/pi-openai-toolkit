@@ -1,10 +1,13 @@
 import { afterEach, expect, mock, test } from "bun:test";
-import { clearRequestContextCache } from "./request-context-cache";
+import { clearRequestContextCache, getCompactionRequestExtras } from "./request-context-cache";
+import { transformWebSearchPayload } from "./web-search/payload";
+import { WEB_SEARCH_SOURCE_INCLUDE } from "./web-search/types";
 import {
-	DEFAULT_EXTENSION_CONFIG,
+	DEFAULT_COMPACTION_CONFIG,
+	DEFAULT_WEB_SEARCH_CONFIG,
 	NATIVE_COMPACTION_FALLBACK_SUMMARY,
 	createNativeCompactionDetails,
-	type ExtensionConfig,
+	type CompactionConfig,
 } from "./types";
 
 type AssistantPhase = "commentary" | "final_answer";
@@ -46,7 +49,7 @@ type HookHandler = (event: unknown, ctx: unknown) => Promise<unknown>;
 
 type HookHarnessOptions = {
 	compactResult?: Record<string, unknown>;
-	config?: Partial<ExtensionConfig>;
+	config?: Partial<CompactionConfig>;
 	nativeFallbackResult?: Record<string, unknown>;
 };
 
@@ -300,7 +303,7 @@ function createContext(args: {
 	const sessionContextMessages =
 		args.sessionContextMessages ?? branchEntries.filter((entry) => entry.type === "message").map(toReplayMessage);
 	return {
-		cwd: "/tmp/pi-better-compaction-validation",
+		cwd: "/tmp/pi-openai-toolkit-validation",
 		hasUI: false,
 		getSystemPrompt: () => args.systemPrompt ?? "Current instructions v1",
 		model,
@@ -317,8 +320,8 @@ function createContext(args: {
 				model: null,
 			}),
 			getSessionId: () => "session-validation",
-			getSessionFile: () => "/tmp/pi-better-compaction-validation/session.json",
-			getSessionDir: () => "/tmp/pi-better-compaction-validation",
+			getSessionFile: () => "/tmp/pi-openai-toolkit-validation/session.json",
+			getSessionDir: () => "/tmp/pi-openai-toolkit-validation",
 		},
 	};
 }
@@ -335,11 +338,17 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 	registerPiCodingAgentMock();
 
 	mock.module("./config", () => ({
-		loadExtensionConfig: () => ({
+		loadToolkitConfig: () => ({
 			config: {
-				...DEFAULT_EXTENSION_CONFIG,
-				responsesCompactApis: [...DEFAULT_EXTENSION_CONFIG.responsesCompactApis],
-				...(options.config ?? {}),
+				compaction: {
+					...DEFAULT_COMPACTION_CONFIG,
+					responsesApis: [...DEFAULT_COMPACTION_CONFIG.responsesApis],
+					...(options.config ?? {}),
+				},
+				webSearch: {
+					...DEFAULT_WEB_SEARCH_CONFIG,
+					apis: [...DEFAULT_WEB_SEARCH_CONFIG.apis],
+				},
 			},
 			source: undefined,
 			warnings: [],
@@ -384,7 +393,7 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 	const sessionBeforeCompact = handlers.get("session_before_compact");
 	const beforeProviderRequest = handlers.get("before_provider_request");
 	if (!sessionBeforeCompact || !beforeProviderRequest) {
-		throw new Error("Expected pi-better-compaction hooks to register");
+		throw new Error("Expected pi-openai-toolkit compaction hooks to register");
 	}
 
 	return {
@@ -720,9 +729,31 @@ test("first post-compaction turn rewrites to fresh preamble + opaque compacted w
 	)) as { input: unknown[]; instructions: string };
 	const expectedTail = await serializeResponsesInput(model, [toReplayMessage(currentUser)]);
 	const expectedInput = [payload.input[0], ...compactedWindow, ...expectedTail];
+	const liveSearch = transformWebSearchPayload({
+		api: model.api,
+		config: { ...DEFAULT_WEB_SEARCH_CONFIG, apis: [...DEFAULT_WEB_SEARCH_CONFIG.apis] },
+		payload: rewritten,
+	});
+	const finalPayload = liveSearch.payload as {
+		input: unknown[];
+		instructions: string;
+		tools: unknown[];
+		include: unknown[];
+	};
+	const cachedExtras = getCompactionRequestExtras({
+		provider: model.provider,
+		api: model.api,
+		model: model.id,
+		baseUrl: model.baseUrl,
+		sessionId: "session-validation",
+	});
 
 	expect(rewritten.instructions).toBe("Current instructions v2");
 	expect(rewritten.input).toEqual(expectedInput);
+	expect(finalPayload.input).toEqual(expectedInput);
+	expect(finalPayload.tools).toEqual([{ type: "web_search" }]);
+	expect(finalPayload.include).toEqual([WEB_SEARCH_SOURCE_INCLUDE]);
+	expect(cachedExtras?.tools).toBeUndefined();
 	expect(JSON.stringify(rewritten.input)).not.toContain("Old user context that Pi should stop duplicating.");
 	expect(JSON.stringify(rewritten.input)).not.toContain(
 		"Old assistant context that should disappear after native replay.",
@@ -982,7 +1013,7 @@ test("responses compact failure falls back to the configured native model and re
 			result: fallbackResult,
 			model: { provider: "google", id: "gemini-2.5-flash" },
 		},
-		config: { compactionModel: "google/gemini-2.5-flash" },
+		config: { model: "google/gemini-2.5-flash" },
 	});
 	const model = { ...defaultModel };
 	const user = createUserEntry("entry_user", "Compact this conversation.");
@@ -1034,7 +1065,7 @@ test("non-Responses model routes straight to the native-method fallback", async 
 			result: fallbackResult,
 			model: { provider: "google", id: "gemini-2.5-flash" },
 		},
-		config: { compactionModel: "google/gemini-2.5-flash" },
+		config: { model: "google/gemini-2.5-flash" },
 	});
 	const user = createUserEntry("entry_user", "Compact this Anthropic conversation.");
 	const event = {

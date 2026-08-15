@@ -5,7 +5,7 @@ import type {
 	ExtensionContext,
 	SessionBeforeCompactEvent,
 } from "@earendil-works/pi-coding-agent";
-import { loadExtensionConfig } from "./config";
+import { loadToolkitConfig } from "./config";
 import { writeDebugArtifact } from "./debug";
 import { resolveLatestNativeCompactionEntry } from "./details-store";
 import { runNativeFallbackCompaction } from "./native-fallback";
@@ -24,9 +24,9 @@ import { serializeMessagesToCompactRequest, type NativeCompactionRequestBody, ty
 import {
 	createNativeCompactionDetails,
 	createNativeCompactionResult,
-	EXTENSION_ID,
+	COMPACTION_EXTENSION_ID,
 	isNativeCompactionDetails,
-	type ExtensionConfig,
+	type CompactionConfig,
 	type NativeCompactionDetails,
 	type NativeCompactionRequestMeta,
 } from "./types";
@@ -73,7 +73,7 @@ function getSessionId(ctx: ExtensionContext): string | undefined {
 
 function notifyWarning(ctx: ExtensionContext, message: string): void {
 	if (ctx.hasUI) {
-		ctx.ui.notify(`${EXTENSION_ID}: ${message}`, "warning");
+		ctx.ui.notify(`${COMPACTION_EXTENSION_ID}: ${message}`, "warning");
 	}
 }
 
@@ -93,7 +93,7 @@ function buildCompactionInstructions(systemPrompt: string, customInstructions?: 
 async function runResponsesNativeCompact(
 	event: SessionBeforeCompactEvent,
 	ctx: ExtensionContext,
-	config: ExtensionConfig,
+	config: CompactionConfig,
 	runtime: NativeCompactionRuntime,
 ): Promise<ResponsesCompactOutcome> {
 	const instructions = buildCompactionInstructions(ctx.getSystemPrompt(), event.customInstructions);
@@ -254,7 +254,8 @@ async function runResponsesNativeCompact(
 }
 
 async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx: ExtensionContext) {
-	const { config } = loadExtensionConfig();
+	const { config: toolkitConfig } = loadToolkitConfig();
+	const config = toolkitConfig.compaction;
 	if (!config.enabled) {
 		return undefined;
 	}
@@ -283,7 +284,7 @@ async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx:
 	// Branch 1: Responses-family APIs use remote_compaction_v2 on the normal Responses stream.
 	const resolution = await resolveNativeCompactionEnvironment(ctx, {
 		enabled: config.enabled,
-		responsesCompactApis: config.responsesCompactApis,
+		responsesApis: config.responsesApis,
 	});
 	if (resolution.ok) {
 		const responsesOutcome = await runResponsesNativeCompact(event, ctx, config, resolution.runtime);
@@ -316,7 +317,7 @@ async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx:
 	if (fallback.ok) {
 		if (ctx.hasUI) {
 			ctx.ui.notify(
-				`${EXTENSION_ID}: compacted with ${fallback.model.provider}/${fallback.model.id} (native method)`,
+				`${COMPACTION_EXTENSION_ID}: compacted with ${fallback.model.provider}/${fallback.model.id} (native method)`,
 				"info",
 			);
 		}
@@ -361,7 +362,8 @@ async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx:
 }
 
 async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ctx: ExtensionContext) {
-	const { config } = loadExtensionConfig();
+	const { config: toolkitConfig } = loadToolkitConfig();
+	const config = toolkitConfig.compaction;
 	if (!config.enabled) {
 		return undefined;
 	}
@@ -385,7 +387,7 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 		ctx,
 		{
 			enabled: config.enabled,
-			responsesCompactApis: config.responsesCompactApis,
+			responsesApis: config.responsesApis,
 		},
 		event.payload,
 	);
@@ -500,11 +502,12 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 
 export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
-		const { config, source, warnings } = loadExtensionConfig();
+		const { config: toolkitConfig, source, warnings } = loadToolkitConfig();
+		const config = toolkitConfig.compaction;
 		if (!config.enabled) return;
 
 		if (warnings.length > 0 && ctx.hasUI && config.debug) {
-			ctx.ui.notify(`${EXTENSION_ID}: ${warnings[0]}`, "warning");
+			ctx.ui.notify(`${COMPACTION_EXTENSION_ID}: ${warnings[0]}`, "warning");
 		}
 
 		const artifactPath = writeDebugArtifact(
@@ -522,8 +525,8 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.hasUI && (config.notifyOnLoad || config.debug)) {
 			ctx.ui.notify(
 				artifactPath
-					? `${EXTENSION_ID} loaded • debug artifacts → ${artifactPath}`
-					: `${EXTENSION_ID} loaded`,
+					? `${COMPACTION_EXTENSION_ID} loaded • debug artifacts → ${artifactPath}`
+					: `${COMPACTION_EXTENSION_ID} loaded`,
 				"info",
 			);
 		}

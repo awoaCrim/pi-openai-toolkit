@@ -3,14 +3,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
-	EXTENSION_ID,
+	COMPACTION_EXTENSION_ID,
 	REDACTED_VALUE,
 	type ArtifactContext,
 	type ArtifactPaths,
 	type ArtifactSessionInfo,
 	type DebugArtifactEnvelope,
 	type DebugArtifactKind,
-	type ExtensionConfig,
+	type CompactionConfig,
 	type RedactOptions,
 } from "./types";
 
@@ -86,7 +86,7 @@ export function redactValue(value: unknown, options: RedactOptions = {}): unknow
 	return visit(value);
 }
 
-export function resolveArtifactPaths(settings: ExtensionConfig, context: ArtifactContext): ArtifactPaths {
+export function resolveArtifactPaths(settings: CompactionConfig, context: ArtifactContext): ArtifactPaths {
 	const sessionInfo = toSessionInfo(context);
 	const rootDir = settings.artifactRoot.startsWith("~/")
 		? path.join(os.homedir(), settings.artifactRoot.slice(2))
@@ -117,7 +117,7 @@ function selectArtifactDirectory(paths: ArtifactPaths, kind: DebugArtifactKind):
 	}
 }
 
-function shouldWriteArtifact(kind: DebugArtifactKind, settings: ExtensionConfig): boolean {
+function shouldWriteArtifact(kind: DebugArtifactKind, settings: CompactionConfig): boolean {
 	switch (kind) {
 		case "provider-request":
 			return settings.logProviderPayloads;
@@ -134,7 +134,7 @@ function shouldWriteArtifact(kind: DebugArtifactKind, settings: ExtensionConfig)
 export function writeDebugArtifact(
 	kind: DebugArtifactKind,
 	data: unknown,
-	settings: ExtensionConfig,
+	settings: CompactionConfig,
 	context: ArtifactContext,
 ): string | undefined {
 	if (!shouldWriteArtifact(kind, settings)) {
@@ -150,7 +150,7 @@ export function writeDebugArtifact(
 	const fileName = `${timestamp.replace(/[.:]/g, "-")}-${kind}.json`;
 	const filePath = path.join(targetDir, fileName);
 	const envelope: DebugArtifactEnvelope = {
-		extension: EXTENSION_ID,
+		extension: COMPACTION_EXTENSION_ID,
 		kind,
 		timestamp,
 		cwd: sessionInfo.cwd,
