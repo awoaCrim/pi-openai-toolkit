@@ -184,6 +184,12 @@ describe("runNativeFallbackCompaction", () => {
 			ctx: createCtx({
 				currentModel: { provider: "anthropic", id: "claude-fable-5" },
 				registryModels: [fallbackModel],
+				auth: {
+					ok: true,
+					apiKey: "sk-fallback",
+					headers: { "x-h": "1", "x-delete": null },
+					env: { E: "1" },
+				},
 			}),
 			event,
 			config: createConfig({ compactionModel: "google/gemini-2.5-flash", compactionThinkingLevel: "low" }),

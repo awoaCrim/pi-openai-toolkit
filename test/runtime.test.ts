@@ -20,6 +20,7 @@ describe("resolveNativeCompactionEnvironment", () => {
 						apiKey: "sk-openai",
 						headers: {
 							"x-test-request-header": "present",
+							"x-null-header": null,
 						},
 					};
 				},
@@ -36,6 +37,7 @@ describe("resolveNativeCompactionEnvironment", () => {
 				apiKey: "sk-openai",
 				headers: {
 					"x-test-request-header": "present",
+					"x-null-header": null,
 				},
 				responsesPath: "responses",
 				responsesUrl: "https://example.com/v1/responses",

@@ -4,6 +4,8 @@ import {
 	type ExtensionContext,
 	type SessionBeforeCompactEvent,
 } from "@earendil-works/pi-coding-agent";
+import type { ProviderHeaders } from "@earendil-works/pi-ai";
+import { mergeProviderHeaders } from "./provider-headers";
 import type { ExtensionConfig } from "./types";
 
 export type ParsedModelSpec = {
@@ -38,7 +40,7 @@ export type NativeFallbackResult =
 export type NativeCompactFn = typeof compact;
 
 type ResolvedAuth =
-	| { ok: true; apiKey?: string; headers?: Record<string, string>; env?: Record<string, string> }
+	| { ok: true; apiKey?: string; headers?: ProviderHeaders; env?: Record<string, string> }
 	| { ok: false; error: string };
 
 /** Parse "provider/model-id" (model ids may themselves contain slashes). */
@@ -120,7 +122,7 @@ export async function runNativeFallbackCompaction(args: {
 			event.preparation,
 			model,
 			auth.apiKey,
-			auth.headers,
+			mergeProviderHeaders(auth.headers),
 			event.customInstructions,
 			event.signal,
 			config.compactionThinkingLevel,

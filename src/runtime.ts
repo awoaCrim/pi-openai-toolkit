@@ -1,4 +1,4 @@
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Model, ProviderHeaders } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { RESPONSES_COMPACT_CAPABLE_APIS } from "./types";
 
@@ -40,7 +40,7 @@ export type NativeCompactionRuntime = {
 	model: string;
 	baseUrl: string;
 	apiKey: string;
-	headers?: Record<string, string>;
+	headers?: ProviderHeaders;
 	responsesPath: string;
 	responsesUrl: string;
 	compactPath: string;
@@ -123,10 +123,10 @@ export function buildCompactPath(api: ResponsesCompactApi): string {
 async function resolveRequestAuth(
 	ctx: ExtensionContext,
 	model: RuntimeModel,
-): Promise<{ apiKey?: string; headers?: Record<string, string> }> {
+): Promise<{ apiKey?: string; headers?: ProviderHeaders }> {
 	const modelRegistry = ctx.modelRegistry as {
 		getApiKeyAndHeaders?: (currentModel: RuntimeModel) => Promise<
-			| { ok: true; apiKey?: string; headers?: Record<string, string> }
+			| { ok: true; apiKey?: string; headers?: ProviderHeaders }
 			| { ok: false; error: string }
 		>;
 	};
@@ -233,7 +233,7 @@ export async function resolveNativeCompactionEnvironment(
 		requestPayload = payload;
 	}
 
-	let auth: { apiKey?: string; headers?: Record<string, string> };
+	let auth: { apiKey?: string; headers?: ProviderHeaders };
 	try {
 		auth = await resolveRequestAuth(ctx, currentModel);
 	} catch (error) {
