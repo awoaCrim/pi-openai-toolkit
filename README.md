@@ -84,6 +84,7 @@ C:\Users\<user>\.pi\agent\extensions\pi-openai-toolkit\config.json
   "compaction": {
     "enabled": true,
     "allowCompactionContinuityBreak": false,
+    "remoteCompactModel": "uwoacrimson/gpt-5.6-luna",
     "model": null,
     "thinkingLevel": "off",
     "responsesApis": [
@@ -112,13 +113,14 @@ C:\Users\<user>\.pi\agent\extensions\pi-openai-toolkit\config.json
 
 - `enabled` (*boolean*, default: `true`): Enable or disable Remote Compaction.
 - `allowCompactionContinuityBreak` (*boolean*, default: `false`): When `true`, allows restarting a fresh native opaque compaction chain from Pi's current session text if the latest compaction was made by another strategy (e.g. text summary).
-- `model` (*string | null*, default: `null`): Fallback model formatted as `provider/model-id` (e.g. `"openai/gpt-4o-mini"`) used if the remote compact gateway fails or when switching to non-Responses APIs. If `null`, uses the session's active model.
+- `remoteCompactModel` (*string | null*, default: `null`): Model formatted as `provider/model-id` used only for the synthetic `remote_compaction_v2` request. Pi's active session model is not switched and resumes normal requests after compaction. The override must resolve to the same provider, Responses API identifier, and effective base URL as the active model. `null` preserves the current same-model path.
+- `model` (*string | null*, default: `null`): Separate native text-summary fallback model formatted as `provider/model-id` (e.g. `"openai/gpt-4o-mini"`) used if remote v2 is unavailable or fails. If `null`, Pi uses its default current-model compaction path.
 - `thinkingLevel` (*string*, default: `"off"`): Reasoning / thinking level passed to Pi native compaction fallback (`"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`).
 - `responsesApis` (*string[]*): Narrow the supported remote compaction API identifiers (subset of `["openai-responses", "openai-codex-responses"]`).
 - `notifyOnLoad` (*boolean*, default: `false`): Show a notification banner on Pi startup.
 - `debug` (*boolean*, default: `false`): Output diagnostics and write execution artifacts to disk.
 - `logProviderPayloads` / `logCompactResponses` (*boolean*, default: `false`): Write raw provider request payloads and compact SSE event bodies to artifacts.
-- `redactSensitiveData` (*boolean*, default: `true`): Automatically redact Authorization headers, API keys, sensitive URL query tokens, and opaque `encrypted_content` ciphertext from debug artifacts.
+- `redactSensitiveData` (*boolean*, default: `true`): Apply full sensitive-value redaction to debug artifacts. Authorization credentials, API keys/tokens, and opaque `encrypted_content` are always redacted even when this option is `false`.
 - `artifactRoot` (*string*): Directory root for diagnostic artifacts. Relative paths resolve against the config directory.
 
 #### `webSearch`
@@ -150,6 +152,7 @@ Content-Type: application/json
 ```
 
 - **Validation Criteria**: Must return a valid SSE stream with `response.completed` (status `completed`) containing exactly one output item of `type: "compaction"` with non-empty `encrypted_content`.
+- **Remote Model Override**: `compaction.remoteCompactModel` can assign a same-gateway Responses model as the checkpoint producer while the active model remains the consumer. Its registered model metadata, authentication, headers, and effective base URL are used only for the synthetic compact request. Existing and recursive checkpoints remain replayable by the active model.
 - **Zero Loss Replay**: The opaque encrypted item is stored in `CompactionEntry.details.compactedWindow`. On subsequent requests, it is transparently prepended after fresh preamble instructions alongside live turns, eliminating lossy text re-summaries.
 - **Graceful Multi-Tier Fallback**:
   1. Compatible Responses endpoints &rarr; Remote v2 Opaque Compaction.

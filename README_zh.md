@@ -84,6 +84,7 @@ C:\Users\<user>\.pi\agent\extensions\pi-openai-toolkit\config.json
   "compaction": {
     "enabled": true,
     "allowCompactionContinuityBreak": false,
+    "remoteCompactModel": "uwoacrimson/gpt-5.6-luna",
     "model": null,
     "thinkingLevel": "off",
     "responsesApis": [
@@ -112,13 +113,14 @@ C:\Users\<user>\.pi\agent\extensions\pi-openai-toolkit\config.json
 
 - `enabled` (*boolean*, 默认 `true`): 是否启用远端无损压缩。
 - `allowCompactionContinuityBreak` (*boolean*, 默认 `false`): 若最近一次历史压缩由其他方式（如文本摘要）生成，设为 `true` 允许直接从当前有效文本上下文重建密文压缩链。
-- `model` (*string | null*, 默认 `null`): 降级模型，格式为 `"provider/model-id"`（例如 `"openai/gpt-4o-mini"`）。当网关不支持远端压缩或切换到非 Responses 协议模型时使用。为 `null` 时使用当前会话模型。
+- `remoteCompactModel` (*string | null*, 默认 `null`): 仅用于 synthetic `remote_compaction_v2` 请求的模型，格式为 `"provider/model-id"`。Pi 不会切换当前会话模型，压缩完成后仍由原模型继续正常请求。覆盖模型必须与当前模型使用相同的 Provider、Responses API 标识符和实际生效的 Base URL。为 `null` 时保持当前模型执行远端压缩的原有行为。
+- `model` (*string | null*, 默认 `null`): 独立的原生文本摘要降级模型，格式为 `"provider/model-id"`（例如 `"openai/gpt-4o-mini"`）。当 Remote v2 不可用或失败时使用；为 `null` 时进入 Pi 默认的当前模型压缩路径。
 - `thinkingLevel` (*string*, 默认 `"off"`): 降级模型调用 Pi 原生压缩时的思考级别（`"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`）。
 - `responsesApis` (*string[]*): 允许尝试远端压缩的 API 标识符子集（从 `["openai-responses", "openai-codex-responses"]` 中选定）。
 - `notifyOnLoad` (*boolean*, 默认 `false`): Pi 启动加载时是否弹出气泡提示。
 - `debug` (*boolean*, 默认 `false`): 是否开启调试模式并记录诊断日志。
 - `logProviderPayloads` / `logCompactResponses` (*boolean*, 默认 `false`): 是否在 Artifacts 中记录完整的 Provider 请求与 SSE 流事件体。
-- `redactSensitiveData` (*boolean*, 默认 `true`): 自动对日志中的 Authorization 请求头、API Key、URL 敏感参数及 `encrypted_content` 密文进行脱敏处理（替换为 `[REDACTED]`）。
+- `redactSensitiveData` (*boolean*, 默认 `true`): 对调试日志应用完整的敏感值脱敏。即使设为 `false`，Authorization 凭据、API Key/Token 和 `encrypted_content` 密文也始终会被替换为 `[REDACTED]`。
 - `artifactRoot` (*string*): 诊断日志存储根目录，支持 `~/` 路径。
 
 #### `webSearch`（联网搜索配置）
@@ -150,6 +152,7 @@ Content-Type: application/json
 ```
 
 - **校验标准**：接收 SSE 流并验证 `response.completed` 事件（状态为 `completed`），且返回且仅返回一个包含非空 `encrypted_content` 密文的 `type: "compaction"` 数据块。
+- **远端压缩模型覆盖**：`compaction.remoteCompactModel` 可以让同一网关上的另一个 Responses 模型负责生成 checkpoint，而当前活动模型仍是 checkpoint 的消费者。synthetic 压缩请求会使用覆盖模型在注册表中的模型元数据、认证、请求头和实际 Base URL；旧 checkpoint、递归压缩 checkpoint 都仍由当前活动模型重放。
 - **无损重放机制**：密文数据完整存入 `CompactionEntry.details.compactedWindow`。在后续对话中，插件会自动将密文插入在最新的系统指令之后与最新几轮消息之前，实现完全服务端无损上下文还原。
 - **三级优雅降级**：
   1. 支持的 Responses 端点 &rarr; 触发 Remote v2 密文无损压缩；
