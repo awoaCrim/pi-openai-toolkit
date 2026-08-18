@@ -202,6 +202,7 @@ function createCompactionEntry(args: {
 	firstKeptEntryId: string;
 	tokensBefore?: number;
 	model?: TestModel;
+	compactionModel?: TestModel;
 	compactedWindow: unknown[];
 	compactResponseId?: string;
 }): TestSessionEntry {
@@ -218,6 +219,14 @@ function createCompactionEntry(args: {
 			api: model.api,
 			model: model.id,
 			baseUrl: model.baseUrl,
+			compactionModel: args.compactionModel
+				? {
+					provider: args.compactionModel.provider,
+					api: args.compactionModel.api,
+					model: args.compactionModel.id,
+					baseUrl: args.compactionModel.baseUrl,
+				}
+				: undefined,
 			compactedWindow: args.compactedWindow,
 			compactResponseId: args.compactResponseId,
 			createdAt: nextTimestamp(),
@@ -296,7 +305,8 @@ function createContext(args: {
 	model?: TestModel;
 	systemPrompt?: string;
 	sessionContextMessages?: Record<string, unknown>[];
-	registryModels?: Array<{ provider: string; id: string }>;
+	registryModels?: TestModel[];
+	resolveAuth?: (model: TestModel) => Promise<Record<string, unknown>> | Record<string, unknown>;
 } = {}) {
 	const branchEntries = args.branchEntries ?? [];
 	const model = args.model ?? defaultModel;
@@ -310,7 +320,11 @@ function createContext(args: {
 		modelRegistry: {
 			find: (provider: string, modelId: string) =>
 				(args.registryModels ?? []).find((entry) => entry.provider === provider && entry.id === modelId),
-			getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "sk-test-native-compaction" }),
+			getApiKeyAndHeaders: async (requestModel: TestModel) =>
+				args.resolveAuth?.(requestModel) ?? {
+					ok: true,
+					apiKey: `sk-test-${requestModel.id}`,
+				},
 		},
 		sessionManager: {
 			getBranch: () => branchEntries,
@@ -1093,6 +1107,283 @@ test("non-Responses model routes straight to the native-method fallback", async 
 	expect(compactCalls).toHaveLength(0);
 	expect(fallbackCalls).toHaveLength(1);
 	expect(result.compaction).toEqual(fallbackResult);
+});
+
+test("remoteCompactModel uses Luna only for compaction, persists producer identity, and replays to Sol", async () => {
+	const sol = {
+		...defaultModel,
+		provider: "uwoacrimson",
+		id: "gpt-5.6-sol",
+		baseUrl: "https://gateway.example/v1",
+	};
+	const luna = { ...sol, id: "gpt-5.6-luna" };
+	const opaqueWindow = [{ type: "compaction", encrypted_content: "opaque-luna-checkpoint" }];
+	const { sessionBeforeCompact, beforeProviderRequest, compactCalls } = await loadHookHarness({
+		config: { remoteCompactModel: "uwoacrimson/gpt-5.6-luna" },
+		compactResult: {
+			ok: true,
+			status: 200,
+			compactedWindow: opaqueWindow,
+			compactResponseId: "resp_luna",
+			createdAt: nextTimestamp(),
+			response: { id: "resp_luna", status: "completed", output: opaqueWindow },
+		},
+	});
+	const user = createUserEntry("sol_user", "Remember this Sol-authored context.");
+	const event = {
+		reason: "manual",
+		signal: new AbortController().signal,
+		customInstructions: undefined,
+		preparation: {
+			tokensBefore: 512,
+			firstKeptEntryId: user.id,
+			previousSummary: undefined,
+			messagesToSummarize: [toReplayMessage(user)],
+			turnPrefixMessages: [],
+		},
+	};
+	const context = createContext({
+		model: sol,
+		registryModels: [luna],
+		sessionContextMessages: [toReplayMessage(user)],
+		resolveAuth: (model) => ({
+			ok: true,
+			apiKey: model.id === luna.id ? "sk-luna" : "sk-sol",
+			headers: { "x-runtime-model": model.id },
+		}),
+	});
+	const livePayload = {
+		model: sol.id,
+		input: [],
+		tools: [{ type: "function", name: "read" }],
+		parallel_tool_calls: true,
+		reasoning: { effort: "high", summary: "auto" },
+		service_tier: "flex",
+		prompt_cache_key: "session-sol",
+		text: { verbosity: "low" },
+	};
+
+	await beforeProviderRequest({ payload: livePayload }, context);
+	const result = (await sessionBeforeCompact(event, context)) as { compaction: TestSessionEntry };
+
+	expect(context.model).toBe(sol);
+	expect(compactCalls).toHaveLength(1);
+	const compactCall = compactCalls[0] as {
+		runtime: { model: string; apiKey: string; currentModel: TestModel; headers?: Record<string, string> };
+		request: Record<string, unknown>;
+	};
+	expect(compactCall.runtime.model).toBe(luna.id);
+	expect(compactCall.runtime.currentModel).toBe(luna);
+	expect(compactCall.runtime.apiKey).toBe("sk-luna");
+	expect(compactCall.runtime.headers).toEqual({ "x-runtime-model": luna.id });
+	expect(compactCall.request).toEqual(
+		expect.objectContaining({
+			model: luna.id,
+			tools: [{ type: "function", name: "read" }],
+			parallel_tool_calls: true,
+			reasoning: { effort: "high", summary: "auto" },
+			service_tier: "flex",
+			prompt_cache_key: "session-sol",
+			text: { verbosity: "low" },
+		}),
+	);
+	const details = result.compaction.details!;
+	expect(details).toEqual(
+		expect.objectContaining({
+			provider: sol.provider,
+			api: sol.api,
+			model: sol.id,
+			baseUrl: sol.baseUrl,
+			compactionModel: {
+				provider: luna.provider,
+				api: luna.api,
+				model: luna.id,
+				baseUrl: luna.baseUrl,
+			},
+			compactedWindow: opaqueWindow,
+		}),
+	);
+
+	const compactionEntry: TestSessionEntry = {
+		type: "compaction",
+		id: "luna_compaction_entry",
+		timestamp: nextTimestamp(),
+		summary: result.compaction.summary,
+		firstKeptEntryId: result.compaction.firstKeptEntryId,
+		tokensBefore: result.compaction.tokensBefore,
+		details,
+	};
+	const currentUser = createUserEntry("sol_after_luna", "Continue with Sol after the Luna checkpoint.");
+	const branchEntries = [user, compactionEntry, currentUser];
+	const replayPayload = await buildPiReplayPayload({
+		model: sol,
+		branchEntries,
+		compactionEntry,
+		instructions: "Sol remains active",
+		freshPreamble: "Fresh Sol preamble",
+	});
+	const rewritten = (await beforeProviderRequest(
+		{ payload: replayPayload },
+		createContext({
+			branchEntries,
+			model: sol,
+			registryModels: [luna],
+			systemPrompt: replayPayload.instructions,
+		}),
+	)) as { model: string; input: unknown[] };
+
+	expect(rewritten.model).toBe(sol.id);
+	expect(rewritten.input).toEqual([
+		replayPayload.input[0],
+		...opaqueWindow,
+		...(await serializeResponsesInput(sol, [toReplayMessage(currentUser)])),
+	]);
+});
+
+test("Luna recursively compacts the latest consumer checkpoint and can take over a legacy Sol checkpoint", async () => {
+	const sol = {
+		...defaultModel,
+		provider: "uwoacrimson",
+		id: "gpt-5.6-sol",
+		baseUrl: "https://gateway.example/v1",
+	};
+	const luna = { ...sol, id: "gpt-5.6-luna" };
+
+	for (const priorProducer of [luna, undefined]) {
+		const { sessionBeforeCompact, compactCalls } = await loadHookHarness({
+			config: { remoteCompactModel: "uwoacrimson/gpt-5.6-luna" },
+		});
+		const oldUser = createUserEntry(
+			priorProducer ? "recursive_old_user" : "handoff_old_user",
+			"Context already sealed in the previous checkpoint.",
+		);
+		const oldWindow = [
+			{
+				type: "compaction",
+				encrypted_content: priorProducer ? "opaque-luna-prior" : "opaque-sol-prior",
+			},
+		];
+		const priorCompaction = createCompactionEntry({
+			id: priorProducer ? "recursive_prior" : "handoff_prior",
+			firstKeptEntryId: oldUser.id,
+			model: sol,
+			compactionModel: priorProducer,
+			compactedWindow: oldWindow,
+		});
+		const tailUser = createUserEntry(
+			priorProducer ? "recursive_tail" : "handoff_tail",
+			"Live tail that Luna must append to the opaque checkpoint.",
+		);
+		const branchEntries = [oldUser, priorCompaction, tailUser];
+		const event = {
+			reason: "threshold",
+			signal: new AbortController().signal,
+			customInstructions: undefined,
+			preparation: {
+				tokensBefore: 768,
+				firstKeptEntryId: tailUser.id,
+				previousSummary: NATIVE_COMPACTION_FALLBACK_SUMMARY,
+				messagesToSummarize: [],
+				turnPrefixMessages: [],
+			},
+		};
+
+		const result = (await sessionBeforeCompact(
+			event,
+			createContext({ branchEntries, model: sol, registryModels: [luna] }),
+		)) as { compaction: TestSessionEntry };
+
+		expect(compactCalls).toHaveLength(1);
+		const request = compactCalls[0]?.request as { model: string; input: unknown[] };
+		expect(request.model).toBe(luna.id);
+		expect(request.input).toEqual([
+			...oldWindow,
+			...(await serializeResponsesInput(luna, [toReplayMessage(tailUser)])),
+		]);
+		expect(result.compaction.details).toEqual(
+			expect.objectContaining({
+				provider: sol.provider,
+				model: sol.id,
+				compactionModel: expect.objectContaining({ provider: luna.provider, model: luna.id }),
+			}),
+		);
+	}
+});
+
+test("manual, threshold, and overflow compaction reasons share the remote override route", async () => {
+	const sol = {
+		...defaultModel,
+		provider: "uwoacrimson",
+		id: "gpt-5.6-sol",
+		baseUrl: "https://gateway.example/v1",
+	};
+	const luna = { ...sol, id: "gpt-5.6-luna" };
+	const { sessionBeforeCompact, compactCalls } = await loadHookHarness({
+		config: { remoteCompactModel: "uwoacrimson/gpt-5.6-luna" },
+	});
+	const user = createUserEntry("reason_user", "Compact for every Pi reason.");
+	const context = createContext({
+		model: sol,
+		registryModels: [luna],
+		sessionContextMessages: [toReplayMessage(user)],
+	});
+
+	for (const reason of ["manual", "threshold", "overflow"]) {
+		await sessionBeforeCompact(
+			{
+				reason,
+				signal: new AbortController().signal,
+				customInstructions: undefined,
+				preparation: {
+					tokensBefore: 256,
+					firstKeptEntryId: user.id,
+					previousSummary: undefined,
+					messagesToSummarize: [toReplayMessage(user)],
+					turnPrefixMessages: [],
+				},
+			},
+			context,
+		);
+	}
+
+	expect(compactCalls).toHaveLength(3);
+	expect(compactCalls.map((call) => (call.request as { model: string }).model)).toEqual([
+		luna.id,
+		luna.id,
+		luna.id,
+	]);
+});
+
+test("an unusable explicit remote override enters native fallback without retrying remote v2 with Sol", async () => {
+	const sol = {
+		...defaultModel,
+		provider: "uwoacrimson",
+		id: "gpt-5.6-sol",
+		baseUrl: "https://gateway.example/v1",
+	};
+	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
+		config: { remoteCompactModel: "uwoacrimson/missing-luna" },
+	});
+	const user = createUserEntry("missing_override_user", "Do not silently retry with Sol.");
+	const result = await sessionBeforeCompact(
+		{
+			reason: "manual",
+			signal: new AbortController().signal,
+			customInstructions: undefined,
+			preparation: {
+				tokensBefore: 256,
+				firstKeptEntryId: user.id,
+				previousSummary: undefined,
+				messagesToSummarize: [toReplayMessage(user)],
+				turnPrefixMessages: [],
+			},
+		},
+		createContext({ model: sol, sessionContextMessages: [toReplayMessage(user)] }),
+	);
+
+	expect(result).toBeUndefined();
+	expect(compactCalls).toHaveLength(0);
+	expect(fallbackCalls).toHaveLength(1);
 });
 
 test("remote v2 stores an opaque checkpoint marker instead of inventing a readable summary", async () => {

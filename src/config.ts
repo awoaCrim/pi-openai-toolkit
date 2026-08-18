@@ -22,6 +22,7 @@ const TOP_LEVEL_FIELDS = new Set(["compaction", "webSearch"]);
 const COMPACTION_FIELDS = new Set([
 	"enabled",
 	"allowCompactionContinuityBreak",
+	"remoteCompactModel",
 	"model",
 	"thinkingLevel",
 	"responsesApis",
@@ -186,6 +187,15 @@ function applyCompactionConfig(
 	resolved.redactSensitiveData =
 		toBoolean(raw.redactSensitiveData, "compaction.redactSensitiveData", warnings) ??
 		resolved.redactSensitiveData;
+
+	const remoteCompactModelSpec = toModelSpec(
+		raw.remoteCompactModel,
+		"compaction.remoteCompactModel",
+		warnings,
+	);
+	if (remoteCompactModelSpec !== undefined) {
+		resolved.remoteCompactModel = remoteCompactModelSpec === null ? undefined : remoteCompactModelSpec;
+	}
 
 	const modelSpec = toModelSpec(raw.model, "compaction.model", warnings);
 	if (modelSpec !== undefined) {

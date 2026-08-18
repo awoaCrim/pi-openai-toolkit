@@ -11,15 +11,25 @@ type ResponsesCompactApi = (typeof RESPONSES_COMPACT_CAPABLE_APIS)[number];
 
 type RuntimeModel = Model<Api>;
 
-type NativeCompactionFailureReason =
+export type ParsedModelSpec = {
+	provider: string;
+	modelId: string;
+};
+
+export type NativeCompactionFailureReason =
 	| "disabled"
 	| "missing-model"
+	| "invalid-model-spec"
+	| "model-not-found"
 	| "unsupported-api"
 	| "missing-base-url"
 	| "missing-api-key"
 	| "auth-resolution-failed"
 	| "unsupported-payload"
-	| "payload-model-mismatch";
+	| "payload-model-mismatch"
+	| "provider-mismatch"
+	| "api-mismatch"
+	| "base-url-mismatch";
 
 export type NativeCompactionSupportOptions = {
 	enabled?: boolean;
@@ -56,6 +66,7 @@ export type NativeCompactionEnvironmentFailure = {
 	api?: string;
 	model?: string;
 	baseUrl?: string;
+	modelSpec?: string;
 	errorMessage?: string;
 };
 
@@ -68,11 +79,53 @@ export type NativeCompactionEnvironmentResolution =
 	| NativeCompactionEnvironmentFailure
 	| NativeCompactionEnvironmentSuccess;
 
+export type RemoteCompactionExecution = {
+	/** Active session model. Its identity owns replay matching and is never mutated. */
+	consumer: NativeCompactionRuntime;
+	/** Model used only for the synthetic remote_compaction_v2 request. */
+	compactor: NativeCompactionRuntime;
+};
+
+export type RemoteCompactionExecutionSuccess = {
+	ok: true;
+	execution: RemoteCompactionExecution;
+};
+
+export type RemoteCompactionExecutionResolution =
+	| NativeCompactionEnvironmentFailure
+	| RemoteCompactionExecutionSuccess;
+
+type ResolvedRequestAuth =
+	| {
+			ok: true;
+			apiKey?: string;
+			headers?: ProviderHeaders;
+			baseUrl?: string;
+	  }
+	| { ok: false; error: string };
+
 function normalizeConfiguredApis(values: readonly string[] | undefined): Set<string> {
 	if (values === undefined) {
 		return new Set(RESPONSES_COMPACT_CAPABLE_APIS);
 	}
 	return new Set(values.map((value) => value.trim()).filter((value) => value.length > 0));
+}
+
+/** Parse "provider/model-id" (model ids may themselves contain slashes). */
+export function parseModelSpec(spec: string): ParsedModelSpec | undefined {
+	const trimmed = spec.trim();
+	const separatorIndex = trimmed.indexOf("/");
+	if (separatorIndex <= 0 || separatorIndex >= trimmed.length - 1) {
+		return undefined;
+	}
+
+	const provider = trimmed.slice(0, separatorIndex).trim();
+	const modelId = trimmed.slice(separatorIndex + 1).trim();
+	if (!provider || !modelId) {
+		return undefined;
+	}
+
+	return { provider, modelId };
 }
 
 export function normalizeBaseUrl(baseUrl: string | undefined | null): string | undefined {
@@ -120,23 +173,16 @@ export function buildCompactPath(api: ResponsesCompactApi): string {
 	return api === "openai-codex-responses" ? CODEX_COMPACT_PATH : OPENAI_COMPACT_PATH;
 }
 
-async function resolveRequestAuth(
-	ctx: ExtensionContext,
-	model: RuntimeModel,
-): Promise<{ apiKey?: string; headers?: ProviderHeaders }> {
+async function resolveRequestAuth(ctx: ExtensionContext, model: RuntimeModel): Promise<ResolvedRequestAuth> {
 	const modelRegistry = ctx.modelRegistry as {
-		getApiKeyAndHeaders?: (currentModel: RuntimeModel) => Promise<
-			| { ok: true; apiKey?: string; headers?: ProviderHeaders }
-			| { ok: false; error: string }
-		>;
+		getApiKeyAndHeaders?: (currentModel: RuntimeModel) => Promise<ResolvedRequestAuth>;
 	};
 
 	if (typeof modelRegistry.getApiKeyAndHeaders !== "function") {
-		return {};
+		return { ok: true };
 	}
 
-	const auth = await modelRegistry.getApiKeyAndHeaders(model);
-	return auth.ok ? { apiKey: auth.apiKey, headers: auth.headers } : {};
+	return modelRegistry.getApiKeyAndHeaders(model);
 }
 
 export function isSupportedApi(api: string): api is ResponsesCompactApi {
@@ -170,9 +216,10 @@ export function getRuntimeModelDescriptor(model: RuntimeModel | undefined): {
 	};
 }
 
-export async function resolveNativeCompactionEnvironment(
+async function resolveNativeCompactionEnvironmentForModel(
 	ctx: ExtensionContext,
-	options: NativeCompactionSupportOptions = {},
+	currentModel: RuntimeModel | undefined,
+	options: NativeCompactionSupportOptions,
 	payload?: unknown,
 ): Promise<NativeCompactionEnvironmentResolution> {
 	if (options.enabled === false) {
@@ -182,7 +229,6 @@ export async function resolveNativeCompactionEnvironment(
 		};
 	}
 
-	const currentModel = ctx.model;
 	const descriptor = getRuntimeModelDescriptor(currentModel);
 	if (!currentModel || !descriptor.provider || !descriptor.api || !descriptor.model) {
 		return {
@@ -200,14 +246,6 @@ export async function resolveNativeCompactionEnvironment(
 		return {
 			ok: false,
 			reason: "unsupported-api",
-			...descriptor,
-		};
-	}
-
-	if (!descriptor.baseUrl) {
-		return {
-			ok: false,
-			reason: "missing-base-url",
 			...descriptor,
 		};
 	}
@@ -233,7 +271,7 @@ export async function resolveNativeCompactionEnvironment(
 		requestPayload = payload;
 	}
 
-	let auth: { apiKey?: string; headers?: ProviderHeaders };
+	let auth: ResolvedRequestAuth;
 	try {
 		auth = await resolveRequestAuth(ctx, currentModel);
 	} catch (error) {
@@ -245,12 +283,30 @@ export async function resolveNativeCompactionEnvironment(
 		};
 	}
 
-	const { apiKey, headers } = auth;
-	if (!apiKey) {
+	if (!auth.ok) {
+		return {
+			ok: false,
+			reason: "auth-resolution-failed",
+			errorMessage: auth.error,
+			...descriptor,
+		};
+	}
+
+	const baseUrl = normalizeBaseUrl(auth.baseUrl) ?? descriptor.baseUrl;
+	if (!baseUrl) {
+		return {
+			ok: false,
+			reason: "missing-base-url",
+			...descriptor,
+		};
+	}
+
+	if (!auth.apiKey) {
 		return {
 			ok: false,
 			reason: "missing-api-key",
 			...descriptor,
+			baseUrl,
 		};
 	}
 
@@ -260,15 +316,121 @@ export async function resolveNativeCompactionEnvironment(
 			provider: descriptor.provider,
 			api: descriptor.api,
 			model: descriptor.model,
-			baseUrl: descriptor.baseUrl,
-			apiKey,
-			headers,
+			baseUrl,
+			apiKey: auth.apiKey,
+			headers: auth.headers,
 			responsesPath: buildResponsesPath(descriptor.api),
-			responsesUrl: buildResponsesUrl(descriptor.baseUrl, descriptor.api),
+			responsesUrl: buildResponsesUrl(baseUrl, descriptor.api),
 			compactPath: buildCompactPath(descriptor.api),
-			compactUrl: buildCompactUrl(descriptor.baseUrl, descriptor.api),
+			compactUrl: buildCompactUrl(baseUrl, descriptor.api),
 			payload: requestPayload,
 			currentModel,
+		},
+	};
+}
+
+export async function resolveNativeCompactionEnvironment(
+	ctx: ExtensionContext,
+	options: NativeCompactionSupportOptions = {},
+	payload?: unknown,
+): Promise<NativeCompactionEnvironmentResolution> {
+	return resolveNativeCompactionEnvironmentForModel(ctx, ctx.model, options, payload);
+}
+
+export async function resolveRemoteCompactionExecution(
+	ctx: ExtensionContext,
+	options: NativeCompactionSupportOptions = {},
+	remoteModelSpec?: string,
+): Promise<RemoteCompactionExecutionResolution> {
+	const consumerResolution = await resolveNativeCompactionEnvironment(ctx, options);
+	if (!consumerResolution.ok) {
+		return consumerResolution;
+	}
+
+	const spec = remoteModelSpec?.trim();
+	if (!spec) {
+		return {
+			ok: true,
+			execution: {
+				consumer: consumerResolution.runtime,
+				compactor: consumerResolution.runtime,
+			},
+		};
+	}
+
+	const parsed = parseModelSpec(spec);
+	if (!parsed) {
+		return {
+			ok: false,
+			reason: "invalid-model-spec",
+			modelSpec: spec,
+		};
+	}
+
+	const compactorModel = ctx.modelRegistry.find(parsed.provider, parsed.modelId);
+	if (!compactorModel) {
+		return {
+			ok: false,
+			reason: "model-not-found",
+			provider: parsed.provider,
+			model: parsed.modelId,
+			modelSpec: spec,
+		};
+	}
+
+	const compactorResolution = await resolveNativeCompactionEnvironmentForModel(
+		ctx,
+		compactorModel,
+		options,
+	);
+	if (!compactorResolution.ok) {
+		return {
+			...compactorResolution,
+			modelSpec: spec,
+		};
+	}
+
+	const consumer = consumerResolution.runtime;
+	const compactor = compactorResolution.runtime;
+	if (compactor.provider !== consumer.provider) {
+		return {
+			ok: false,
+			reason: "provider-mismatch",
+			provider: compactor.provider,
+			api: compactor.api,
+			model: compactor.model,
+			baseUrl: compactor.baseUrl,
+			modelSpec: spec,
+		};
+	}
+	if (compactor.api !== consumer.api) {
+		return {
+			ok: false,
+			reason: "api-mismatch",
+			provider: compactor.provider,
+			api: compactor.api,
+			model: compactor.model,
+			baseUrl: compactor.baseUrl,
+			modelSpec: spec,
+		};
+	}
+	if (compactor.baseUrl !== consumer.baseUrl) {
+		return {
+			ok: false,
+			reason: "base-url-mismatch",
+			provider: compactor.provider,
+			api: compactor.api,
+			model: compactor.model,
+			baseUrl: compactor.baseUrl,
+			modelSpec: spec,
+		};
+	}
+
+	return {
+		ok: true,
+		execution: {
+			consumer,
+			compactor,
 		},
 	};
 }
