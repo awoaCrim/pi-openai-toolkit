@@ -6,12 +6,10 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ProviderHeaders } from "@earendil-works/pi-ai";
 import { mergeProviderHeaders } from "./provider-headers";
+import { parseModelSpec } from "./runtime";
 import type { CompactionConfig } from "./types";
 
-export type ParsedModelSpec = {
-	provider: string;
-	modelId: string;
-};
+export { parseModelSpec } from "./runtime";
 
 export type NativeFallbackFailureReason =
 	| "no-model-configured"
@@ -42,23 +40,6 @@ export type NativeCompactFn = typeof compact;
 type ResolvedAuth =
 	| { ok: true; apiKey?: string; headers?: ProviderHeaders; env?: Record<string, string> }
 	| { ok: false; error: string };
-
-/** Parse "provider/model-id" (model ids may themselves contain slashes). */
-export function parseModelSpec(spec: string): ParsedModelSpec | undefined {
-	const trimmed = spec.trim();
-	const separatorIndex = trimmed.indexOf("/");
-	if (separatorIndex <= 0 || separatorIndex >= trimmed.length - 1) {
-		return undefined;
-	}
-
-	const provider = trimmed.slice(0, separatorIndex).trim();
-	const modelId = trimmed.slice(separatorIndex + 1).trim();
-	if (!provider || !modelId) {
-		return undefined;
-	}
-
-	return { provider, modelId };
-}
 
 function isAbortError(error: unknown): boolean {
 	return (

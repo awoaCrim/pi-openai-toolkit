@@ -44,6 +44,11 @@ export type CompactionConfig = {
 	 */
 	allowCompactionContinuityBreak: boolean;
 	/**
+	 * "provider/model-id" used only for remote_compaction_v2. The active session model
+	 * remains the checkpoint consumer and continues handling normal requests.
+	 */
+	remoteCompactModel?: string;
+	/**
 	 * "provider/model-id" used for native-method fallback compaction (non-Responses APIs,
 	 * or when the compact endpoint fails). Unset = current model via pi's default path.
 	 */
@@ -132,6 +137,8 @@ export type NativeCompactionIdentity = {
 
 export type NativeCompactionDetails = NativeCompactionIdentity & {
 	strategy: NativeCompactionStrategy;
+	/** Actual producer of the opaque checkpoint; absent on legacy same-model entries. */
+	compactionModel?: NativeCompactionIdentity;
 	compactedWindow: unknown[];
 	compactResponseId?: string;
 	createdAt: string;
@@ -141,6 +148,7 @@ export type NativeCompactionDetails = NativeCompactionIdentity & {
 export type NativeCompactionEntry = CompactionEntry<NativeCompactionDetails>;
 
 export type CreateNativeCompactionDetailsInput = NativeCompactionIdentity & {
+	compactionModel?: NativeCompactionIdentity;
 	compactedWindow: unknown[];
 	compactResponseId?: string;
 	createdAt?: string;
@@ -263,6 +271,7 @@ export function isNativeCompactionDetails(value: unknown): value is NativeCompac
 	return (
 		(candidate.strategy === LEGACY_NATIVE_COMPACTION_STRATEGY ||
 			candidate.strategy === REMOTE_V2_COMPACTION_STRATEGY) &&
+		(candidate.compactionModel === undefined || isNativeCompactionIdentity(candidate.compactionModel)) &&
 		Array.isArray(candidate.compactedWindow) &&
 		candidate.compactedWindow.every(isCompactedWindowItem) &&
 		isNonEmptyString(candidate.createdAt) &&
@@ -282,6 +291,14 @@ export function createNativeCompactionDetails(input: CreateNativeCompactionDetai
 		api: normalizeString(input.api),
 		model: normalizeString(input.model),
 		baseUrl: normalizeString(input.baseUrl),
+		compactionModel: input.compactionModel
+			? {
+				provider: normalizeString(input.compactionModel.provider),
+				api: normalizeString(input.compactionModel.api),
+				model: normalizeString(input.compactionModel.model),
+				baseUrl: normalizeString(input.compactionModel.baseUrl),
+			}
+			: undefined,
 		compactedWindow: input.compactedWindow.map((item) => cloneStructuredValue(item)),
 		compactResponseId: isNonEmptyString(input.compactResponseId) ? normalizeString(input.compactResponseId) : undefined,
 		createdAt: isNonEmptyString(input.createdAt) ? normalizeString(input.createdAt) : new Date().toISOString(),
@@ -311,6 +328,7 @@ export function createNativeCompactionResult(
 export const DEFAULT_COMPACTION_CONFIG: CompactionConfig = {
 	enabled: true,
 	allowCompactionContinuityBreak: false,
+	remoteCompactModel: undefined,
 	model: undefined,
 	thinkingLevel: "off",
 	responsesApis: [...RESPONSES_COMPACT_CAPABLE_APIS],

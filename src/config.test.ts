@@ -37,6 +37,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.warnings).toEqual([]);
 		expect(loaded.config.compaction.enabled).toBe(true);
 		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(false);
+		expect(loaded.config.compaction.remoteCompactModel).toBeUndefined();
 		expect(loaded.config.compaction.model).toBeUndefined();
 		expect(loaded.config.compaction.thinkingLevel).toBe("off");
 		expect(loaded.config.compaction.responsesApis).toEqual([
@@ -54,6 +55,7 @@ describe("loadToolkitConfig", () => {
 				compaction: {
 					enabled: true,
 					allowCompactionContinuityBreak: true,
+					remoteCompactModel: " uwoacrimson/gpt-5.6-luna ",
 					model: " google/gemini-2.5-flash ",
 					thinkingLevel: "medium",
 					responsesApis: ["openai-responses"],
@@ -73,6 +75,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.source).toBe(configPath);
 		expect(loaded.warnings).toEqual([]);
 		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(true);
+		expect(loaded.config.compaction.remoteCompactModel).toBe("uwoacrimson/gpt-5.6-luna");
 		expect(loaded.config.compaction.model).toBe("google/gemini-2.5-flash");
 		expect(loaded.config.compaction.thinkingLevel).toBe("medium");
 		expect(loaded.config.compaction.responsesApis).toEqual(["openai-responses"]);
@@ -82,10 +85,13 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.webSearch).toEqual({ enabled: false, models: ["provider/model"] });
 	});
 
-	test("compaction.model null clears the fallback spec", () => {
-		const configPath = writeTempConfig(JSON.stringify({ compaction: { model: null } }));
+	test("null model specs preserve the default remote path and clear the fallback spec", () => {
+		const configPath = writeTempConfig(
+			JSON.stringify({ compaction: { remoteCompactModel: null, model: null } }),
+		);
 		const loaded = loadToolkitConfig(configPath);
 
+		expect(loaded.config.compaction.remoteCompactModel).toBeUndefined();
 		expect(loaded.config.compaction.model).toBeUndefined();
 		expect(loaded.warnings).toEqual([]);
 	});
@@ -96,6 +102,7 @@ describe("loadToolkitConfig", () => {
 				compaction: {
 					enabled: "yes",
 					allowCompactionContinuityBreak: "yes",
+					remoteCompactModel: { provider: "uwoacrimson" },
 					model: 42,
 					thinkingLevel: "ultra",
 					responsesApis: ["openai-responses", "anthropic-messages"],
@@ -112,6 +119,7 @@ describe("loadToolkitConfig", () => {
 
 		expect(loaded.config.compaction.enabled).toBe(true);
 		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(false);
+		expect(loaded.config.compaction.remoteCompactModel).toBeUndefined();
 		expect(loaded.config.compaction.model).toBeUndefined();
 		expect(loaded.config.compaction.thinkingLevel).toBe("off");
 		expect(loaded.config.compaction.responsesApis).toEqual(["openai-responses"]);

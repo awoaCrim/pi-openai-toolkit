@@ -1,8 +1,16 @@
 import { afterEach, expect, mock, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { executeNativeCompaction, extractCompactedSummaryText } from "./compact-client";
-import { redactValue } from "./debug";
+import { redactValue, writeDebugArtifact } from "./debug";
 import { executeRemoteV2Compaction } from "./remote-v2-client";
 import { buildCompactUrl, buildResponsesUrl } from "./runtime";
+import {
+	DEFAULT_COMPACTION_CONFIG,
+	createNativeCompactionDetails,
+	isNativeCompactionDetails,
+} from "./types";
 
 const baseModel = {
 	provider: "openai",
@@ -53,6 +61,66 @@ test("debug redaction hides opaque content and sensitive URL query parameters", 
 		encrypted_content: "[REDACTED]",
 		url: "https://proxy.example/v1/responses?api_key=[REDACTED]&mode=v2",
 	});
+});
+
+test("debug artifacts always redact credentials and opaque checkpoints even when optional redaction is disabled", () => {
+	const artifactRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-openai-toolkit-critical-redaction-"));
+	try {
+		const artifactPath = writeDebugArtifact(
+			"compact-response",
+			{
+				request: {
+					headers: { authorization: "Bearer sk-sensitive-key" },
+					body: { input: [{ type: "compaction", encrypted_content: "opaque-sensitive" }] },
+				},
+			},
+			{
+				...DEFAULT_COMPACTION_CONFIG,
+				artifactRoot,
+				logCompactResponses: true,
+				redactSensitiveData: false,
+			},
+			{ cwd: process.cwd(), sessionId: "critical-redaction-test" },
+		);
+		expect(artifactPath).toBeDefined();
+		const artifact = JSON.parse(fs.readFileSync(artifactPath!, "utf8"));
+		expect(artifact.redaction.enabled).toBe(false);
+		expect(artifact.data.request.headers.authorization).toBe("[REDACTED]");
+		expect(artifact.data.request.body.input[0].encrypted_content).toBe("[REDACTED]");
+		expect(JSON.stringify(artifact)).not.toContain("sk-sensitive-key");
+		expect(JSON.stringify(artifact)).not.toContain("opaque-sensitive");
+	} finally {
+		fs.rmSync(artifactRoot, { recursive: true, force: true });
+	}
+});
+
+test("native compaction details preserve optional producer identity and legacy compatibility", () => {
+	const producer = {
+		provider: "uwoacrimson",
+		api: "openai-responses",
+		model: "gpt-5.6-luna",
+		baseUrl: "https://gateway.example/v1",
+	};
+	const details = createNativeCompactionDetails({
+		provider: "uwoacrimson",
+		api: "openai-responses",
+		model: "gpt-5.6-sol",
+		baseUrl: "https://gateway.example/v1",
+		compactionModel: producer,
+		compactedWindow: [{ type: "compaction", encrypted_content: "opaque" }],
+		createdAt: "2026-08-18T00:00:00.000Z",
+	});
+	producer.model = "mutated-after-create";
+
+	expect(details.compactionModel).toEqual({
+		provider: "uwoacrimson",
+		api: "openai-responses",
+		model: "gpt-5.6-luna",
+		baseUrl: "https://gateway.example/v1",
+	});
+	expect(isNativeCompactionDetails(details)).toBe(true);
+	expect(isNativeCompactionDetails({ ...details, compactionModel: undefined })).toBe(true);
+	expect(isNativeCompactionDetails({ ...details, compactionModel: { provider: "uwoacrimson" } })).toBe(false);
 });
 
 test("buildCompactUrl and buildResponsesUrl select OpenAI/Codex paths", () => {

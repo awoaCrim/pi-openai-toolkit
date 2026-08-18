@@ -6,12 +6,17 @@ export {
 	isResponsesCompatiblePayload,
 	isSupportedApi,
 	normalizeBaseUrl,
+	parseModelSpec,
 	resolveNativeCompactionEnvironment,
+	resolveRemoteCompactionExecution,
 	type NativeCompactionEnvironmentFailure,
 	type NativeCompactionEnvironmentResolution,
 	type NativeCompactionEnvironmentSuccess,
 	type NativeCompactionRuntime,
 	type NativeCompactionSupportOptions,
+	type RemoteCompactionExecution,
+	type RemoteCompactionExecutionResolution,
+	type RemoteCompactionExecutionSuccess,
 	type ResponsesCompatibleRequestPayload,
 } from "./runtime.ts";
 export { RESPONSES_COMPACT_CAPABLE_APIS } from "./types.ts";

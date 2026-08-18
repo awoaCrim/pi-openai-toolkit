@@ -14,6 +14,7 @@ import {
 	type RedactOptions,
 } from "./types";
 
+const CRITICAL_KEY_RE = /(authorization|api[-_]?key|token|credential|oauth|auth|encrypted[_-]?content)/i;
 const SENSITIVE_KEY_RE = /(authorization|api[-_]?key|token|secret|password|cookie|set-cookie|signature|credential|oauth|auth|encrypted[_-]?content)/i;
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._\-+/=]+/gi;
 const OPENAI_KEY_RE = /\bsk-[A-Za-z0-9\-_]+\b/g;
@@ -52,11 +53,11 @@ function redactInlineSecrets(value: string, placeholder: string): string {
 		.replace(SENSITIVE_QUERY_RE, (_match, prefix: string) => `${prefix}${placeholder}`);
 }
 
-function shouldRedactKey(key: string): boolean {
-	return SENSITIVE_KEY_RE.test(key);
-}
-
-export function redactValue(value: unknown, options: RedactOptions = {}): unknown {
+function redactWithKeyPattern(
+	value: unknown,
+	keyPattern: RegExp,
+	options: RedactOptions = {},
+): unknown {
 	const placeholder = options.placeholder ?? REDACTED_VALUE;
 	const seen = new WeakSet<object>();
 
@@ -78,12 +79,21 @@ export function redactValue(value: unknown, options: RedactOptions = {}): unknow
 
 		const result: Record<string, unknown> = {};
 		for (const [key, item] of Object.entries(input)) {
-			result[key] = shouldRedactKey(key) ? placeholder : visit(item);
+			result[key] = keyPattern.test(key) ? placeholder : visit(item);
 		}
 		return result;
 	};
 
 	return visit(value);
+}
+
+/** Credentials and opaque checkpoints are never written to artifacts, even when optional redaction is disabled. */
+export function redactCriticalValue(value: unknown, options: RedactOptions = {}): unknown {
+	return redactWithKeyPattern(value, CRITICAL_KEY_RE, options);
+}
+
+export function redactValue(value: unknown, options: RedactOptions = {}): unknown {
+	return redactWithKeyPattern(value, SENSITIVE_KEY_RE, options);
 }
 
 export function resolveArtifactPaths(settings: CompactionConfig, context: ArtifactContext): ArtifactPaths {
@@ -149,6 +159,7 @@ export function writeDebugArtifact(
 	const timestamp = new Date().toISOString();
 	const fileName = `${timestamp.replace(/[.:]/g, "-")}-${kind}.json`;
 	const filePath = path.join(targetDir, fileName);
+	const criticallyRedactedData = redactCriticalValue(data);
 	const envelope: DebugArtifactEnvelope = {
 		extension: COMPACTION_EXTENSION_ID,
 		kind,
@@ -160,7 +171,7 @@ export function writeDebugArtifact(
 		redaction: {
 			enabled: settings.redactSensitiveData,
 		},
-		data: settings.redactSensitiveData ? redactValue(data) : data,
+		data: settings.redactSensitiveData ? redactValue(criticallyRedactedData) : criticallyRedactedData,
 	};
 
 	fs.writeFileSync(filePath, `${JSON.stringify(envelope, null, 2)}\n`, "utf8");

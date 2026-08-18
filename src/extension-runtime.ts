@@ -16,9 +16,9 @@ import {
 import { getCompactionRequestExtras, rememberRequestContext } from "./request-context-cache";
 import { executeRemoteV2Compaction } from "./remote-v2-client";
 import {
-	isResponsesCompatiblePayload,
 	resolveNativeCompactionEnvironment,
-	type NativeCompactionRuntime,
+	resolveRemoteCompactionExecution,
+	type RemoteCompactionExecution,
 } from "./runtime";
 import { serializeMessagesToCompactRequest, type NativeCompactionRequestBody, type ResponsesInputItem } from "./serializer";
 import {
@@ -59,6 +59,7 @@ function getCompactionIdentityDebugInfo(entry: { details?: unknown } | undefined
 			api: entry.details.api,
 			model: entry.details.model,
 			baseUrl: entry.details.baseUrl,
+			compactionModel: entry.details.compactionModel,
 		}
 		: undefined;
 }
@@ -94,15 +95,16 @@ async function runResponsesNativeCompact(
 	event: SessionBeforeCompactEvent,
 	ctx: ExtensionContext,
 	config: CompactionConfig,
-	runtime: NativeCompactionRuntime,
+	execution: RemoteCompactionExecution,
 ): Promise<ResponsesCompactOutcome> {
+	const { consumer, compactor } = execution;
 	const instructions = buildCompactionInstructions(ctx.getSystemPrompt(), event.customInstructions);
 	const branchEntries = ctx.sessionManager.getBranch();
 	const latestNativeCompaction = resolveLatestNativeCompactionEntry(branchEntries, {
-		provider: runtime.provider,
-		api: runtime.api,
-		model: runtime.model,
-		baseUrl: runtime.baseUrl,
+		provider: consumer.provider,
+		api: consumer.api,
+		model: consumer.model,
+		baseUrl: consumer.baseUrl,
 	});
 
 	let requestSource: "session-context" | "non-native-session-context" | "latest-native-replay";
@@ -116,10 +118,10 @@ async function runResponsesNativeCompact(
 		requestSource = "latest-native-replay";
 		const input: ResponsesInputItem[] = [
 			...(cloneOpaqueWindow(details.compactedWindow) as ResponsesInputItem[]),
-			...serializeLiveTailToResponsesInput({ model: runtime.currentModel, entries: liveTailEntries }),
+			...serializeLiveTailToResponsesInput({ model: compactor.currentModel, entries: liveTailEntries }),
 		];
 		request = {
-			model: runtime.currentModel.id,
+			model: compactor.model,
 			input,
 			instructions,
 		};
@@ -138,7 +140,7 @@ async function runResponsesNativeCompact(
 			...event.preparation.turnPrefixMessages,
 		];
 		request = serializeMessagesToCompactRequest({
-			model: runtime.currentModel,
+			model: compactor.currentModel,
 			messages,
 			instructions,
 		});
@@ -148,10 +150,18 @@ async function runResponsesNativeCompact(
 			{
 				event: "session_before_compact.remote-v2-skip",
 				reason: latestNativeCompaction.reason,
-				provider: runtime.provider,
-				api: runtime.api,
-				model: runtime.model,
-				baseUrl: runtime.baseUrl,
+				consumer: {
+					provider: consumer.provider,
+					api: consumer.api,
+					model: consumer.model,
+					baseUrl: consumer.baseUrl,
+				},
+				compactor: {
+					provider: compactor.provider,
+					api: compactor.api,
+					model: compactor.model,
+					baseUrl: compactor.baseUrl,
+				},
 				latestCompactionIndex: latestNativeCompaction.latestCompactionIndex,
 				latestCompactionIdentity: getCompactionIdentityDebugInfo(latestNativeCompaction.latestCompaction),
 			},
@@ -164,10 +174,10 @@ async function runResponsesNativeCompact(
 	// Mirror the latest codex_rs CompactionInput fields captured from the most
 	// recent live provider request for this model (tools, reasoning, etc.).
 	const extras = getCompactionRequestExtras({
-		provider: runtime.provider,
-		api: runtime.api,
-		model: runtime.model,
-		baseUrl: runtime.baseUrl,
+		provider: consumer.provider,
+		api: consumer.api,
+		model: consumer.model,
+		baseUrl: consumer.baseUrl,
 		sessionId: getSessionId(ctx),
 	});
 	if (extras) {
@@ -175,7 +185,7 @@ async function runResponsesNativeCompact(
 	}
 
 	const compactResult = await executeRemoteV2Compaction({
-		runtime,
+		runtime: compactor,
 		request,
 		signal: event.signal,
 		settings: config,
@@ -200,10 +210,16 @@ async function runResponsesNativeCompact(
 	let details: NativeCompactionDetails;
 	try {
 		details = createNativeCompactionDetails({
-			provider: runtime.provider,
-			api: runtime.api,
-			model: runtime.model,
-			baseUrl: runtime.baseUrl,
+			provider: consumer.provider,
+			api: consumer.api,
+			model: consumer.model,
+			baseUrl: consumer.baseUrl,
+			compactionModel: {
+				provider: compactor.provider,
+				api: compactor.api,
+				model: compactor.model,
+				baseUrl: compactor.baseUrl,
+			},
 			compactedWindow: compactResult.compactedWindow,
 			compactResponseId: compactResult.compactResponseId,
 			createdAt: compactResult.createdAt,
@@ -215,10 +231,18 @@ async function runResponsesNativeCompact(
 			{
 				event: "session_before_compact.invalid-native-details",
 				reason: error instanceof Error ? error.message : String(error),
-				provider: runtime.provider,
-				api: runtime.api,
-				model: runtime.model,
-				baseUrl: runtime.baseUrl,
+				consumer: {
+					provider: consumer.provider,
+					api: consumer.api,
+					model: consumer.model,
+					baseUrl: consumer.baseUrl,
+				},
+				compactor: {
+					provider: compactor.provider,
+					api: compactor.api,
+					model: compactor.model,
+					baseUrl: compactor.baseUrl,
+				},
 			},
 			config,
 			ctx,
@@ -236,9 +260,18 @@ async function runResponsesNativeCompact(
 		"compaction-event",
 		{
 			event: "session_before_compact.remote-v2-success",
-			provider: runtime.provider,
-			api: runtime.api,
-			model: runtime.model,
+			consumer: {
+				provider: consumer.provider,
+				api: consumer.api,
+				model: consumer.model,
+				baseUrl: consumer.baseUrl,
+			},
+			compactor: {
+				provider: compactor.provider,
+				api: compactor.api,
+				model: compactor.model,
+				baseUrl: compactor.baseUrl,
+			},
 			requestSource,
 			requestInputItems: request.input.length,
 			requestExtras: extras ? Object.keys(extras) : [],
@@ -282,12 +315,16 @@ async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx:
 	}
 
 	// Branch 1: Responses-family APIs use remote_compaction_v2 on the normal Responses stream.
-	const resolution = await resolveNativeCompactionEnvironment(ctx, {
-		enabled: config.enabled,
-		responsesApis: config.responsesApis,
-	});
+	const resolution = await resolveRemoteCompactionExecution(
+		ctx,
+		{
+			enabled: config.enabled,
+			responsesApis: config.responsesApis,
+		},
+		config.remoteCompactModel,
+	);
 	if (resolution.ok) {
-		const responsesOutcome = await runResponsesNativeCompact(event, ctx, config, resolution.runtime);
+		const responsesOutcome = await runResponsesNativeCompact(event, ctx, config, resolution.execution);
 		if (responsesOutcome.outcome === "success") {
 			return { compaction: responsesOutcome.compaction };
 		}
@@ -305,11 +342,18 @@ async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx:
 				api: resolution.api,
 				model: resolution.model,
 				baseUrl: resolution.baseUrl,
+				modelSpec: resolution.modelSpec,
 				errorMessage: resolution.errorMessage,
 			},
 			config,
 			ctx,
 		);
+		if (config.remoteCompactModel) {
+			notifyWarning(
+				ctx,
+				`remote compaction model "${config.remoteCompactModel}" unusable (${resolution.reason}); using the native fallback chain`,
+			);
+		}
 	}
 
 	// Branch 2: run pi's native compaction method with the configured model.
@@ -368,21 +412,6 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 		return undefined;
 	}
 
-	// Capture compact-relevant request fields (tools, reasoning, ...) for the next
-	// remote_compaction_v2 call, regardless of whether this request gets rewritten.
-	if (isResponsesCompatiblePayload(event.payload)) {
-		const descriptor = ctx.model;
-		if (descriptor?.provider && descriptor.api && descriptor.baseUrl) {
-			rememberRequestContext(event.payload, {
-				provider: descriptor.provider,
-				api: descriptor.api,
-				model: descriptor.id,
-				baseUrl: descriptor.baseUrl.replace(/\/+$/, ""),
-				sessionId: getSessionId(ctx),
-			});
-		}
-	}
-
 	const resolution = await resolveNativeCompactionEnvironment(
 		ctx,
 		{
@@ -416,6 +445,19 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 	if (!payload) {
 		return undefined;
 	}
+
+	// Capture compact-relevant request fields (tools, reasoning, ...) for the next
+	// synthetic compact request using the active consumer's effective runtime identity.
+	// This hook runs before the separate Web Search transform, so injected native search
+	// tools are not copied into remote_compaction_v2.
+	rememberRequestContext(payload, {
+		provider: runtime.provider,
+		api: runtime.api,
+		model: runtime.model,
+		baseUrl: runtime.baseUrl,
+		sessionId: getSessionId(ctx),
+	});
+
 	const branchEntries = ctx.sessionManager.getBranch();
 	const latestNativeCompaction = resolveLatestNativeCompactionEntry(branchEntries, {
 		provider: runtime.provider,
