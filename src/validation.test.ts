@@ -968,12 +968,13 @@ test("a second compaction replays only the latest compacted window and keeps fre
 	expect(JSON.stringify(rewritten.input)).not.toContain("Interim question between compactions.");
 });
 
-test("unsupported model/provider switching fails open instead of replaying stale native state", async () => {
-	const { beforeProviderRequest } = await loadHookHarness();
+test("a different latest endpoint blocks remote compaction and replay without searching older checkpoints", async () => {
+	const { sessionBeforeCompact, beforeProviderRequest, compactCalls } = await loadHookHarness();
 	const matchingModel = { ...defaultModel };
 	const switchedModel = {
 		...defaultModel,
 		id: "gpt-5-nano",
+		baseUrl: "https://other-gateway.example/v1",
 	};
 	const unsupportedProviderModel = {
 		...defaultModel,
@@ -1000,17 +1001,112 @@ test("unsupported model/provider switching fails open instead of replaying stale
 		instructions: "Instructions after switching back",
 		input: [{ role: "developer", content: "Fresh preamble after switching back" }],
 	};
-	const mismatchedLatestResult = await beforeProviderRequest(
-		{ payload: matchingPayload },
-		createContext({ branchEntries, model: matchingModel, systemPrompt: matchingPayload.instructions }),
+	const context = createContext({
+		branchEntries,
+		model: matchingModel,
+		systemPrompt: matchingPayload.instructions,
+		sessionContextMessages: [toReplayMessage(keptUser)],
+	});
+	const compactResult = await sessionBeforeCompact(
+		{
+			reason: "manual",
+			signal: new AbortController().signal,
+			customInstructions: undefined,
+			preparation: {
+				tokensBefore: 512,
+				firstKeptEntryId: keptUser.id,
+				previousSummary: undefined,
+				messagesToSummarize: [toReplayMessage(keptUser)],
+				turnPrefixMessages: [],
+			},
+		},
+		context,
 	);
+	const mismatchedLatestResult = await beforeProviderRequest({ payload: matchingPayload }, context);
 	const unsupportedProviderResult = await beforeProviderRequest(
 		{ payload: { ...matchingPayload, model: unsupportedProviderModel.id } },
 		createContext({ branchEntries, model: unsupportedProviderModel, systemPrompt: matchingPayload.instructions }),
 	);
 
+	expect(compactResult).toBeUndefined();
+	expect(compactCalls).toHaveLength(0);
 	expect(mismatchedLatestResult).toBeUndefined();
 	expect(unsupportedProviderResult).toBeUndefined();
+});
+
+test("same-endpoint switching reuses the latest opaque checkpoint despite provider, API, and model metadata changes", async () => {
+	const sol = {
+		...defaultModel,
+		provider: "legacy-sol-provider",
+		api: "openai-codex-responses",
+		id: "gpt-5.6-sol",
+	};
+	const luna = {
+		...defaultModel,
+		id: "gpt-5.6-luna",
+	};
+	const opaqueWindow = [{ type: "compaction", encrypted_content: "opaque-sol-checkpoint" }];
+	const user = createUserEntry("cross-model-user", "Continue from the Sol checkpoint.");
+	const priorCompaction = createCompactionEntry({
+		id: "cross-model-compaction",
+		firstKeptEntryId: user.id,
+		model: sol,
+		compactionModel: sol,
+		compactedWindow: opaqueWindow,
+	});
+	const branchEntries = [user, priorCompaction];
+	const { sessionBeforeCompact, beforeProviderRequest, compactCalls } = await loadHookHarness({
+		config: { remoteCompactModel: "openai/gpt-5.6-luna" },
+	});
+	const context = createContext({
+		branchEntries,
+		model: luna,
+		registryModels: [luna],
+		sessionContextMessages: [toReplayMessage(user)],
+	});
+	const result = (await sessionBeforeCompact(
+		{
+			reason: "manual",
+			signal: new AbortController().signal,
+			customInstructions: undefined,
+			preparation: {
+				tokensBefore: 512,
+				firstKeptEntryId: user.id,
+				previousSummary: undefined,
+				messagesToSummarize: [toReplayMessage(user)],
+				turnPrefixMessages: [],
+			},
+		},
+		context,
+	)) as { compaction: { details: Record<string, unknown> } };
+
+	expect(compactCalls).toHaveLength(1);
+	expect((compactCalls[0]?.request as { model: string }).model).toBe(luna.id);
+	expect((compactCalls[0]?.request as { input: unknown[] }).input).toContainEqual(opaqueWindow[0]);
+	expect(result.compaction.details).toEqual(
+		expect.objectContaining({
+			provider: luna.provider,
+			api: luna.api,
+			model: luna.id,
+			baseUrl: luna.baseUrl,
+			compactionModel: {
+				provider: luna.provider,
+				api: luna.api,
+				model: luna.id,
+				baseUrl: luna.baseUrl,
+			},
+		}),
+	);
+
+	const payload = await buildPiReplayPayload({
+		model: luna,
+		branchEntries,
+		compactionEntry: priorCompaction,
+		instructions: "Current Luna instructions",
+		freshPreamble: "Fresh Luna preamble",
+	});
+	const rewritten = (await beforeProviderRequest({ payload }, context)) as { input: unknown[] };
+	expect(rewritten.input).toContainEqual(opaqueWindow[0]);
 });
 
 test("responses compact failure falls back to the configured native model and returns its result", async () => {

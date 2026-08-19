@@ -101,9 +101,6 @@ async function runResponsesNativeCompact(
 	const instructions = buildCompactionInstructions(ctx.getSystemPrompt(), event.customInstructions);
 	const branchEntries = ctx.sessionManager.getBranch();
 	const latestNativeCompaction = resolveLatestNativeCompactionEntry(branchEntries, {
-		provider: consumer.provider,
-		api: consumer.api,
-		model: consumer.model,
 		baseUrl: consumer.baseUrl,
 	});
 
@@ -460,9 +457,6 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 
 	const branchEntries = ctx.sessionManager.getBranch();
 	const latestNativeCompaction = resolveLatestNativeCompactionEntry(branchEntries, {
-		provider: runtime.provider,
-		api: runtime.api,
-		model: runtime.model,
 		baseUrl: runtime.baseUrl,
 	});
 	if (!latestNativeCompaction.ok) {

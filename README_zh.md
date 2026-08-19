@@ -20,7 +20,7 @@
 ### 全局安装已发布版本（推荐）
 
 ```bash
-pi install npm:pi-openai-toolkit@0.3.0
+pi install npm:pi-openai-toolkit
 ```
 
 该命令会把工具包加入 Pi 的全局配置。可以使用以下命令确认安装成功：
@@ -32,7 +32,7 @@ pi list
 如果只想安装到当前项目，使用：
 
 ```bash
-pi install npm:pi-openai-toolkit@0.3.0 --local
+pi install npm:pi-openai-toolkit --local
 ```
 
 ### Git 安装（替代 / 开发路径）

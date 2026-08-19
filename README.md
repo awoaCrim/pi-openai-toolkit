@@ -20,7 +20,7 @@
 ### Install the published package globally (recommended)
 
 ```bash
-pi install npm:pi-openai-toolkit@0.3.0
+pi install npm:pi-openai-toolkit
 ```
 
 This adds the package to Pi's global settings. Verify the installation with:
@@ -32,7 +32,7 @@ pi list
 To install it only for the current project, use:
 
 ```bash
-pi install npm:pi-openai-toolkit@0.3.0 --local
+pi install npm:pi-openai-toolkit --local
 ```
 
 ### Git installation (alternative / development)
