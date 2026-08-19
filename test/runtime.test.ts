@@ -309,52 +309,94 @@ describe("resolveNativeCompactionEnvironment", () => {
 		}
 	});
 
-	test("fails closed for cross-provider, cross-API, and cross-endpoint overrides", async () => {
+	test("accepts cross-provider, cross-API, and cross-model overrides at the same endpoint", async () => {
+		const sol = {
+			provider: "uwoacrimson",
+			api: "openai-responses",
+			id: "gpt-5.6-sol",
+			baseUrl: "https://model-consumer.example/v1",
+		};
+		const luna = {
+			provider: "other-gateway-alias",
+			api: "openai-codex-responses",
+			id: "gpt-5.6-luna",
+			baseUrl: "https://model-compactor.example/v1",
+		};
+		const resolution = await resolveRemoteCompactionExecution(
+			{
+				model: sol,
+				modelRegistry: {
+					find: (provider: string, modelId: string) =>
+						provider === luna.provider && modelId === luna.id ? luna : undefined,
+					async getApiKeyAndHeaders(model: { id: string }) {
+						return {
+							ok: true,
+							apiKey: `sk-${model.id}`,
+							baseUrl: "https://gateway.example/v1/",
+						};
+					},
+				},
+			} as any,
+			{},
+			"other-gateway-alias/gpt-5.6-luna",
+		);
+
+		expect(resolution.ok).toBe(true);
+		if (resolution.ok) {
+			expect(resolution.execution.consumer).toEqual(
+				expect.objectContaining({
+					provider: sol.provider,
+					api: sol.api,
+					model: sol.id,
+					baseUrl: "https://gateway.example/v1",
+				}),
+			);
+			expect(resolution.execution.compactor).toEqual(
+				expect.objectContaining({
+					provider: luna.provider,
+					api: luna.api,
+					model: luna.id,
+					baseUrl: "https://gateway.example/v1",
+				}),
+			);
+		}
+	});
+
+	test("rejects an explicit remote compactor on a different endpoint", async () => {
 		const sol = {
 			provider: "uwoacrimson",
 			api: "openai-responses",
 			id: "gpt-5.6-sol",
 			baseUrl: "https://gateway.example/v1",
 		};
-		const scenarios = [
+		const luna = {
+			...sol,
+			provider: "other-gateway-alias",
+			api: "openai-codex-responses",
+			id: "gpt-5.6-luna",
+			baseUrl: "https://other-gateway.example/v1",
+		};
+		const resolution = await resolveRemoteCompactionExecution(
 			{
-				reason: "provider-mismatch",
-				spec: "other/gpt-5.6-luna",
-				model: { ...sol, provider: "other", id: "gpt-5.6-luna" },
-			},
-			{
-				reason: "api-mismatch",
-				spec: "uwoacrimson/gpt-5.6-luna-codex",
-				model: { ...sol, api: "openai-codex-responses", id: "gpt-5.6-luna-codex" },
-			},
-			{
-				reason: "base-url-mismatch",
-				spec: "uwoacrimson/gpt-5.6-luna-other-endpoint",
-				model: {
-					...sol,
-					id: "gpt-5.6-luna-other-endpoint",
-					baseUrl: "https://other-gateway.example/v1",
-				},
-			},
-		] as const;
-
-		for (const scenario of scenarios) {
-			const resolution = await resolveRemoteCompactionExecution(
-				{
-					model: sol,
-					modelRegistry: {
-						find: () => scenario.model,
-						async getApiKeyAndHeaders(model: { id: string }) {
-							return { ok: true, apiKey: `sk-${model.id}` };
-						},
+				model: sol,
+				modelRegistry: {
+					find: () => luna,
+					async getApiKeyAndHeaders(model: { id: string }) {
+						return { ok: true, apiKey: `sk-${model.id}` };
 					},
-				} as any,
-				{},
-				scenario.spec,
-			);
+				},
+			} as any,
+			{},
+			"other-gateway-alias/gpt-5.6-luna",
+		);
 
-			expect(resolution).toEqual(expect.objectContaining({ ok: false, reason: scenario.reason }));
-		}
+		expect(resolution).toEqual(
+			expect.objectContaining({
+				ok: false,
+				reason: "base-url-mismatch",
+				baseUrl: "https://other-gateway.example/v1",
+			}),
+		);
 	});
 
 	test("reports invalid, missing, and unauthenticated override models without selecting the active model", async () => {

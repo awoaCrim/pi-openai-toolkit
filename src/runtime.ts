@@ -27,8 +27,6 @@ export type NativeCompactionFailureReason =
 	| "auth-resolution-failed"
 	| "unsupported-payload"
 	| "payload-model-mismatch"
-	| "provider-mismatch"
-	| "api-mismatch"
 	| "base-url-mismatch";
 
 export type NativeCompactionSupportOptions = {
@@ -392,28 +390,6 @@ export async function resolveRemoteCompactionExecution(
 
 	const consumer = consumerResolution.runtime;
 	const compactor = compactorResolution.runtime;
-	if (compactor.provider !== consumer.provider) {
-		return {
-			ok: false,
-			reason: "provider-mismatch",
-			provider: compactor.provider,
-			api: compactor.api,
-			model: compactor.model,
-			baseUrl: compactor.baseUrl,
-			modelSpec: spec,
-		};
-	}
-	if (compactor.api !== consumer.api) {
-		return {
-			ok: false,
-			reason: "api-mismatch",
-			provider: compactor.provider,
-			api: compactor.api,
-			model: compactor.model,
-			baseUrl: compactor.baseUrl,
-			modelSpec: spec,
-		};
-	}
 	if (compactor.baseUrl !== consumer.baseUrl) {
 		return {
 			ok: false,
