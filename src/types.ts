@@ -4,6 +4,7 @@ import type { CompactionEntry, CompactionResult, ExtensionContext } from "@earen
 export const TOOLKIT_ID = "pi-openai-toolkit";
 export const COMPACTION_EXTENSION_ID = `${TOOLKIT_ID}:compaction`;
 export const WEB_SEARCH_EXTENSION_ID = `${TOOLKIT_ID}:web-search`;
+export const REASONING_TRANSLATION_EXTENSION_ID = `${TOOLKIT_ID}:reasoning-translation`;
 export const DEFAULT_ARTIFACT_ROOT = "~/.pi/agent/artifacts/pi-openai-toolkit/compaction";
 export const REDACTED_VALUE = "[REDACTED]";
 /**
@@ -71,9 +72,19 @@ export type WebSearchConfig = {
 	models: string[];
 };
 
+export type ReasoningTranslationConfig = {
+	enabled: boolean;
+	/** Exact provider/model keys whose thinking output may be translated. */
+	models: string[];
+	/** Separate provider/model-id used only for translation requests. */
+	model?: string;
+	targetLanguage: string;
+};
+
 export type ToolkitConfig = {
 	compaction: CompactionConfig;
 	webSearch: WebSearchConfig;
+	reasoningTranslation: ReasoningTranslationConfig;
 };
 
 export type LoadedToolkitConfig = {
@@ -345,7 +356,15 @@ export const DEFAULT_WEB_SEARCH_CONFIG: WebSearchConfig = {
 	models: [],
 };
 
+export const DEFAULT_REASONING_TRANSLATION_CONFIG: ReasoningTranslationConfig = {
+	enabled: true,
+	models: [],
+	model: undefined,
+	targetLanguage: "Simplified Chinese",
+};
+
 export const DEFAULT_TOOLKIT_CONFIG: ToolkitConfig = {
 	compaction: DEFAULT_COMPACTION_CONFIG,
 	webSearch: DEFAULT_WEB_SEARCH_CONFIG,
+	reasoningTranslation: DEFAULT_REASONING_TRANSLATION_CONFIG,
 };

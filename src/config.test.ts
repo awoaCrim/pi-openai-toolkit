@@ -3,7 +3,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { CONFIG_PATH, loadToolkitConfig } from "./config";
-import { DEFAULT_COMPACTION_CONFIG, DEFAULT_WEB_SEARCH_CONFIG } from "./types";
+import {
+	DEFAULT_COMPACTION_CONFIG,
+	DEFAULT_REASONING_TRANSLATION_CONFIG,
+	DEFAULT_WEB_SEARCH_CONFIG,
+} from "./types";
 
 let tempDirs: string[] = [];
 
@@ -184,5 +188,50 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.artifactRoot).toBe(
 			path.resolve(path.dirname(configPath), "artifacts"),
 		);
+	});
+
+	test("parses reasoning translation defaults, valid values, and malformed fields", () => {
+		const defaults = loadToolkitConfig(path.join(os.tmpdir(), "pi-openai-toolkit-missing-reasoning.json"));
+		expect(defaults.config.reasoningTranslation).toEqual({
+			...DEFAULT_REASONING_TRANSLATION_CONFIG,
+			models: [],
+		});
+
+		const valid = loadToolkitConfig(writeTempConfig(JSON.stringify({
+			reasoningTranslation: {
+				enabled: false,
+				models: [" source/gpt ", "source/gpt"],
+				model: " translator/model ",
+				targetLanguage: " Japanese ",
+			},
+		})));
+		expect(valid.warnings).toEqual([]);
+		expect(valid.config.reasoningTranslation).toEqual({
+			enabled: false,
+			models: ["source/gpt"],
+			model: "translator/model",
+			targetLanguage: "Japanese",
+		});
+
+		const malformed = loadToolkitConfig(writeTempConfig(JSON.stringify({
+			reasoningTranslation: {
+				enabled: "yes",
+				models: "source/gpt",
+				model: "translator",
+				targetLanguage: "",
+				futureOption: true,
+			},
+		})));
+		expect(malformed.config.reasoningTranslation).toEqual({
+			...DEFAULT_REASONING_TRANSLATION_CONFIG,
+			models: [],
+		});
+		expect(malformed.warnings).toEqual([
+			"Ignoring reasoningTranslation.futureOption: unknown field.",
+			"Ignoring reasoningTranslation.enabled: expected a boolean.",
+			"Ignoring reasoningTranslation.models: expected a string array.",
+			"Ignoring reasoningTranslation.model: expected \"provider/model-id\" or null.",
+			"Ignoring reasoningTranslation.targetLanguage: expected a non-empty string.",
+		]);
 	});
 });
