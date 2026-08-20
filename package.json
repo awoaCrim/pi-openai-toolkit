@@ -1,6 +1,6 @@
 {
   "name": "pi-openai-toolkit",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "private": false,
   "type": "module",
   "description": "OpenAI-focused Pi toolkit providing remote Responses compaction, native Web Search, and TUI reasoning translation.",
