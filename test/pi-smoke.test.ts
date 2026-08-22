@@ -6,7 +6,6 @@ const packageDir = path.resolve(import.meta.dir, "..");
 const targets = [
 	["compaction entry", path.join(packageDir, "extensions", "compaction.ts")],
 	["Web Search entry", path.join(packageDir, "extensions", "web-search.ts")],
-	["Reasoning Translation entry", path.join(packageDir, "extensions", "reasoning-translation.ts")],
 	["complete package", packageDir],
 ] as const;
 

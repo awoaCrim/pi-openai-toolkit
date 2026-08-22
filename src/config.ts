@@ -2,10 +2,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { parseModelSpec } from "./runtime";
 import {
 	DEFAULT_COMPACTION_CONFIG,
-	DEFAULT_REASONING_TRANSLATION_CONFIG,
 	DEFAULT_TOOLKIT_CONFIG,
 	DEFAULT_WEB_SEARCH_CONFIG,
 	RESPONSES_COMPACT_CAPABLE_APIS,
@@ -13,7 +11,6 @@ import {
 	TOOLKIT_ID,
 	type CompactionConfig,
 	type LoadedToolkitConfig,
-	type ReasoningTranslationConfig,
 	type ToolkitConfig,
 	type WebSearchConfig,
 } from "./types";
@@ -21,7 +18,7 @@ import {
 export const CONFIG_DIR = path.join(os.homedir(), ".pi", "agent", "extensions", TOOLKIT_ID);
 export const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 
-const TOP_LEVEL_FIELDS = new Set(["compaction", "webSearch", "reasoningTranslation"]);
+const TOP_LEVEL_FIELDS = new Set(["compaction", "webSearch"]);
 const COMPACTION_FIELDS = new Set([
 	"enabled",
 	"allowCompactionContinuityBreak",
@@ -37,7 +34,6 @@ const COMPACTION_FIELDS = new Set([
 	"artifactRoot",
 ]);
 const WEB_SEARCH_FIELDS = new Set(["enabled", "models"]);
-const REASONING_TRANSLATION_FIELDS = new Set(["enabled", "models", "model", "targetLanguage"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
@@ -162,10 +158,6 @@ function cloneDefaults(): ToolkitConfig {
 			...DEFAULT_WEB_SEARCH_CONFIG,
 			models: [...DEFAULT_WEB_SEARCH_CONFIG.models],
 		},
-		reasoningTranslation: {
-			...DEFAULT_REASONING_TRANSLATION_CONFIG,
-			models: [...DEFAULT_REASONING_TRANSLATION_CONFIG.models],
-		},
 	};
 }
 
@@ -244,40 +236,6 @@ function applyWebSearchConfig(
 	}
 }
 
-function applyReasoningTranslationConfig(
-	raw: Record<string, unknown>,
-	resolved: ReasoningTranslationConfig,
-	warnings: string[],
-): void {
-	warnUnknownFields(raw, REASONING_TRANSLATION_FIELDS, "reasoningTranslation", warnings);
-	resolved.enabled =
-		toBoolean(raw.enabled, "reasoningTranslation.enabled", warnings) ?? resolved.enabled;
-
-	const models = toModelAllowlist(raw.models, "reasoningTranslation.models", warnings);
-	if (models !== undefined) {
-		resolved.models = models;
-	}
-
-	const modelSpec = toModelSpec(raw.model, "reasoningTranslation.model", warnings);
-	if (modelSpec !== undefined) {
-		if (modelSpec !== null && !parseModelSpec(modelSpec)) {
-			warnings.push(
-				"Ignoring reasoningTranslation.model: expected \"provider/model-id\" or null.",
-			);
-		} else {
-			resolved.model = modelSpec === null ? undefined : modelSpec;
-		}
-	}
-
-	if (raw.targetLanguage !== undefined) {
-		if (typeof raw.targetLanguage === "string" && raw.targetLanguage.trim().length > 0) {
-			resolved.targetLanguage = raw.targetLanguage.trim();
-		} else {
-			warnings.push("Ignoring reasoningTranslation.targetLanguage: expected a non-empty string.");
-		}
-	}
-}
-
 /**
  * Load the canonical toolkit config from
  * `~/.pi/agent/extensions/pi-openai-toolkit/config.json`.
@@ -306,14 +264,6 @@ export function loadToolkitConfig(configPath: string = CONFIG_PATH): LoadedToolk
 				applyWebSearchConfig(raw.webSearch, resolved.webSearch, warnings);
 			} else {
 				warnings.push("Ignoring webSearch: expected a JSON object.");
-			}
-		}
-
-		if (raw.reasoningTranslation !== undefined) {
-			if (isRecord(raw.reasoningTranslation)) {
-				applyReasoningTranslationConfig(raw.reasoningTranslation, resolved.reasoningTranslation, warnings);
-			} else {
-				warnings.push("Ignoring reasoningTranslation: expected a JSON object.");
 			}
 		}
 	}

@@ -1,7 +1,7 @@
 # pi-openai-toolkit
 
 <p align="center">
-  <strong>专为 <a href="https://github.com/badlogic/pi">Pi</a> 打造的 OpenAI 全功能增强工具包：远端无损压缩 v2、原生托管联网搜索与实时思考翻译</strong>
+  <strong>专为 <a href="https://github.com/badlogic/pi">Pi</a> 打造的 OpenAI 全功能增强工具包：远端无损压缩 v2 & 原生托管联网搜索</strong>
 </p>
 
 <p align="center">
@@ -10,11 +10,10 @@
 
 ---
 
-`pi-openai-toolkit` 是专为 **Pi (>= 0.84.x)** 打造的 OpenAI 全功能增强工具包，集成了三个可独立加载的扩展：
+`pi-openai-toolkit` 是专为 **Pi (>= 0.84.x)** 打造的 OpenAI 全功能增强工具包，集成了两项针对 OpenAI Responses 协议的核心扩展：
 
 1. **远端无损压缩 (Remote Compaction v2)** (`extensions/compaction.ts`): 基于 `remote_compaction_v2` SSE 流式协议实现的服务端密文无损会话压缩，彻底告别会话变长后丢失细节的文本二次摘要。
 2. **按模型启用的联网搜索** (`extensions/web-search.ts`): 通过 `webSearch.models` 精确匹配 `provider/model-id`，由 Toolkit 为符合条件的 `openai-responses` 与 `openai-codex-responses` 会话提供并拥有原生联网搜索。
-3. **实时思考翻译** (`extensions/reasoning-translation.ts`): 仅在 TUI 展示层把流式 thinking/reasoning 分段翻译为目标语言。它使用独立配置的翻译模型，不修改 assistant 消息、会话原文或主模型上下文。
 
 ## 安装使用
 
@@ -58,9 +57,6 @@ pi --no-extensions -e /本地绝对路径/pi-openai-toolkit/extensions/compactio
 
 # 仅加载原生联网搜索
 pi --no-extensions -e /本地绝对路径/pi-openai-toolkit/extensions/web-search.ts
-
-# 仅加载实时思考翻译
-pi --no-extensions -e /本地绝对路径/pi-openai-toolkit/extensions/reasoning-translation.ts
 ```
 
 > ⚠️ **冲突提示**：请勿同时启用 `pi-remote-compact`、`@lll9p/pi-better-compaction` 或独立的 `pi-openai-web-search`。多重钩子会产生竞态或注入重复的 System Prompt。
@@ -107,14 +103,6 @@ C:\Users\<user>\.pi\agent\extensions\pi-openai-toolkit\config.json
     "models": [
       "uwoacrimson/gpt-5.6-luna"
     ]
-  },
-  "reasoningTranslation": {
-    "enabled": true,
-    "models": [
-      "uwoacrimson/gpt-5.6-luna"
-    ],
-    "model": "openai/gpt-4o-mini",
-    "targetLanguage": "Simplified Chinese"
   }
 }
 ```
@@ -139,19 +127,6 @@ C:\Users\<user>\.pi\agent\extensions\pi-openai-toolkit\config.json
 
 - `enabled` (*boolean*, 默认 `true`): 是否启用原生 OpenAI 联网搜索注入。
 - `models` (*string[]*): 精确的 `provider/model-id` 模型白名单。只有列表中的模型在 `openai-responses` 或 `openai-codex-responses` 端点上运行时，才会使用 Toolkit Web Search。空列表表示所有模型都不启用 Toolkit Web Search。
-
-#### `reasoningTranslation`（实时思考翻译配置）
-
-- `enabled` (*boolean*, 默认 `true`): 是否启用展示层思考翻译。
-- `models` (*string[]*): 主模型的精确 `provider/model-id` 白名单。空列表表示不翻译任何模型。
-- `model` (*string | null*, 默认 `null`): 独立的翻译模型，格式为 `provider/model-id`。它不会被设置为 Pi 当前模型，翻译请求也不会启用 thinking/reasoning。
-- `targetLanguage` (*string*, 默认 `"Simplified Chinese"`): 传给翻译模型的目标语言名称，可以改为其他自然语言。
-
-实时思考翻译只在 Pi 交互式 **TUI** 模式运行，并且要求 Pi 没有全局隐藏 thinking 区域。扩展监听流式 `thinking_delta`，优先在句号、问号、分号或换行处分段；没有自然边界时约每 400 个 UTF-16 字符切分，空闲约 800 ms 或收到 `thinking_end` 时刷新尾部。翻译请求严格按 FIFO 单并发执行，不会因为响应速度不同而乱序。
-
-替换只发生在 TUI 的 Markdown 展示层。session 中的原始 assistant thinking、后续 Provider payload、LLM 上下文和压缩输入都保持不变；扩展不会注册 Function Tool，也不会向主模型发送 custom message。已完成的展示映射会作为不可见的 custom entry 保存，恢复 session 或切换会话树后可以继续替换对应原文。RPC、JSON 与 print 模式不会调用翻译模型，也不会改变 Pi 原始输出。
-
-翻译会增加额外延迟和模型费用。翻译模型未配置、认证失败、模型不存在、超时、限流、空输出或某个分段失败时，主模型响应仍会继续；失败分段精确回退为原文，后续分段继续处理。中止、切换模型/会话、扩展重载或退出时会取消当前队列并忽略迟到结果。
 
 ---
 
@@ -193,10 +168,6 @@ Content-Type: application/json
 - 注入规范、去重的搜索引导 System Prompt；
 - **零额外网络延迟**：复用 Pi 当前活跃的 Provider 配置、认证凭据与 Base URL；
 - **Toolkit 接管搜索**：对于符合条件的模型，发给 Provider 的载荷会移除名为 `web_search` 的本地 Function Tool，只保留原生搜索；切换到不符合条件的模型后，会恢复该本地工具原先的 active 状态。
-
-### 3. 实时思考翻译
-
-该扩展与压缩、联网搜索彼此独立：只注册生命周期监听器和一个同步 Markdown transformer，不注册 Function Tool，也不改写主模型的 Provider request。翻译直接调用配置模型所属 Provider 的 `streamSimple()`，因此不会切换当前模型，也不会递归触发 Toolkit 的其他请求钩子。每个分段完成后通过 Pi 公共的 `setHiddenThinkingLabel()` 触发展示刷新，继续使用 Pi 原有 thinking 容器的颜色、斜体和折叠行为。
 
 ---
 

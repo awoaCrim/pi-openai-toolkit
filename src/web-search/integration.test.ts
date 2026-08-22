@@ -22,7 +22,7 @@ const identity = {
 afterEach(() => clearRequestContextCache());
 
 describe("Compaction and Web Search integration", () => {
-	test("package extension order keeps compaction before Web Search and translation last", () => {
+	test("package extension order is compaction before Web Search", () => {
 		const packageJson = JSON.parse(
 			fs.readFileSync(path.resolve(import.meta.dir, "../..", "package.json"), "utf8"),
 		) as { pi?: { extensions?: string[] } };
@@ -30,7 +30,6 @@ describe("Compaction and Web Search integration", () => {
 		expect(packageJson.pi?.extensions).toEqual([
 			"./extensions/compaction.ts",
 			"./extensions/web-search.ts",
-			"./extensions/reasoning-translation.ts",
 		]);
 	});
 
