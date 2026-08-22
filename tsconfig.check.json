@@ -14,7 +14,6 @@
   "include": [
     "extensions/compaction.ts",
     "extensions/web-search.ts",
-    "extensions/reasoning-translation.ts",
     "src/compact-client.ts",
     "src/config.ts",
     "src/debug.ts",
@@ -32,12 +31,6 @@
     "src/web-search/extension.ts",
     "src/web-search/payload.ts",
     "src/web-search/prompt.ts",
-    "src/web-search/types.ts",
-    "src/reasoning-translation/client.ts",
-    "src/reasoning-translation/extension.ts",
-    "src/reasoning-translation/persistence.ts",
-    "src/reasoning-translation/segmenter.ts",
-    "src/reasoning-translation/state.ts",
-    "src/reasoning-translation/types.ts"
+    "src/web-search/types.ts"
   ]
 }
