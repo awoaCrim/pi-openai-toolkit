@@ -1,0 +1,2 @@
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Review final documentation content, history scope, force-with-lease safety, and post-push checks."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Verify the final local and remote repository states agree and unrelated tracked/untracked files were not changed."}

@@ -1,0 +1,6 @@
+{"file":".trellis/spec/frontend/type-safety.md","reason":"Verify provider-header normalization and unknown provider payload handling remain type-safe after the package/config refactor."}
+{"file":".trellis/spec/frontend/provider-native-tools.md","reason":"Verify extension ordering, immutable native-tool injection, local-tool precedence, no synthetic-compaction leakage, and transparent failure behavior."}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Use the project quality checklist as the review entry point for tests, forbidden patterns, and final consistency checks."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Check that shared constants and boundary helpers are reused without coupling the two extension entry points."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Review end-to-end ordering from Pi extension loading through compaction caching, payload mutation, provider execution, packaging, and migration docs."}
+{"file":".trellis/tasks/08-15-integrate-search-imagegen-rename/research/pi-openai-web-search-integration.md","reason":"Check implementation behavior, supported API scope, attribution, and live acceptance expectations against the research evidence."}

@@ -1,0 +1,141 @@
+[
+  {
+    "id": "pi-openai-toolkit@0.3.0",
+    "name": "pi-openai-toolkit",
+    "version": "0.3.0",
+    "size": 32843,
+    "unpackedSize": 140197,
+    "shasum": "c059f0849f42703bc33566d687467b20daf42ed0",
+    "integrity": "sha512-rTGWRXr6nDyqdW/QZcjmY8AIOgbtMd4QPIP2MmBenDJlGdiaix+xkO2gom/RJh7ryRxIDQh1ZAdhwvxeGLm8UQ==",
+    "filename": "pi-openai-toolkit-0.3.0.tgz",
+    "files": [
+      {
+        "path": "LICENSE",
+        "size": 1083,
+        "mode": 420
+      },
+      {
+        "path": "NOTICE",
+        "size": 1618,
+        "mode": 420
+      },
+      {
+        "path": "README.md",
+        "size": 8110,
+        "mode": 420
+      },
+      {
+        "path": "extensions/compaction.ts",
+        "size": 55,
+        "mode": 420
+      },
+      {
+        "path": "extensions/web-search.ts",
+        "size": 58,
+        "mode": 420
+      },
+      {
+        "path": "package.json",
+        "size": 2097,
+        "mode": 420
+      },
+      {
+        "path": "src/compact-client.ts",
+        "size": 10950,
+        "mode": 420
+      },
+      {
+        "path": "src/config.ts",
+        "size": 8007,
+        "mode": 420
+      },
+      {
+        "path": "src/debug.ts",
+        "size": 5485,
+        "mode": 420
+      },
+      {
+        "path": "src/details-store.ts",
+        "size": 4414,
+        "mode": 420
+      },
+      {
+        "path": "src/extension-runtime.ts",
+        "size": 16313,
+        "mode": 420
+      },
+      {
+        "path": "src/native-fallback.ts",
+        "size": 4509,
+        "mode": 420
+      },
+      {
+        "path": "src/payload-rewrite.ts",
+        "size": 16497,
+        "mode": 420
+      },
+      {
+        "path": "src/provider-headers.ts",
+        "size": 629,
+        "mode": 420
+      },
+      {
+        "path": "src/remote-v2-client.ts",
+        "size": 15764,
+        "mode": 420
+      },
+      {
+        "path": "src/request-context-cache.ts",
+        "size": 3235,
+        "mode": 420
+      },
+      {
+        "path": "src/runtime.ts",
+        "size": 8235,
+        "mode": 420
+      },
+      {
+        "path": "src/serializer.ts",
+        "size": 15673,
+        "mode": 420
+      },
+      {
+        "path": "src/supported-environment.ts",
+        "size": 548,
+        "mode": 420
+      },
+      {
+        "path": "src/types.ts",
+        "size": 10190,
+        "mode": 420
+      },
+      {
+        "path": "src/web-search/extension.ts",
+        "size": 1716,
+        "mode": 420
+      },
+      {
+        "path": "src/web-search/payload.ts",
+        "size": 2220,
+        "mode": 420
+      },
+      {
+        "path": "src/web-search/prompt.ts",
+        "size": 879,
+        "mode": 420
+      },
+      {
+        "path": "src/web-search/types.ts",
+        "size": 978,
+        "mode": 420
+      },
+      {
+        "path": "tsconfig.check.json",
+        "size": 934,
+        "mode": 420
+      }
+    ],
+    "entryCount": 25,
+    "bundled": []
+  }
+]

@@ -1,0 +1,5 @@
+{"file":".trellis/spec/frontend/type-safety.md","reason":"Preserve the existing Pi provider-header contract and avoid weakening unknown-payload/type-boundary handling during the config and extension refactor."}
+{"file":".trellis/spec/frontend/provider-native-tools.md","reason":"Follow the executable hook-ordering, immutable payload, collision, failure, and test contracts for provider-native Web Search."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Guide shared config/constants/helper decisions while keeping compaction and Web Search independently loadable without duplicating payload contracts."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"The task crosses package metadata, Pi hooks, provider payloads, config parsing, persisted compaction state, packaging, and external repository identity."}
+{"file":".trellis/tasks/08-15-integrate-search-imagegen-rename/research/pi-openai-web-search-integration.md","reason":"Primary implementation research for upstream behavior, official Pi hook contracts, license attribution, ordering risks, and validated NewAPI behavior."}

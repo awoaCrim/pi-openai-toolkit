@@ -1,0 +1,111 @@
+[
+  {
+    "id": "pi-remote-compact@0.3.0",
+    "name": "pi-remote-compact",
+    "version": "0.3.0",
+    "size": 29198,
+    "unpackedSize": 126843,
+    "shasum": "06894d05d5c57e6ff3c86a0c152cd474c66d9088",
+    "integrity": "sha512-s/Qn88i5GBJDKzmNy8beuKq9ELnE2l7N+DHZ1EhedY34VJYrXc5yU1SA8bLxaZg5n6vjVX4m/PCNkbtf8JE3+g==",
+    "filename": "pi-remote-compact-0.3.0.tgz",
+    "files": [
+      {
+        "path": "LICENSE",
+        "size": 1083,
+        "mode": 420
+      },
+      {
+        "path": "README.md",
+        "size": 5349,
+        "mode": 420
+      },
+      {
+        "path": "index.ts",
+        "size": 55,
+        "mode": 420
+      },
+      {
+        "path": "package.json",
+        "size": 1916,
+        "mode": 420
+      },
+      {
+        "path": "src/compact-client.ts",
+        "size": 10947,
+        "mode": 420
+      },
+      {
+        "path": "src/config.ts",
+        "size": 6008,
+        "mode": 420
+      },
+      {
+        "path": "src/debug.ts",
+        "size": 5459,
+        "mode": 420
+      },
+      {
+        "path": "src/details-store.ts",
+        "size": 4414,
+        "mode": 420
+      },
+      {
+        "path": "src/extension-runtime.ts",
+        "size": 16106,
+        "mode": 420
+      },
+      {
+        "path": "src/native-fallback.ts",
+        "size": 4527,
+        "mode": 420
+      },
+      {
+        "path": "src/payload-rewrite.ts",
+        "size": 16497,
+        "mode": 420
+      },
+      {
+        "path": "src/provider-headers.ts",
+        "size": 629,
+        "mode": 420
+      },
+      {
+        "path": "src/remote-v2-client.ts",
+        "size": 15761,
+        "mode": 420
+      },
+      {
+        "path": "src/request-context-cache.ts",
+        "size": 3235,
+        "mode": 420
+      },
+      {
+        "path": "src/runtime.ts",
+        "size": 8249,
+        "mode": 420
+      },
+      {
+        "path": "src/serializer.ts",
+        "size": 15673,
+        "mode": 420
+      },
+      {
+        "path": "src/supported-environment.ts",
+        "size": 548,
+        "mode": 420
+      },
+      {
+        "path": "src/types.ts",
+        "size": 9601,
+        "mode": 420
+      },
+      {
+        "path": "tsconfig.check.json",
+        "size": 786,
+        "mode": 420
+      }
+    ],
+    "entryCount": 19,
+    "bundled": []
+  }
+]

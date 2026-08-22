@@ -1,0 +1,2 @@
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Review the final README content, history rewrite scope, force-with-lease safety, and post-push verification against project quality expectations."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Verify that local, temporary-clone, and remote repository states remain consistent and that unrelated untracked files are excluded."}

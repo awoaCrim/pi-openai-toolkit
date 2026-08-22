@@ -1,0 +1,2 @@
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Apply repository verification and scope-discipline expectations to the linked README acknowledgment correction and history rewrite."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Trace consistency across two README contents, rewritten Git trees, remote refs, and the local worktree."}

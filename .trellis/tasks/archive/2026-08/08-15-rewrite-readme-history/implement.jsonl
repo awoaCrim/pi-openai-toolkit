@@ -1,0 +1,2 @@
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Apply the repository quality and verification checklist to a documentation/history rewrite, including clean scope and regression checks."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Trace the boundary between README working-tree content, rewritten Git trees, remote refs, and local untracked bootstrap files."}

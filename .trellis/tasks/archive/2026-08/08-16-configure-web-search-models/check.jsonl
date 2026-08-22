@@ -1,0 +1,3 @@
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Review config validation, tool-state transitions, test coverage, and regression safety."}
+{"file":".trellis/spec/frontend/provider-native-tools.md","reason":"Verify the model-scoped native Web Search behavior preserves endpoint identity, tool precedence, immutable payloads, and hook contracts."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Check consistency across model events, config, active tools, system prompts, provider payloads, and documentation."}

@@ -1,0 +1,2 @@
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"Review exact Markdown link content, history scope, force-with-lease safety, and post-push verification."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Verify both README paths and all unrelated tracked/untracked files remain consistent across local, temporary, and remote states."}
