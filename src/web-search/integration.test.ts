@@ -6,6 +6,8 @@ import {
 	getCompactionRequestExtras,
 	rememberRequestContext,
 } from "../request-context-cache";
+import { rewritePayloadWithDeferredToolCarryover } from "../deferred-tool-carryover";
+import { CACHE_STACK_ACTIVATION_ENTRY_TYPE } from "../types";
 import { transformWebSearchPayload } from "./payload";
 import { WEB_SEARCH_SOURCE_INCLUDE } from "./types";
 
@@ -76,5 +78,46 @@ describe("Compaction and Web Search integration", () => {
 		expect((live.payload as { include: unknown[] }).include).toEqual([WEB_SEARCH_SOURCE_INCLUDE]);
 		expect(live.changed).toBe(true);
 		expect(getCompactionRequestExtras(identity)?.tools).toEqual([localTool]);
+	});
+
+	test("carryover is inserted before the later native Web Search transform", () => {
+		const payload = {
+			model: "gpt-5.5",
+			input: [
+				{ role: "developer", content: "fresh" },
+				{ type: "compaction", encrypted_content: "opaque" },
+				{ role: "user", content: "continue" },
+			],
+			tools: [
+				{ type: "function", name: "read_file", parameters: { type: "object" }, strict: false },
+				{ type: "function", name: "web_search", parameters: { type: "object" }, strict: false },
+			],
+		};
+		const carryover = rewritePayloadWithDeferredToolCarryover({
+			payload,
+			carryover: {
+				version: 1,
+				source: CACHE_STACK_ACTIVATION_ENTRY_TYPE,
+				toolNames: ["read_file", "web_search"],
+				catalogHash: "catalog-v1",
+			},
+			compactionEntryId: "compaction-search-order",
+			checkpointEndIndex: 2,
+			compat: { supportsAdditionalTools: true },
+		});
+		const live = transformWebSearchPayload({
+			model,
+			config: enabled,
+			payload: carryover.payload,
+		});
+		const finalPayload = live.payload as { input: unknown[]; tools: unknown[]; include: unknown[] };
+
+		expect(finalPayload.input[2]).toEqual({
+			type: "additional_tools",
+			role: "developer",
+			tools: [payload.tools[0]],
+		});
+		expect(finalPayload.tools).toEqual([{ type: "web_search" }]);
+		expect(finalPayload.include).toEqual([WEB_SEARCH_SOURCE_INCLUDE]);
 	});
 });

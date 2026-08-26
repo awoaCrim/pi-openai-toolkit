@@ -40,6 +40,12 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.remoteCompactModel).toBeUndefined();
 		expect(loaded.config.compaction.model).toBeUndefined();
 		expect(loaded.config.compaction.thinkingLevel).toBe("off");
+		expect(loaded.config.compaction.autoCompaction).toEqual({
+			enabled: true,
+			continuation: "inline",
+			unsupportedFallback: "followUp",
+			reserveTokens: undefined,
+		});
 		expect(loaded.config.compaction.responsesApis).toEqual([
 			...DEFAULT_COMPACTION_CONFIG.responsesApis,
 		]);
@@ -58,6 +64,12 @@ describe("loadToolkitConfig", () => {
 					remoteCompactModel: " uwoacrimson/gpt-5.6-luna ",
 					model: " google/gemini-2.5-flash ",
 					thinkingLevel: "medium",
+					autoCompaction: {
+						enabled: true,
+						continuation: "followUp",
+						unsupportedFallback: "off",
+						reserveTokens: 4096,
+					},
 					responsesApis: ["openai-responses"],
 					debug: true,
 					notifyOnLoad: true,
@@ -78,6 +90,12 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.remoteCompactModel).toBe("uwoacrimson/gpt-5.6-luna");
 		expect(loaded.config.compaction.model).toBe("google/gemini-2.5-flash");
 		expect(loaded.config.compaction.thinkingLevel).toBe("medium");
+		expect(loaded.config.compaction.autoCompaction).toEqual({
+			enabled: true,
+			continuation: "followUp",
+			unsupportedFallback: "off",
+			reserveTokens: 4096,
+		});
 		expect(loaded.config.compaction.responsesApis).toEqual(["openai-responses"]);
 		expect(loaded.config.compaction.debug).toBe(true);
 		expect(loaded.config.compaction.notifyOnLoad).toBe(true);
@@ -105,6 +123,12 @@ describe("loadToolkitConfig", () => {
 					remoteCompactModel: { provider: "uwoacrimson" },
 					model: 42,
 					thinkingLevel: "ultra",
+					autoCompaction: {
+						enabled: "yes",
+						continuation: "later",
+						unsupportedFallback: "retry",
+						reserveTokens: -1,
+					},
 					responsesApis: ["openai-responses", "anthropic-messages"],
 					artifactRoot: "",
 				},
@@ -122,9 +146,15 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.remoteCompactModel).toBeUndefined();
 		expect(loaded.config.compaction.model).toBeUndefined();
 		expect(loaded.config.compaction.thinkingLevel).toBe("off");
+		expect(loaded.config.compaction.autoCompaction).toEqual({
+			enabled: true,
+			continuation: "inline",
+			unsupportedFallback: "followUp",
+			reserveTokens: undefined,
+		});
 		expect(loaded.config.compaction.responsesApis).toEqual(["openai-responses"]);
 		expect(loaded.config.webSearch).toEqual({ enabled: true, models: ["provider/model"] });
-		expect(loaded.warnings.length).toBeGreaterThanOrEqual(7);
+		expect(loaded.warnings.length).toBeGreaterThanOrEqual(11);
 	});
 
 	test("unknown fields and malformed feature sections warn without changing defaults", () => {

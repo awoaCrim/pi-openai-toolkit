@@ -18,6 +18,8 @@
     "src/config.ts",
     "src/debug.ts",
     "src/details-store.ts",
+    "src/deferred-tool-carryover.ts",
+    "src/inline-compaction.ts",
     "src/extension-runtime.ts",
     "src/native-fallback.ts",
     "src/payload-rewrite.ts",

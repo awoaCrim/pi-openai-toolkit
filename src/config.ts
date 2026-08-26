@@ -5,6 +5,7 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
 	DEFAULT_COMPACTION_CONFIG,
 	DEFAULT_TOOLKIT_CONFIG,
+	DEFAULT_AUTO_COMPACTION_CONFIG,
 	DEFAULT_WEB_SEARCH_CONFIG,
 	RESPONSES_COMPACT_CAPABLE_APIS,
 	THINKING_LEVELS,
@@ -25,6 +26,7 @@ const COMPACTION_FIELDS = new Set([
 	"remoteCompactModel",
 	"model",
 	"thinkingLevel",
+	"autoCompaction",
 	"responsesApis",
 	"notifyOnLoad",
 	"debug",
@@ -33,6 +35,7 @@ const COMPACTION_FIELDS = new Set([
 	"redactSensitiveData",
 	"artifactRoot",
 ]);
+const AUTO_COMPACTION_FIELDS = new Set(["enabled", "continuation", "unsupportedFallback", "reserveTokens"]);
 const WEB_SEARCH_FIELDS = new Set(["enabled", "models"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -111,6 +114,37 @@ function toThinkingLevel(value: unknown, fieldPath: string, warnings: string[]):
 	return undefined;
 }
 
+function toCompactionContinuation(
+	value: unknown,
+	fieldPath: string,
+	warnings: string[],
+): "inline" | "followUp" | "off" | undefined {
+	if (value === undefined) return undefined;
+	if (value === "inline" || value === "followUp" || value === "off") return value;
+	warnings.push(`Ignoring ${fieldPath}: expected one of inline, followUp, off.`);
+	return undefined;
+}
+
+function toUnsupportedFallback(
+	value: unknown,
+	fieldPath: string,
+	warnings: string[],
+): "followUp" | "off" | undefined {
+	if (value === undefined) return undefined;
+	if (value === "followUp" || value === "off") return value;
+	warnings.push(`Ignoring ${fieldPath}: expected one of followUp, off.`);
+	return undefined;
+}
+
+function toNonNegativeInteger(value: unknown, fieldPath: string, warnings: string[]): number | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value === "number" && Number.isInteger(value) && Number.isFinite(value) && value >= 0) {
+		return value;
+	}
+	warnings.push(`Ignoring ${fieldPath}: expected a non-negative integer.`);
+	return undefined;
+}
+
 function toSupportedApis(
 	value: unknown,
 	fieldPath: string,
@@ -152,6 +186,7 @@ function cloneDefaults(): ToolkitConfig {
 	return {
 		compaction: {
 			...DEFAULT_COMPACTION_CONFIG,
+			autoCompaction: { ...DEFAULT_AUTO_COMPACTION_CONFIG },
 			responsesApis: [...DEFAULT_COMPACTION_CONFIG.responsesApis],
 		},
 		webSearch: {
@@ -159,6 +194,32 @@ function cloneDefaults(): ToolkitConfig {
 			models: [...DEFAULT_WEB_SEARCH_CONFIG.models],
 		},
 	};
+}
+
+function applyAutoCompactionConfig(
+	raw: Record<string, unknown>,
+	resolved: CompactionConfig["autoCompaction"],
+	warnings: string[],
+): void {
+	warnUnknownFields(raw, AUTO_COMPACTION_FIELDS, "compaction.autoCompaction", warnings);
+	resolved.enabled = toBoolean(raw.enabled, "compaction.autoCompaction.enabled", warnings) ?? resolved.enabled;
+	resolved.continuation =
+		toCompactionContinuation(raw.continuation, "compaction.autoCompaction.continuation", warnings) ??
+		resolved.continuation;
+	resolved.unsupportedFallback =
+		toUnsupportedFallback(
+			raw.unsupportedFallback,
+			"compaction.autoCompaction.unsupportedFallback",
+			warnings,
+		) ?? resolved.unsupportedFallback;
+	const reserveTokens = toNonNegativeInteger(
+		raw.reserveTokens,
+		"compaction.autoCompaction.reserveTokens",
+		warnings,
+	);
+	if (reserveTokens !== undefined) {
+		resolved.reserveTokens = reserveTokens;
+	}
 }
 
 function applyCompactionConfig(
@@ -204,6 +265,14 @@ function applyCompactionConfig(
 
 	resolved.thinkingLevel =
 		toThinkingLevel(raw.thinkingLevel, "compaction.thinkingLevel", warnings) ?? resolved.thinkingLevel;
+
+	if (raw.autoCompaction !== undefined) {
+		if (isRecord(raw.autoCompaction)) {
+			applyAutoCompactionConfig(raw.autoCompaction, resolved.autoCompaction, warnings);
+		} else {
+			warnings.push("Ignoring compaction.autoCompaction: expected a JSON object.");
+		}
+	}
 
 	const apis = toSupportedApis(
 		raw.responsesApis,

@@ -1,6 +1,6 @@
 {
   "name": "pi-openai-toolkit",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": false,
   "type": "module",
   "description": "OpenAI-focused Pi toolkit providing remote Responses compaction and native Web Search.",
@@ -40,6 +40,8 @@
     "src/config.ts",
     "src/debug.ts",
     "src/details-store.ts",
+    "src/deferred-tool-carryover.ts",
+    "src/inline-compaction.ts",
     "src/extension-runtime.ts",
     "src/native-fallback.ts",
     "src/payload-rewrite.ts",
@@ -72,6 +74,9 @@
     "@earendil-works/pi-coding-agent": ">=0.80.0"
   },
   "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.84.3",
+    "@earendil-works/pi-ai": "0.84.3",
+    "@earendil-works/pi-coding-agent": "0.84.3",
     "@types/node": "24.12.4",
     "bun": "1.2.23",
     "typescript": "5.9.3"

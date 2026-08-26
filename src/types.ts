@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { CompactionEntry, CompactionResult, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { CompactionEntry, CompactionResult, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 
 export const TOOLKIT_ID = "pi-openai-toolkit";
 export const COMPACTION_EXTENSION_ID = `${TOOLKIT_ID}:compaction`;
@@ -36,6 +36,15 @@ export type DebugArtifactKind =
 	| "compaction-event"
 	| "lifecycle";
 
+export type CompactionContinuationMode = "inline" | "followUp" | "off";
+
+export type AutoCompactionConfig = {
+	enabled: boolean;
+	continuation: CompactionContinuationMode;
+	unsupportedFallback: "followUp" | "off";
+	reserveTokens?: number;
+};
+
 export type CompactionConfig = {
 	enabled: boolean;
 	/**
@@ -55,6 +64,8 @@ export type CompactionConfig = {
 	model?: string;
 	/** Thinking level passed to pi's native compact() when the fallback model runs. */
 	thinkingLevel: ThinkingLevel;
+	/** Threshold-triggered compaction and same-tool-loop continuation policy. */
+	autoCompaction: AutoCompactionConfig;
 	/** Subset of RESPONSES_COMPACT_CAPABLE_APIS that should use remote compaction. */
 	responsesApis: string[];
 	notifyOnLoad: boolean;
@@ -135,10 +146,21 @@ export type NativeCompactionIdentity = {
 	baseUrl: string;
 };
 
+export const CACHE_STACK_ACTIVATION_ENTRY_TYPE = "pi-cache-stack.activation-state.v1" as const;
+
+export type DeferredToolCarryoverV1 = {
+	version: 1;
+	source: typeof CACHE_STACK_ACTIVATION_ENTRY_TYPE;
+	toolNames: string[];
+	catalogHash?: string;
+};
+
 export type NativeCompactionDetails = NativeCompactionIdentity & {
 	strategy: NativeCompactionStrategy;
 	/** Actual producer of the opaque checkpoint; absent on legacy same-model entries. */
 	compactionModel?: NativeCompactionIdentity;
+	/** Cache-stack activation state captured at this opaque checkpoint. */
+	deferredToolCarryover?: DeferredToolCarryoverV1;
 	compactedWindow: unknown[];
 	compactResponseId?: string;
 	createdAt: string;
@@ -149,6 +171,7 @@ export type NativeCompactionEntry = CompactionEntry<NativeCompactionDetails>;
 
 export type CreateNativeCompactionDetailsInput = NativeCompactionIdentity & {
 	compactionModel?: NativeCompactionIdentity;
+	deferredToolCarryover?: DeferredToolCarryoverV1;
 	compactedWindow: unknown[];
 	compactResponseId?: string;
 	createdAt?: string;
@@ -262,6 +285,64 @@ export function isNativeCompactionIdentity(value: unknown): value is NativeCompa
 	);
 }
 
+export function isDeferredToolCarryover(value: unknown): value is DeferredToolCarryoverV1 {
+	if (!isRecord(value) || value.version !== 1 || value.source !== CACHE_STACK_ACTIVATION_ENTRY_TYPE) {
+		return false;
+	}
+
+	return (
+		Array.isArray(value.toolNames) &&
+		value.toolNames.every((name) => isNonEmptyString(name)) &&
+		(value.catalogHash === undefined || typeof value.catalogHash === "string")
+	);
+}
+
+function normalizeDeferredToolCarryover(value: DeferredToolCarryoverV1): DeferredToolCarryoverV1 {
+	if (!isDeferredToolCarryover(value)) {
+		throw new Error("Invalid deferred tool carryover");
+	}
+
+	return {
+		version: 1,
+		source: CACHE_STACK_ACTIVATION_ENTRY_TYPE,
+		toolNames: [...new Set(value.toolNames.map((name) => name.trim()).filter(Boolean))].sort(),
+		...(typeof value.catalogHash === "string" ? { catalogHash: value.catalogHash } : {}),
+	};
+}
+
+function decodeCacheStackActivationState(value: unknown): DeferredToolCarryoverV1 | undefined {
+	if (!isRecord(value) || value.version !== 1 || typeof value.catalogHash !== "string") {
+		return undefined;
+	}
+	if (!Array.isArray(value.activatedTools) || !value.activatedTools.every((name) => typeof name === "string")) {
+		return undefined;
+	}
+
+	return normalizeDeferredToolCarryover({
+		version: 1,
+		source: CACHE_STACK_ACTIVATION_ENTRY_TYPE,
+		toolNames: value.activatedTools,
+		catalogHash: value.catalogHash,
+	});
+}
+
+/** Read only the latest valid cache-stack activation snapshot on this branch. */
+export function getLatestDeferredToolCarryover(
+	entries: readonly SessionEntry[],
+): DeferredToolCarryoverV1 | undefined {
+	for (let index = entries.length - 1; index >= 0; index -= 1) {
+		const entry = entries[index];
+		if (entry?.type !== "custom" || entry.customType !== CACHE_STACK_ACTIVATION_ENTRY_TYPE) {
+			continue;
+		}
+
+		const decoded = decodeCacheStackActivationState(entry.data);
+		if (decoded) return decoded;
+	}
+
+	return undefined;
+}
+
 export function isNativeCompactionDetails(value: unknown): value is NativeCompactionDetails {
 	if (!isRecord(value) || !isNativeCompactionIdentity(value)) {
 		return false;
@@ -272,6 +353,7 @@ export function isNativeCompactionDetails(value: unknown): value is NativeCompac
 		(candidate.strategy === LEGACY_NATIVE_COMPACTION_STRATEGY ||
 			candidate.strategy === REMOTE_V2_COMPACTION_STRATEGY) &&
 		(candidate.compactionModel === undefined || isNativeCompactionIdentity(candidate.compactionModel)) &&
+		(candidate.deferredToolCarryover === undefined || isDeferredToolCarryover(candidate.deferredToolCarryover)) &&
 		Array.isArray(candidate.compactedWindow) &&
 		candidate.compactedWindow.every(isCompactedWindowItem) &&
 		isNonEmptyString(candidate.createdAt) &&
@@ -299,6 +381,9 @@ export function createNativeCompactionDetails(input: CreateNativeCompactionDetai
 				baseUrl: normalizeString(input.compactionModel.baseUrl),
 			}
 			: undefined,
+		deferredToolCarryover: input.deferredToolCarryover
+			? normalizeDeferredToolCarryover(input.deferredToolCarryover)
+			: undefined,
 		compactedWindow: input.compactedWindow.map((item) => cloneStructuredValue(item)),
 		compactResponseId: isNonEmptyString(input.compactResponseId) ? normalizeString(input.compactResponseId) : undefined,
 		createdAt: isNonEmptyString(input.createdAt) ? normalizeString(input.createdAt) : new Date().toISOString(),
@@ -325,12 +410,20 @@ export function createNativeCompactionResult(
 	};
 }
 
+export const DEFAULT_AUTO_COMPACTION_CONFIG: AutoCompactionConfig = {
+	enabled: true,
+	continuation: "inline",
+	unsupportedFallback: "followUp",
+	reserveTokens: undefined,
+};
+
 export const DEFAULT_COMPACTION_CONFIG: CompactionConfig = {
 	enabled: true,
 	allowCompactionContinuityBreak: false,
 	remoteCompactModel: undefined,
 	model: undefined,
 	thinkingLevel: "off",
+	autoCompaction: { ...DEFAULT_AUTO_COMPACTION_CONFIG },
 	responsesApis: [...RESPONSES_COMPACT_CAPABLE_APIS],
 	notifyOnLoad: false,
 	debug: false,

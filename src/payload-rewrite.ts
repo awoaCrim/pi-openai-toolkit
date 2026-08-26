@@ -7,6 +7,7 @@ import type {
 	SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
 import type { ResponsesCompatibleRequestPayload } from "./runtime";
+import { rewritePayloadWithDeferredToolCarryover } from "./deferred-tool-carryover";
 import type { NativeCompactionEntry } from "./types";
 import {
 	compareResponsesInputParity,
@@ -503,6 +504,25 @@ function buildNativeReplaySegmentsInternal<TApi extends Api>(args: {
 		postCompactionTailMessages,
 		actualPostCompactionTail,
 	);
+	const baseRewrittenPayload: ResponsesCompatibleRequestPayload = {
+		...args.payload,
+		...(freshPreamble.instructions !== undefined ? { instructions: freshPreamble.instructions } : {}),
+		input: [
+			...freshPreamble.leadingInput,
+			...compactedWindow,
+			...actualPostCompactionTail,
+			...freshPreamble.trailingInput,
+		],
+	};
+	const carryoverRewrite = rewritePayloadWithDeferredToolCarryover({
+		payload: baseRewrittenPayload,
+		carryover: details.deferredToolCarryover,
+		compactionEntryId: args.compactionEntry.id,
+		checkpointEndIndex: freshPreamble.leadingInput.length + compactedWindow.length,
+		compat: args.model.compat as
+			| { supportsAdditionalTools?: boolean; supportsToolSearch?: boolean }
+			| undefined,
+	});
 
 	return {
 		ok: true,
@@ -517,23 +537,9 @@ function buildNativeReplaySegmentsInternal<TApi extends Api>(args: {
 			compactedWindow,
 			postCompactionTail,
 			originalPiReplayInput,
-			replayInput: [
-				...freshPreamble.leadingInput,
-				...compactedWindow,
-				...actualPostCompactionTail,
-				...freshPreamble.trailingInput,
-			],
+			replayInput: carryoverRewrite.payload.input,
 		},
-		rewrittenPayload: {
-			...args.payload,
-			...(freshPreamble.instructions !== undefined ? { instructions: freshPreamble.instructions } : {}),
-			input: [
-				...freshPreamble.leadingInput,
-				...compactedWindow,
-				...actualPostCompactionTail,
-				...freshPreamble.trailingInput,
-			],
-		},
+		rewrittenPayload: carryoverRewrite.payload,
 	};
 }
 

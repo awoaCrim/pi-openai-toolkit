@@ -8,6 +8,7 @@ import {
 	NATIVE_COMPACTION_FALLBACK_SUMMARY,
 	createNativeCompactionDetails,
 	type CompactionConfig,
+	type DeferredToolCarryoverV1,
 } from "./types";
 
 type AssistantPhase = "commentary" | "final_answer";
@@ -32,18 +33,27 @@ type TestModel = {
 	baseUrl: string;
 	input: string[];
 	reasoning: boolean;
+	compat?: { supportsAdditionalTools?: boolean; supportsToolSearch?: boolean };
 };
 
-type TestSessionEntry = {
-	type: "message" | "compaction";
-	id: string;
-	timestamp: string;
-	message?: Record<string, unknown>;
-	summary?: string;
-	firstKeptEntryId?: string;
-	tokensBefore?: number;
-	details?: ReturnType<typeof createNativeCompactionDetails>;
-};
+type TestSessionEntry =
+	| {
+		type: "message" | "compaction";
+		id: string;
+		timestamp: string;
+		message?: Record<string, unknown>;
+		summary?: string;
+		firstKeptEntryId?: string;
+		tokensBefore?: number;
+		details?: ReturnType<typeof createNativeCompactionDetails>;
+	}
+	| {
+		type: "custom";
+		id: string;
+		timestamp: string;
+		customType: string;
+		data?: unknown;
+	};
 
 type HookHandler = (event: unknown, ctx: unknown) => Promise<unknown>;
 
@@ -203,6 +213,7 @@ function createCompactionEntry(args: {
 	tokensBefore?: number;
 	model?: TestModel;
 	compactionModel?: TestModel;
+	deferredToolCarryover?: DeferredToolCarryoverV1;
 	compactedWindow: unknown[];
 	compactResponseId?: string;
 }): TestSessionEntry {
@@ -227,6 +238,7 @@ function createCompactionEntry(args: {
 					baseUrl: args.compactionModel.baseUrl,
 				}
 				: undefined,
+			deferredToolCarryover: args.deferredToolCarryover,
 			compactedWindow: args.compactedWindow,
 			compactResponseId: args.compactResponseId,
 			createdAt: nextTimestamp(),
@@ -501,6 +513,93 @@ test("manual /compact preserves tool/result ordering + assistant phases and pers
 	expect(result.compaction.firstKeptEntryId).toBe(user.id);
 	expect(result.compaction.tokensBefore).toBe(512);
 	expect((result.compaction.details as { compactedWindow: unknown[] }).compactedWindow).toEqual(compactedWindow);
+});
+
+test("cache-stack activation survives compaction and reanchors additional tools after the opaque checkpoint", async () => {
+	const model = {
+		...defaultModel,
+		compat: { supportsAdditionalTools: true },
+	};
+	const activationEntry: TestSessionEntry = {
+		type: "custom",
+		id: "activation-state",
+		timestamp: nextTimestamp(),
+		customType: "pi-cache-stack.activation-state.v1",
+		data: {
+			version: 1,
+			activatedTools: ["search_docs"],
+			catalogHash: "catalog-v1",
+		},
+	};
+	const user = createUserEntry("carryover_user", "Keep the activated search tool available after compact.");
+	const { sessionBeforeCompact, beforeProviderRequest, compactCalls } = await loadHookHarness();
+	const compactResult = (await sessionBeforeCompact(
+		{
+			reason: "manual",
+			signal: new AbortController().signal,
+			customInstructions: undefined,
+			branchEntries: [activationEntry, user],
+			preparation: {
+				tokensBefore: 512,
+				firstKeptEntryId: user.id,
+				previousSummary: undefined,
+				messagesToSummarize: [toReplayMessage(user)],
+				turnPrefixMessages: [],
+			},
+		},
+		createContext({
+			branchEntries: [activationEntry, user],
+			model,
+			sessionContextMessages: [toReplayMessage(user)],
+		}),
+	)) as { compaction: { summary: string; firstKeptEntryId: string; tokensBefore: number; details: ReturnType<typeof createNativeCompactionDetails> } };
+
+	expect(compactCalls).toHaveLength(1);
+	expect(compactResult.compaction.details.deferredToolCarryover).toEqual({
+		version: 1,
+		source: "pi-cache-stack.activation-state.v1",
+		toolNames: ["search_docs"],
+		catalogHash: "catalog-v1",
+	});
+
+	const compactionEntry: TestSessionEntry = {
+		type: "compaction",
+		id: "carryover_compaction",
+		timestamp: nextTimestamp(),
+		summary: compactResult.compaction.summary,
+		firstKeptEntryId: compactResult.compaction.firstKeptEntryId,
+		tokensBefore: compactResult.compaction.tokensBefore,
+		details: compactResult.compaction.details,
+	};
+	const currentUser = createUserEntry("carryover_tail", "Call search_docs directly; do not activate it again.");
+	const branchEntries = [activationEntry, user, compactionEntry, currentUser];
+	const replayPayload = {
+		...(await buildPiReplayPayload({
+			model,
+			branchEntries,
+			compactionEntry,
+			instructions: "Current instructions after carryover",
+			freshPreamble: "Fresh preamble after carryover",
+		})),
+		tools: [{ type: "function", name: "search_docs", parameters: { type: "object", properties: {} }, strict: false }],
+		prompt_cache_key: "carryover-cache-key",
+		unknown_field: { keep: true },
+	};
+	const rewritten = (await beforeProviderRequest(
+		{ payload: replayPayload },
+		createContext({ branchEntries, model, systemPrompt: replayPayload.instructions }),
+	)) as { input: unknown[]; tools: unknown[]; prompt_cache_key: string; unknown_field: unknown };
+
+	expect(rewritten.tools).toEqual([]);
+	expect(rewritten.input[0]).toEqual(replayPayload.input[0]);
+	expect(rewritten.input[1]).toEqual((compactResult.compaction.details.compactedWindow as unknown[])[0]);
+	expect(rewritten.input[2]).toEqual({
+		type: "additional_tools",
+		role: "developer",
+		tools: [replayPayload.tools[0]],
+	});
+	expect(rewritten.prompt_cache_key).toBe("carryover-cache-key");
+	expect(rewritten.unknown_field).toEqual({ keep: true });
 });
 
 test("first native compaction sends the full current session context, including Pi's kept recent window", async () => {

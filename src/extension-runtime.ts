@@ -15,6 +15,7 @@ import {
 } from "./payload-rewrite";
 import { getCompactionRequestExtras, rememberRequestContext } from "./request-context-cache";
 import { executeRemoteV2Compaction } from "./remote-v2-client";
+import { registerInlineCompactionRuntime } from "./inline-compaction";
 import {
 	resolveNativeCompactionEnvironment,
 	resolveRemoteCompactionExecution,
@@ -25,6 +26,7 @@ import {
 	createNativeCompactionDetails,
 	createNativeCompactionResult,
 	COMPACTION_EXTENSION_ID,
+	getLatestDeferredToolCarryover,
 	isNativeCompactionDetails,
 	type CompactionConfig,
 	type NativeCompactionDetails,
@@ -99,7 +101,8 @@ async function runResponsesNativeCompact(
 ): Promise<ResponsesCompactOutcome> {
 	const { consumer, compactor } = execution;
 	const instructions = buildCompactionInstructions(ctx.getSystemPrompt(), event.customInstructions);
-	const branchEntries = ctx.sessionManager.getBranch();
+	const branchEntries = event.branchEntries ?? ctx.sessionManager.getBranch();
+	const deferredToolCarryover = getLatestDeferredToolCarryover(branchEntries);
 	const latestNativeCompaction = resolveLatestNativeCompactionEntry(branchEntries, {
 		baseUrl: consumer.baseUrl,
 	});
@@ -217,6 +220,7 @@ async function runResponsesNativeCompact(
 				model: compactor.model,
 				baseUrl: compactor.baseUrl,
 			},
+			deferredToolCarryover,
 			compactedWindow: compactResult.compactedWindow,
 			compactResponseId: compactResult.compactResponseId,
 			createdAt: compactResult.createdAt,
@@ -537,6 +541,8 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 }
 
 export default function (pi: ExtensionAPI) {
+	const inlineCompaction = registerInlineCompactionRuntime(pi, loadToolkitConfig);
+
 	pi.on("session_start", (_event, ctx) => {
 		const { config: toolkitConfig, source, warnings } = loadToolkitConfig();
 		const config = toolkitConfig.compaction;
@@ -570,4 +576,6 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_before_compact", handleSessionBeforeCompact);
 	pi.on("before_provider_request", handleBeforeProviderRequest);
+	pi.on("turn_end", (event, ctx) => inlineCompaction.handlePublicTurnEnd(event, ctx));
+	pi.on("session_shutdown", (_event, ctx) => inlineCompaction.dispose(ctx));
 }

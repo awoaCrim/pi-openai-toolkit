@@ -1,34 +1,25 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import path from "node:path";
+import { join, resolve } from "node:path";
 
-const packageDir = path.resolve(import.meta.dir, "..");
+const packageDir = resolve(import.meta.dir, "..");
+const runnerPath = join(import.meta.dir, "pi-smoke-runner.ts");
 const targets = [
-	["compaction entry", path.join(packageDir, "extensions", "compaction.ts")],
-	["Web Search entry", path.join(packageDir, "extensions", "web-search.ts")],
-	["complete package", packageDir],
+	["compaction entry", "compaction"],
+	["inline compaction loop", "inline_compaction"],
+	["Web Search entry", "web_search"],
+	["complete package", "package"],
 ] as const;
 
 describe("pi smoke", () => {
 	for (const [name, target] of targets) {
 		test(
-			`loads the ${name}`,
+			`loads the ${name} with the local official Pi runtime`,
 			() => {
-				const result = spawnSync(
-					"pi",
-					[
-						"--no-session",
-						"--offline",
-						"--no-extensions",
-						"--no-skills",
-						"--no-prompt-templates",
-						"-e",
-						target,
-						"-p",
-						"Reply with the single word OK.",
-					],
-					{ encoding: "utf8" },
-				);
+				const result = spawnSync(process.execPath, [runnerPath, target], {
+					cwd: packageDir,
+					encoding: "utf8",
+				});
 
 				expect(result.status, result.stderr).toBe(0);
 				expect(result.stdout.trim()).toBe("OK");
