@@ -1,4 +1,7 @@
 import { afterEach, expect, mock, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import { join } from "node:path";
 import { clearRequestContextCache, getCompactionRequestExtras } from "./request-context-cache";
 import { transformWebSearchPayload } from "./web-search/payload";
 import { WEB_SEARCH_SOURCE_INCLUDE } from "./web-search/types";
@@ -74,6 +77,10 @@ const defaultModel: TestModel = {
 
 const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:\n\n<summary>\n`;
 const COMPACTION_SUMMARY_SUFFIX = `\n</summary>`;
+
+// Failure artifacts are written unconditionally, so point the mocked config at a
+// temporary root instead of the real HOME artifact directory.
+const testArtifactRoot = join(os.tmpdir(), "pi-openai-toolkit-validation-artifacts");
 
 let serializerImportCounter = 0;
 let timestampCounter = 0;
@@ -319,6 +326,7 @@ function createContext(args: {
 	sessionContextMessages?: Record<string, unknown>[];
 	registryModels?: TestModel[];
 	resolveAuth?: (model: TestModel) => Promise<Record<string, unknown>> | Record<string, unknown>;
+	onAbort?: () => void;
 } = {}) {
 	const branchEntries = args.branchEntries ?? [];
 	const model = args.model ?? defaultModel;
@@ -327,6 +335,7 @@ function createContext(args: {
 	return {
 		cwd: "/tmp/pi-openai-toolkit-validation",
 		hasUI: false,
+		abort: () => args.onAbort?.(),
 		getSystemPrompt: () => args.systemPrompt ?? "Current instructions v1",
 		model,
 		modelRegistry: {
@@ -357,9 +366,11 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 	beforeProviderRequest: HookHandler;
 	compactCalls: Array<Record<string, unknown>>;
 	fallbackCalls: Array<Record<string, unknown>>;
+	abortCalls: { count: number };
 }> {
 	const compactCalls: Array<Record<string, unknown>> = [];
 	const fallbackCalls: Array<Record<string, unknown>> = [];
+	const abortCalls = { count: 0 };
 
 	registerPiCodingAgentMock();
 
@@ -369,6 +380,7 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 				compaction: {
 					...DEFAULT_COMPACTION_CONFIG,
 					responsesApis: [...DEFAULT_COMPACTION_CONFIG.responsesApis],
+					artifactRoot: options.config?.artifactRoot ?? testArtifactRoot,
 					...(options.config ?? {}),
 				},
 				webSearch: {
@@ -427,6 +439,7 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 		beforeProviderRequest,
 		compactCalls,
 		fallbackCalls,
+		abortCalls,
 	};
 }
 
@@ -435,6 +448,7 @@ afterEach(() => {
 	timestampCounter = 0;
 	clearRequestContextCache();
 	mock.restore();
+	fs.rmSync(testArtifactRoot, { recursive: true, force: true });
 });
 
 test("manual /compact preserves tool/result ordering + assistant phases and persists the native window", async () => {
@@ -872,6 +886,141 @@ test("first post-compaction turn rewrites to fresh preamble + opaque compacted w
 		"Old assistant context that should disappear after native replay.",
 	);
 	expect(JSON.stringify(rewritten.input)).not.toContain("The conversation history before this point was compacted");
+});
+
+test("replay succeeds with extension-injected tail messages absent from session entries", async () => {
+	const { beforeProviderRequest, abortCalls } = await loadHookHarness();
+	const model = { ...defaultModel };
+	const keptUser = createUserEntry("kept_user_inj", "Kept user context that Pi should stop duplicating.");
+	const keptAssistant = createAssistantEntry(
+		"kept_assistant_inj",
+		[createTextBlock("Old assistant context that should disappear after native replay.", "commentary", "msg_kept_inj")],
+		model,
+	);
+	const compactedWindow = [{ type: "compaction", encrypted_content: "opaque-injected-tail" }];
+	const compactionEntry = createCompactionEntry({
+		id: "compaction_inj",
+		firstKeptEntryId: keptUser.id,
+		model,
+		compactedWindow,
+		compactResponseId: "resp_inj",
+	});
+	const currentUser = createUserEntry("post_compaction_inj", "Continue after the opaque replay.");
+	const branchEntries = [keptUser, keptAssistant, compactionEntry, currentUser];
+	const payload = await buildPiReplayPayload({
+		model,
+		branchEntries,
+		compactionEntry,
+		instructions: "Current instructions v-inj",
+		freshPreamble: "Fresh preamble v-inj",
+	});
+
+	// Simulate another extension injecting a transient context message that has no
+	// corresponding session entry. It lands between the live tail and the trailing
+	// developer prompt, exactly where the old whole-payload parity check failed.
+	const injected = { role: "user", content: [{ type: "input_text", text: "extension-injected transient guidance" }] };
+	const trailingPrompt = { role: "developer", content: [{ type: "input_text", text: "Trailing provider hint" }] };
+	payload.input.push(injected);
+	payload.input.push(trailingPrompt);
+
+	const rewritten = (await beforeProviderRequest(
+		{ payload },
+		createContext({ branchEntries, model, systemPrompt: payload.instructions }),
+	)) as { input: unknown[]; instructions: string };
+
+	const expectedTail = await serializeResponsesInput(model, [toReplayMessage(currentUser)]);
+	const expectedInput = [payload.input[0], ...compactedWindow, ...expectedTail, injected, trailingPrompt];
+
+	expect(abortCalls.count).toBe(0);
+	expect(rewritten.instructions).toBe("Current instructions v-inj");
+	expect(rewritten.input).toEqual(expectedInput);
+	expect(JSON.stringify(rewritten.input)).toContain("opaque-injected-tail");
+	expect(JSON.stringify(rewritten.input)).toContain("extension-injected transient guidance");
+	expect(JSON.stringify(rewritten.input)).toContain("Trailing provider hint");
+	expect(JSON.stringify(rewritten.input)).not.toContain("The conversation history before this point was compacted");
+	expect(JSON.stringify(rewritten.input)).not.toContain("Kept user context that Pi should stop duplicating.");
+});
+
+test("replay mismatch aborts instead of sending the sentinel payload", async () => {
+	const { beforeProviderRequest, abortCalls } = await loadHookHarness({ logProviderPayloads: false });
+	const model = { ...defaultModel };
+	const keptUser = createUserEntry("kept_user_mismatch", "Kept user context before native replay.");
+	const keptAssistant = createAssistantEntry(
+		"kept_assistant_mismatch",
+		[createTextBlock("Kept assistant context.", "commentary", "msg_kept_mismatch")],
+		model,
+	);
+	const compactedWindow = [{ type: "compaction", encrypted_content: "opaque-mismatch" }];
+	const compactionEntry = createCompactionEntry({
+		id: "compaction_mismatch",
+		firstKeptEntryId: keptUser.id,
+		model,
+		compactedWindow,
+	});
+	const currentUser = createUserEntry("post_compaction_mismatch", "Continue after compaction.");
+	const branchEntries = [keptUser, keptAssistant, compactionEntry, currentUser];
+	const payload = await buildPiReplayPayload({
+		model,
+		branchEntries,
+		compactionEntry,
+		instructions: "Current instructions v-mismatch",
+		freshPreamble: "Fresh preamble v-mismatch",
+	});
+
+	// Corrupt one item of the kept window so the region verification must fail.
+	payload.input[2] = { role: "user", content: [{ type: "input_text", text: "tampered kept window text" }] };
+
+	const result = await beforeProviderRequest(
+		{ payload },
+		createContext({ branchEntries, model, systemPrompt: payload.instructions, onAbort: () => abortCalls.count++ }),
+	);
+
+	expect(result).toBeUndefined();
+	expect(abortCalls.count).toBe(1);
+
+	// The forced failure artifact is written even with logProviderPayloads=false
+	// and contains only structural signatures, never payload content.
+	const artifactDir = join(testArtifactRoot, "sessions", "session-validation", "provider-requests");
+	const artifactFile = fs.readdirSync(artifactDir).find((name) => name.endsWith("-replay-failure.json"));
+	expect(artifactFile).toBeDefined();
+	const artifact = JSON.parse(fs.readFileSync(join(artifactDir, artifactFile!), "utf8"));
+	expect(artifact.data.event).toBe("before_provider_request.rewrite-failed");
+	expect(artifact.data.reason).toBe("expected-pi-replay-mismatch");
+	expect(JSON.stringify(artifact)).not.toContain("tampered kept window text");
+	expect(JSON.stringify(artifact)).not.toContain("opaque-mismatch");
+});
+
+test("missing compaction summary sentinel aborts instead of sending the payload", async () => {
+	const { beforeProviderRequest, abortCalls } = await loadHookHarness();
+	const model = { ...defaultModel };
+	const keptUser = createUserEntry("kept_user_no_sentinel", "Kept user context.");
+	const compactedWindow = [{ type: "compaction", encrypted_content: "opaque-no-sentinel" }];
+	const compactionEntry = createCompactionEntry({
+		id: "compaction_no_sentinel",
+		firstKeptEntryId: keptUser.id,
+		model,
+		compactedWindow,
+	});
+	const currentUser = createUserEntry("post_compaction_no_sentinel", "Continue after compaction.");
+	const branchEntries = [keptUser, compactionEntry, currentUser];
+	const payload = await buildPiReplayPayload({
+		model,
+		branchEntries,
+		compactionEntry,
+		instructions: "Current instructions v-no-sentinel",
+		freshPreamble: "Fresh preamble v-no-sentinel",
+	});
+
+	// Remove the compaction summary item entirely; nothing may be replaced.
+	payload.input.splice(1, 1);
+
+	const result = await beforeProviderRequest(
+		{ payload },
+		createContext({ branchEntries, model, systemPrompt: payload.instructions, onAbort: () => abortCalls.count++ }),
+	);
+
+	expect(result).toBeUndefined();
+	expect(abortCalls.count).toBe(1);
 });
 
 test("trailing provider-authored developer prompts survive native replay in place", async () => {

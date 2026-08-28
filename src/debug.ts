@@ -177,3 +177,61 @@ export function writeDebugArtifact(
 	fs.writeFileSync(filePath, `${JSON.stringify(envelope, null, 2)}\n`, "utf8");
 	return filePath;
 }
+
+/**
+ * Always-written, content-free failure record for an opaque replay failure.
+ *
+ * Unlike regular payload artifacts this is not gated by logProviderPayloads:
+ * a replay failure is a continuity-loss incident, not optional payload logging.
+ * It contains only structural parity signatures and identity metadata; prompt
+ * text, user content, credentials, and encrypted_content are never included
+ * (critical redaction is applied unconditionally).
+ */
+export function writeReplayFailureArtifact(
+	details: {
+		reason: string;
+		parity?: { actual: string[]; expected: string[]; mismatches: string[] };
+		compactionEntryId?: string;
+		provider?: string;
+		api?: string;
+		model?: string;
+	},
+	settings: CompactionConfig,
+	context: ArtifactContext,
+): string | undefined {
+	try {
+		const sessionInfo = toSessionInfo(context);
+		const paths = resolveArtifactPaths(settings, context);
+		const targetDir = selectArtifactDirectory(paths, "provider-request");
+		ensureDir(targetDir);
+
+		const timestamp = new Date().toISOString();
+		const filePath = path.join(targetDir, `${timestamp.replace(/[.:]/g, "-")}-replay-failure.json`);
+		const data = redactCriticalValue({
+			event: "before_provider_request.rewrite-failed",
+			reason: details.reason,
+			parity: details.parity,
+			compactionEntryId: details.compactionEntryId,
+			provider: details.provider,
+			api: details.api,
+			model: details.model,
+		});
+		const envelope: DebugArtifactEnvelope = {
+			extension: COMPACTION_EXTENSION_ID,
+			kind: "provider-request",
+			timestamp,
+			cwd: sessionInfo.cwd,
+			sessionId: sessionInfo.sessionId,
+			sessionFile: sessionInfo.sessionFile,
+			sessionDir: sessionInfo.sessionDir,
+			redaction: { enabled: true },
+			data,
+		};
+		fs.writeFileSync(filePath, `${JSON.stringify(envelope, null, 2)}\n`, "utf8");
+		return filePath;
+	} catch {
+		// The replay failure path itself must never be masked by an artifact write
+		// error; the caller still aborts the provider request.
+		return undefined;
+	}
+}

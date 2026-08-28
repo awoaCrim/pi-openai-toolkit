@@ -6,7 +6,7 @@ import type {
 	SessionBeforeCompactEvent,
 } from "@earendil-works/pi-coding-agent";
 import { loadToolkitConfig } from "./config";
-import { writeDebugArtifact } from "./debug";
+import { writeDebugArtifact, writeReplayFailureArtifact } from "./debug";
 import { resolveLatestNativeCompactionEntry } from "./details-store";
 import { runNativeFallbackCompaction } from "./native-fallback";
 import {
@@ -508,6 +508,30 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 			config,
 			ctx,
 		);
+
+		// Fail loud instead of letting Pi send the sentinel-only payload: the
+		// compacted history would be silently lost while the request still succeeds.
+		// A forced redacted failure record is written even when logProviderPayloads
+		// is disabled so the incident is diagnosable without leaking content.
+		writeReplayFailureArtifact(
+			{
+				reason: rewrite.reason,
+				parity: rewrite.parity,
+				compactionEntryId: latestNativeCompactionEntry.id,
+				provider: runtime.provider,
+				api: runtime.api,
+				model: runtime.model,
+			},
+			config,
+			ctx,
+		);
+		if (ctx.hasUI) {
+			ctx.ui.notify(
+				`${COMPACTION_EXTENSION_ID}: native compaction replay failed (${rewrite.reason}); provider request aborted`,
+				"error",
+			);
+		}
+		ctx.abort();
 		return undefined;
 	}
 
