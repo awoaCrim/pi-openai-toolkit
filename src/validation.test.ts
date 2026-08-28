@@ -287,20 +287,12 @@ async function buildPiReplayPayload(args: {
 		throw new Error(`Missing compaction entry ${args.compactionEntry.id}`);
 	}
 
-	const firstKeptEntryIndex = args.branchEntries.findIndex(
-		(entry, index) => index < boundaryIndex && entry.id === args.compactionEntry.firstKeptEntryId,
-	);
-	if (firstKeptEntryIndex < 0) {
-		throw new Error(`Missing first-kept entry ${args.compactionEntry.firstKeptEntryId}`);
-	}
-
-	const preCompactionEntries = args.branchEntries.slice(firstKeptEntryIndex, boundaryIndex);
 	const postCompactionEntries = args.branchEntries.slice(boundaryIndex + 1);
-	const piReplayMessages = [
-		createCompactionSummaryMessage(args.compactionEntry),
-		...preCompactionEntries.map(toReplayMessage),
-		...postCompactionEntries.map(toReplayMessage),
-	];
+	// Pi 0.84.3 renders the post-compaction context as [leading][summary item]
+	// [all post-compaction messages]: pre-compaction messages never appear in the
+	// payload (appendCompaction never persists entry.retainedTail), and trailing
+	// provider prompts are ordinary input items after the live tail.
+	const piReplayMessages = [createCompactionSummaryMessage(args.compactionEntry), ...postCompactionEntries.map(toReplayMessage)];
 
 	return {
 		model: model.id,
@@ -941,53 +933,41 @@ test("replay succeeds with extension-injected tail messages absent from session 
 	expect(JSON.stringify(rewritten.input)).not.toContain("Kept user context that Pi should stop duplicating.");
 });
 
-test("replay mismatch aborts instead of sending the sentinel payload", async () => {
-	const { beforeProviderRequest, abortCalls } = await loadHookHarness({ logProviderPayloads: false });
+test("replay tolerates post-sentinel content unrelated to session entries (Pi never re-renders the pre-compaction window)", async () => {
+	const { beforeProviderRequest } = await loadHookHarness();
 	const model = { ...defaultModel };
-	const keptUser = createUserEntry("kept_user_mismatch", "Kept user context before native replay.");
-	const keptAssistant = createAssistantEntry(
-		"kept_assistant_mismatch",
-		[createTextBlock("Kept assistant context.", "commentary", "msg_kept_mismatch")],
-		model,
-	);
-	const compactedWindow = [{ type: "compaction", encrypted_content: "opaque-mismatch" }];
+	const keptUser = createUserEntry("kept_user_pass", "Kept user context that Pi never re-renders after compaction.");
+	const compactedWindow = [{ type: "compaction", encrypted_content: "opaque-pass-through" }];
 	const compactionEntry = createCompactionEntry({
-		id: "compaction_mismatch",
+		id: "compaction_pass",
 		firstKeptEntryId: keptUser.id,
 		model,
 		compactedWindow,
 	});
-	const currentUser = createUserEntry("post_compaction_mismatch", "Continue after compaction.");
-	const branchEntries = [keptUser, keptAssistant, compactionEntry, currentUser];
+	const currentUser = createUserEntry("post_compaction_pass", "Continue after compaction.");
+	const branchEntries = [keptUser, compactionEntry, currentUser];
 	const payload = await buildPiReplayPayload({
 		model,
 		branchEntries,
 		compactionEntry,
-		instructions: "Current instructions v-mismatch",
-		freshPreamble: "Fresh preamble v-mismatch",
+		instructions: "Current instructions v-pass",
+		freshPreamble: "Fresh preamble v-pass",
 	});
 
-	// Corrupt one item of the kept window so the region verification must fail.
-	payload.input[2] = { role: "user", content: [{ type: "input_text", text: "tampered kept window text" }] };
-
-	const result = await beforeProviderRequest(
+	// Anything after the sentinel is preserved verbatim, no matter how it differs
+	// from session entries: Pi 0.84.3 never re-renders the pre-compaction window.
+	payload.input.push({ role: "user", content: [{ type: "input_text", text: "injected guidance with no session entry" }] });
+	const rewritten = (await beforeProviderRequest(
 		{ payload },
-		createContext({ branchEntries, model, systemPrompt: payload.instructions, onAbort: () => abortCalls.count++ }),
-	);
+		createContext({ branchEntries, model, systemPrompt: payload.instructions }),
+	)) as { input: unknown[]; instructions: string };
 
-	expect(result).toBeUndefined();
-	expect(abortCalls.count).toBe(1);
-
-	// The forced failure artifact is written even with logProviderPayloads=false
-	// and contains only structural signatures, never payload content.
-	const artifactDir = join(testArtifactRoot, "sessions", "session-validation", "provider-requests");
-	const artifactFile = fs.readdirSync(artifactDir).find((name) => name.endsWith("-replay-failure.json"));
-	expect(artifactFile).toBeDefined();
-	const artifact = JSON.parse(fs.readFileSync(join(artifactDir, artifactFile!), "utf8"));
-	expect(artifact.data.event).toBe("before_provider_request.rewrite-failed");
-	expect(artifact.data.reason).toBe("expected-pi-replay-mismatch");
-	expect(JSON.stringify(artifact)).not.toContain("tampered kept window text");
-	expect(JSON.stringify(artifact)).not.toContain("opaque-mismatch");
+	expect(rewritten.input[0]).toEqual(payload.input[0]);
+	expect(rewritten.input[1]).toEqual(compactedWindow[0]);
+	expect(JSON.stringify(rewritten.input)).toContain("Continue after compaction.");
+	expect(JSON.stringify(rewritten.input)).toContain("injected guidance with no session entry");
+	expect(JSON.stringify(rewritten.input)).not.toContain("Kept user context that Pi never re-renders");
+	expect(JSON.stringify(rewritten.input)).not.toContain("The conversation history before this point was compacted");
 });
 
 test("missing compaction summary sentinel aborts instead of sending the payload", async () => {

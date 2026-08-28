@@ -9,31 +9,16 @@ import type {
 import type { ResponsesCompatibleRequestPayload } from "./runtime";
 import { rewritePayloadWithDeferredToolCarryover } from "./deferred-tool-carryover";
 import type { NativeCompactionEntry } from "./types";
-import {
-	compareResponsesInputParity,
-	serializeMessagesToResponsesInput,
-	type ResponsesInputContentItem,
-	type ResponsesInputItem,
-	type ResponsesInputMessageItem,
-} from "./serializer";
-
-export type SerializedReplaySlice = {
-	entries: SessionEntry[];
-	messages: AgentMessage[];
-	input: ResponsesInputItem[];
-};
+import { serializeMessagesToResponsesInput, type ResponsesInputContentItem, type ResponsesInputItem, type ResponsesInputMessageItem } from "./serializer";
 
 export type NativeReplaySegments = {
 	boundaryIndex: number;
 	firstKeptEntryIndex: number;
 	instructions?: string;
-	freshPreamble: ResponsesInputMessageItem[];
-	trailingPreamble: ResponsesInputMessageItem[];
+	leading: ResponsesInputItem[];
 	compactionSummary: ResponsesInputItem[];
-	preCompactionKeptWindow: SerializedReplaySlice;
 	compactedWindow: unknown[];
-	postCompactionTail: SerializedReplaySlice;
-	originalPiReplayInput: ResponsesInputItem[];
+	post: ResponsesInputItem[];
 	replayInput: unknown[];
 };
 
@@ -48,7 +33,6 @@ export type NativeReplayPayloadRewriteFailureReason =
 	| "first-kept-entry-not-found"
 	| "invalid-compacted-window"
 	| "unexpected-compaction-after-boundary"
-	| "expected-pi-replay-mismatch"
 	| "compaction-summary-not-found";
 
 export type NativeReplayPayloadRewriteFailure = {
@@ -87,19 +71,6 @@ function isResponsesInputContentItem(value: unknown): value is ResponsesInputCon
 
 function isResponsesInputMessageRole(value: unknown): value is ResponsesInputMessageItem["role"] {
 	return value === "user" || value === "developer" || value === "system";
-}
-
-function isPreambleRole(value: ResponsesInputMessageItem["role"]): value is "developer" | "system" {
-	return value === "developer" || value === "system";
-}
-
-function isResponsesInputMessageItem(value: unknown): value is ResponsesInputMessageItem {
-	if (!isRecord(value) || !isResponsesInputMessageRole(value.role)) {
-		return false;
-	}
-
-	const { content } = value;
-	return typeof content === "string" || (Array.isArray(content) && content.every(isResponsesInputContentItem));
 }
 
 function cloneResponsesInputContentItem(item: ResponsesInputContentItem): ResponsesInputContentItem {
@@ -294,20 +265,6 @@ function findCompactionSummaryIndex(input: readonly unknown[], summaryMarker: st
 	});
 }
 
-/** Count consecutive provider-authored developer/system items at the end of the input. */
-function countTrailingPreambleItems(items: readonly unknown[]): number {
-	let count = 0;
-	for (let index = items.length - 1; index >= 0; index--) {
-		const item = items[index];
-		if (isResponsesInputMessageItem(item) && isPreambleRole(item.role)) {
-			count += 1;
-			continue;
-		}
-		break;
-	}
-	return count;
-}
-
 function collectReplayMessages(entries: readonly SessionEntry[]): AgentMessage[] {
 	const messages: AgentMessage[] = [];
 
@@ -319,27 +276,6 @@ function collectReplayMessages(entries: readonly SessionEntry[]): AgentMessage[]
 	}
 
 	return messages;
-}
-
-function createCompactionSummaryAgentMessage(entry: NativeCompactionEntry): AgentMessage {
-	return {
-		role: "compactionSummary",
-		summary: entry.summary,
-		tokensBefore: entry.tokensBefore,
-		timestamp: new Date(entry.timestamp).getTime(),
-	} as AgentMessage;
-}
-
-function createReplaySlice(
-	entries: readonly SessionEntry[],
-	messages: readonly AgentMessage[],
-	input: readonly ResponsesInputItem[],
-): SerializedReplaySlice {
-	return {
-		entries: [...entries],
-		messages: [...messages],
-		input: [...input],
-	};
 }
 
 function findEntryIndexByIdBeforeBoundary(
@@ -436,14 +372,13 @@ function buildNativeReplaySegmentsInternal<TApi extends Api>(args: {
 
 	const preCompactionEntries = args.branchEntries.slice(firstKeptEntryIndex, boundaryIndex);
 	const postCompactionEntries = args.branchEntries.slice(boundaryIndex + 1);
-	const preCompactionKeptMessages = collectReplayMessages(preCompactionEntries);
-	const postCompactionTailMessages = collectReplayMessages(postCompactionEntries);
-	const compactionSummaryMessage = createCompactionSummaryAgentMessage(args.compactionEntry);
-	const keptWindowSerialized = serializeMessagesToResponsesInput(args.model, preCompactionKeptMessages);
 
-	// Pi-authored compaction summary item. Everything outside the replaced region
-	// is preserved verbatim, so this content anchor is the only location probe
-	// needed; the marker text is unique to this compaction entry.
+	// Pi-authored compaction summary item. Pi 0.84.3 renders the context after a
+	// compaction as [leading prompts][summary item][all post-compaction messages]:
+	// pre-compaction messages never appear in the payload (entry.retainedTail is
+	// never persisted by appendCompaction), so the summary item itself is the only
+	// anchor and the only thing that gets replaced. Everything else is preserved
+	// verbatim, so transient messages injected by other extensions stay intact.
 	const summaryIndex = findCompactionSummaryIndex(args.payload.input, args.compactionEntry.summary);
 	if (summaryIndex < 0) {
 		return {
@@ -452,66 +387,19 @@ function buildNativeReplaySegmentsInternal<TApi extends Api>(args: {
 		};
 	}
 
-	const keptStart = summaryIndex + 1;
-	const keptEnd = keptStart + keptWindowSerialized.length;
-	const actualKeptWindow = cloneResponsesInputSlice(args.payload.input.slice(keptStart, keptEnd));
-	if (!actualKeptWindow) {
-		return {
-			ok: false,
-			reason: "expected-pi-replay-mismatch",
-		};
-	}
-
-	// The only hard verification: the region immediately after the sentinel must be
-	// exactly the kept pre-compaction window derived from session entries. Content
-	// after this region is preserved as-is, so transient messages injected by other
-	// extensions (which have no session entries) no longer break replay.
-	if (!areEquivalentValues(actualKeptWindow, keptWindowSerialized)) {
-		const parity = compareResponsesInputParity(
-			args.payload.input.slice(keptStart, keptEnd),
-			keptWindowSerialized,
-		);
-		return {
-			ok: false,
-			reason: "expected-pi-replay-mismatch",
-			parity: {
-				actual: parity.actual,
-				expected: parity.expected,
-				mismatches: parity.mismatches,
-			},
-		};
-	}
-
-	const actualCompactionSummary = cloneResponsesInputSlice([args.payload.input[summaryIndex]]);
-	const actualPostCompactionTail = cloneResponsesInputSlice(args.payload.input.slice(keptEnd));
-	if (!actualCompactionSummary || !actualPostCompactionTail) {
-		return {
-			ok: false,
-			reason: "expected-pi-replay-mismatch",
-		};
-	}
-
-	// Keep provider-authored trailing developer/system prompts in place.
-	const trailingCount = countTrailingPreambleItems(actualPostCompactionTail);
-	const trailingPreamble = actualPostCompactionTail.slice(actualPostCompactionTail.length - trailingCount);
-	const liveTail = actualPostCompactionTail.slice(0, actualPostCompactionTail.length - trailingCount);
-
 	const leadingInput = cloneResponsesInputSlice(args.payload.input.slice(0, summaryIndex));
-	if (!leadingInput) {
+	const actualCompactionSummary = cloneResponsesInputSlice([args.payload.input[summaryIndex]]);
+	const actualPostInput = cloneResponsesInputSlice(args.payload.input.slice(summaryIndex + 1));
+	if (!leadingInput || !actualCompactionSummary || !actualPostInput) {
 		return {
 			ok: false,
-			reason: "expected-pi-replay-mismatch",
+			reason: "compaction-summary-not-found",
 		};
 	}
 
 	const baseRewrittenPayload: ResponsesCompatibleRequestPayload = {
 		...args.payload,
-		input: [
-			...leadingInput,
-			...compactedWindow,
-			...liveTail,
-			...trailingPreamble,
-		],
+		input: [...leadingInput, ...compactedWindow, ...actualPostInput],
 	};
 	const carryoverRewrite = rewritePayloadWithDeferredToolCarryover({
 		payload: baseRewrittenPayload,
@@ -523,33 +411,16 @@ function buildNativeReplaySegmentsInternal<TApi extends Api>(args: {
 			| undefined,
 	});
 
-	const sentinelSerialized = serializeMessagesToResponsesInput(args.model, [compactionSummaryMessage]);
-	const serializedTailInput = serializeMessagesToResponsesInput(args.model, postCompactionTailMessages);
-	const originalPiReplayInput: ResponsesInputItem[] = [
-		...leadingInput,
-		...sentinelSerialized,
-		...keptWindowSerialized,
-		...serializedTailInput,
-		...trailingPreamble,
-	];
-
 	return {
 		ok: true,
 		segments: {
 			boundaryIndex,
 			firstKeptEntryIndex,
 			instructions: typeof args.payload.instructions === "string" ? args.payload.instructions : undefined,
-			freshPreamble: leadingInput as ResponsesInputMessageItem[],
-			trailingPreamble: trailingPreamble as ResponsesInputMessageItem[],
+			leading: leadingInput,
 			compactionSummary: actualCompactionSummary,
-			preCompactionKeptWindow: createReplaySlice(
-				preCompactionEntries,
-				preCompactionKeptMessages,
-				actualKeptWindow,
-			),
 			compactedWindow,
-			postCompactionTail: createReplaySlice(postCompactionEntries, postCompactionTailMessages, liveTail),
-			originalPiReplayInput,
+			post: actualPostInput,
 			replayInput: carryoverRewrite.payload.input,
 		},
 		rewrittenPayload: carryoverRewrite.payload,
