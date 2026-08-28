@@ -7,8 +7,9 @@ const CODEX_RESPONSES_PATH = "codex/responses";
 const OPENAI_COMPACT_PATH = "responses/compact";
 const CODEX_COMPACT_PATH = "codex/responses/compact";
 
-type ResponsesCompactApi = (typeof RESPONSES_COMPACT_CAPABLE_APIS)[number];
+export type ResponsesApi = (typeof RESPONSES_COMPACT_CAPABLE_APIS)[number];
 
+type ResponsesCompactApi = ResponsesApi;
 type RuntimeModel = Model<Api>;
 
 export type ParsedModelSpec = {
@@ -35,6 +36,8 @@ export type NativeCompactionSupportOptions = {
 	responsesApis?: readonly string[];
 };
 
+export type ResponsesSupportOptions = NativeCompactionSupportOptions;
+
 export type ResponsesCompatibleRequestPayload = {
 	model: string;
 	input: unknown[];
@@ -42,19 +45,22 @@ export type ResponsesCompatibleRequestPayload = {
 	[key: string]: unknown;
 };
 
-export type NativeCompactionRuntime = {
+export type ResponsesRuntime = {
 	provider: string;
-	api: ResponsesCompactApi;
+	api: ResponsesApi;
 	model: string;
 	baseUrl: string;
 	apiKey: string;
 	headers?: ProviderHeaders;
 	responsesPath: string;
 	responsesUrl: string;
+	currentModel: RuntimeModel;
+};
+
+export type NativeCompactionRuntime = ResponsesRuntime & {
 	compactPath: string;
 	compactUrl: string;
 	payload?: ResponsesCompatibleRequestPayload;
-	currentModel: RuntimeModel;
 };
 
 export type NativeCompactionEnvironmentFailure = {
@@ -76,6 +82,15 @@ export type NativeCompactionEnvironmentSuccess = {
 export type NativeCompactionEnvironmentResolution =
 	| NativeCompactionEnvironmentFailure
 	| NativeCompactionEnvironmentSuccess;
+
+export type ResponsesEnvironmentSuccess = {
+	ok: true;
+	runtime: ResponsesRuntime;
+};
+
+export type ResponsesEnvironmentResolution =
+	| NativeCompactionEnvironmentFailure
+	| ResponsesEnvironmentSuccess;
 
 export type RemoteCompactionExecution = {
 	/** Active session model. Its identity owns replay matching and is never mutated. */
@@ -323,6 +338,30 @@ async function resolveNativeCompactionEnvironmentForModel(
 			compactUrl: buildCompactUrl(baseUrl, descriptor.api),
 			payload: requestPayload,
 			currentModel,
+		},
+	};
+}
+
+export async function resolveResponsesEnvironment(
+	ctx: ExtensionContext,
+	options: ResponsesSupportOptions = {},
+): Promise<ResponsesEnvironmentResolution> {
+	const resolution = await resolveNativeCompactionEnvironmentForModel(ctx, ctx.model, options);
+	if (!resolution.ok) return resolution;
+
+	const runtime = resolution.runtime;
+	return {
+		ok: true,
+		runtime: {
+			provider: runtime.provider,
+			api: runtime.api,
+			model: runtime.model,
+			baseUrl: runtime.baseUrl,
+			apiKey: runtime.apiKey,
+			headers: runtime.headers,
+			responsesPath: runtime.responsesPath,
+			responsesUrl: runtime.responsesUrl,
+			currentModel: runtime.currentModel,
 		},
 	};
 }

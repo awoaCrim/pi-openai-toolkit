@@ -1,3 +1,4 @@
+import { getExactModelKey, isExactModelAllowed } from "../model-scope";
 import type { WebSearchConfig } from "../types";
 
 export const WEB_SEARCH_CAPABLE_APIS = ["openai-responses", "openai-codex-responses"] as const;
@@ -28,20 +29,17 @@ export type WebSearchPayloadTransform = {
 };
 
 export function getWebSearchModelKey(model: WebSearchModel | undefined): string | undefined {
-	if (!model?.provider || !model.id) return undefined;
-	return `${model.provider}/${model.id}`;
+	return getExactModelKey(model);
 }
 
 export function isWebSearchEnabledForModel(
 	model: WebSearchModel | undefined,
 	config: WebSearchConfig,
 ): boolean {
-	const modelKey = getWebSearchModelKey(model);
 	return (
 		config.enabled &&
 		typeof model?.api === "string" &&
 		(WEB_SEARCH_CAPABLE_APIS as readonly string[]).includes(model.api) &&
-		modelKey !== undefined &&
-		config.models.includes(modelKey)
+		isExactModelAllowed(model, config.models)
 	);
 }

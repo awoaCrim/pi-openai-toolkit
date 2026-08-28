@@ -28,6 +28,7 @@ const targetByName: Record<string, string> = {
 	compaction: join(packageDir, "extensions/compaction.ts"),
 	inline_compaction: join(packageDir, "extensions/compaction.ts"),
 	web_search: join(packageDir, "extensions/web-search.ts"),
+	image_generation: join(packageDir, "extensions/image-generation.ts"),
 	package: packageDir,
 };
 const targetName = process.argv[2];

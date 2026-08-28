@@ -4,6 +4,7 @@ import type { CompactionEntry, CompactionResult, ExtensionContext, SessionEntry 
 export const TOOLKIT_ID = "pi-openai-toolkit";
 export const COMPACTION_EXTENSION_ID = `${TOOLKIT_ID}:compaction`;
 export const WEB_SEARCH_EXTENSION_ID = `${TOOLKIT_ID}:web-search`;
+export const IMAGE_GENERATION_EXTENSION_ID = `${TOOLKIT_ID}:image-generation`;
 export const DEFAULT_ARTIFACT_ROOT = "~/.pi/agent/artifacts/pi-openai-toolkit/compaction";
 export const REDACTED_VALUE = "[REDACTED]";
 /**
@@ -82,9 +83,16 @@ export type WebSearchConfig = {
 	models: string[];
 };
 
+export type ImageGenerationConfig = {
+	enabled: boolean;
+	/** Exact provider/model keys allowed to use toolkit-native image generation. */
+	models: string[];
+};
+
 export type ToolkitConfig = {
 	compaction: CompactionConfig;
 	webSearch: WebSearchConfig;
+	imageGeneration: ImageGenerationConfig;
 };
 
 export type LoadedToolkitConfig = {
@@ -438,7 +446,13 @@ export const DEFAULT_WEB_SEARCH_CONFIG: WebSearchConfig = {
 	models: [],
 };
 
+export const DEFAULT_IMAGE_GENERATION_CONFIG: ImageGenerationConfig = {
+	enabled: true,
+	models: [],
+};
+
 export const DEFAULT_TOOLKIT_CONFIG: ToolkitConfig = {
 	compaction: DEFAULT_COMPACTION_CONFIG,
 	webSearch: DEFAULT_WEB_SEARCH_CONFIG,
+	imageGeneration: DEFAULT_IMAGE_GENERATION_CONFIG,
 };

@@ -1,5 +1,5 @@
 import { writeDebugArtifact } from "./debug";
-import { mergeProviderHeaders } from "./provider-headers";
+import { buildResponsesRequestHeaders } from "./responses-headers";
 import type { NativeCompactionRuntime } from "./runtime";
 import type { NativeCompactionRequestBody } from "./serializer";
 import type { ArtifactContext, CompactionConfig } from "./types";
@@ -112,57 +112,10 @@ export function extractCompactedSummaryText(output: readonly unknown[]): string 
 	return joined.length > 0 ? joined : undefined;
 }
 
-function decodeJwtPayload(token: string): Record<string, unknown> | undefined {
-	const parts = token.split(".");
-	if (parts.length !== 3) {
-		return undefined;
-	}
-
-	try {
-		const payloadText = Buffer.from(parts[1]!, "base64url").toString("utf8");
-		const payload = JSON.parse(payloadText);
-		return isRecord(payload) ? payload : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-function extractCodexAccountId(token: string): string | undefined {
-	const payload = decodeJwtPayload(token);
-	const authClaims = payload?.["https://api.openai.com/auth"];
-	if (!isRecord(authClaims)) {
-		return undefined;
-	}
-
-	const accountId = authClaims.chatgpt_account_id;
-	return typeof accountId === "string" && accountId.trim().length > 0 ? accountId.trim() : undefined;
-}
-
-function buildCodexUserAgent(): string {
-	const platform = typeof process !== "undefined" ? process.platform : "browser";
-	const arch = typeof process !== "undefined" ? process.arch : "unknown";
-	return `pi (${platform}; ${arch})`;
-}
-
 function toHeaders(runtime: NativeCompactionRuntime): Record<string, string> {
-	const headers = new Headers(mergeProviderHeaders(runtime.currentModel.headers, runtime.headers));
-	headers.set("accept", JSON_CONTENT_TYPE);
-	headers.set("content-type", JSON_CONTENT_TYPE);
-	if (!headers.has("authorization")) {
-		headers.set("authorization", `Bearer ${runtime.apiKey}`);
-	}
-
-	if (runtime.api === "openai-codex-responses") {
-		const accountId = extractCodexAccountId(runtime.apiKey);
-		if (accountId) {
-			headers.set("chatgpt-account-id", accountId);
-		}
-		headers.set("originator", "pi");
-		headers.set("user-agent", buildCodexUserAgent());
-		headers.set("openai-beta", "responses=experimental");
-	}
-
-	return Object.fromEntries(headers.entries());
+	return Object.fromEntries(
+		buildResponsesRequestHeaders(runtime, { accept: JSON_CONTENT_TYPE }).entries(),
+	);
 }
 
 function writeCompactArtifact(

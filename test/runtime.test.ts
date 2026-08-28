@@ -2,9 +2,49 @@ import { describe, expect, test } from "bun:test";
 import {
 	resolveNativeCompactionEnvironment,
 	resolveRemoteCompactionExecution,
+	resolveResponsesEnvironment,
 } from "../src/runtime";
 
 describe("resolveNativeCompactionEnvironment", () => {
+	test("exposes the shared Responses runtime without compaction-only fields", async () => {
+		const resolution = await resolveResponsesEnvironment({
+			model: {
+				provider: "newapi",
+				api: "openai-responses",
+				id: "gpt-5.5",
+				baseUrl: "https://gateway.example/v1/",
+			},
+			modelRegistry: {
+				async getApiKeyAndHeaders() {
+					return {
+						ok: true,
+						apiKey: "sk-image",
+						baseUrl: "https://effective.example/v1/",
+						headers: { "x-provider": "preserved" },
+					};
+				},
+			},
+		} as any);
+
+		expect(resolution).toEqual({
+			ok: true,
+			runtime: expect.objectContaining({
+				provider: "newapi",
+				api: "openai-responses",
+				model: "gpt-5.5",
+				baseUrl: "https://effective.example/v1",
+				apiKey: "sk-image",
+				headers: { "x-provider": "preserved" },
+				responsesPath: "responses",
+				responsesUrl: "https://effective.example/v1/responses",
+			}),
+		});
+		if (resolution.ok) {
+			expect(resolution.runtime).not.toHaveProperty("compactUrl");
+			expect(resolution.runtime).not.toHaveProperty("payload");
+		}
+	});
+
 	test("uses getApiKeyAndHeaders to resolve request auth", async () => {
 		const resolution = await resolveNativeCompactionEnvironment({
 			model: {

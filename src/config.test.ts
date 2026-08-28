@@ -3,7 +3,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { CONFIG_PATH, loadToolkitConfig } from "./config";
-import { DEFAULT_COMPACTION_CONFIG, DEFAULT_WEB_SEARCH_CONFIG } from "./types";
+import {
+	DEFAULT_COMPACTION_CONFIG,
+	DEFAULT_IMAGE_GENERATION_CONFIG,
+	DEFAULT_WEB_SEARCH_CONFIG,
+} from "./types";
 
 let tempDirs: string[] = [];
 
@@ -53,6 +57,10 @@ describe("loadToolkitConfig", () => {
 			...DEFAULT_WEB_SEARCH_CONFIG,
 			models: [...DEFAULT_WEB_SEARCH_CONFIG.models],
 		});
+		expect(loaded.config.imageGeneration).toEqual({
+			...DEFAULT_IMAGE_GENERATION_CONFIG,
+			models: [...DEFAULT_IMAGE_GENERATION_CONFIG.models],
+		});
 	});
 
 	test("nested feature sections override defaults", () => {
@@ -79,6 +87,10 @@ describe("loadToolkitConfig", () => {
 					enabled: false,
 					models: [" provider/model ", "provider/model", ""],
 				},
+				imageGeneration: {
+					enabled: false,
+					models: [" provider/image-model ", "provider/image-model", ""],
+				},
 			}),
 		);
 
@@ -101,6 +113,10 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.notifyOnLoad).toBe(true);
 		expect(loaded.config.compaction.artifactRoot).toBe(path.join(os.homedir(), "artifacts/pot"));
 		expect(loaded.config.webSearch).toEqual({ enabled: false, models: ["provider/model"] });
+		expect(loaded.config.imageGeneration).toEqual({
+			enabled: false,
+			models: ["provider/image-model"],
+		});
 	});
 
 	test("null model specs preserve the default remote path and clear the fallback spec", () => {
@@ -136,6 +152,10 @@ describe("loadToolkitConfig", () => {
 					enabled: "yes",
 					models: [" provider/model ", "provider/model", ""],
 				},
+				imageGeneration: {
+					enabled: "yes",
+					models: 42,
+				},
 			}),
 		);
 
@@ -154,7 +174,8 @@ describe("loadToolkitConfig", () => {
 		});
 		expect(loaded.config.compaction.responsesApis).toEqual(["openai-responses"]);
 		expect(loaded.config.webSearch).toEqual({ enabled: true, models: ["provider/model"] });
-		expect(loaded.warnings.length).toBeGreaterThanOrEqual(11);
+		expect(loaded.config.imageGeneration).toEqual({ enabled: true, models: [] });
+		expect(loaded.warnings.length).toBeGreaterThanOrEqual(13);
 	});
 
 	test("unknown fields and malformed feature sections warn without changing defaults", () => {
@@ -163,17 +184,21 @@ describe("loadToolkitConfig", () => {
 				legacyEnabled: false,
 				compaction: false,
 				webSearch: { futureOption: true, apis: ["openai-responses"] },
+				imageGeneration: { futureOption: true, apis: ["openai-responses"] },
 			}),
 		);
 		const loaded = loadToolkitConfig(configPath);
 
 		expect(loaded.config.compaction.enabled).toBe(true);
 		expect(loaded.config.webSearch.enabled).toBe(true);
+		expect(loaded.config.imageGeneration.enabled).toBe(true);
 		expect(loaded.warnings).toEqual([
 			"Ignoring legacyEnabled: unknown field.",
 			"Ignoring compaction: expected a JSON object.",
 			"Ignoring webSearch.futureOption: unknown field.",
 			"Ignoring webSearch.apis: unknown field.",
+			"Ignoring imageGeneration.futureOption: unknown field.",
+			"Ignoring imageGeneration.apis: unknown field.",
 		]);
 	});
 
@@ -203,6 +228,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.warnings).toHaveLength(1);
 		expect(loaded.config.compaction.enabled).toBe(true);
 		expect(loaded.config.webSearch.enabled).toBe(true);
+		expect(loaded.config.imageGeneration.enabled).toBe(true);
 	});
 
 	test("relative artifactRoot resolves against the config directory", () => {

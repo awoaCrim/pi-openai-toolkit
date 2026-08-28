@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_COMPACTION_CONFIG, DEFAULT_WEB_SEARCH_CONFIG } from "../types";
+import {
+	DEFAULT_COMPACTION_CONFIG,
+	DEFAULT_IMAGE_GENERATION_CONFIG,
+	DEFAULT_WEB_SEARCH_CONFIG,
+} from "../types";
 import { registerWebSearchExtension } from "./extension";
 import { WEB_SEARCH_SOURCE_INCLUDE } from "./types";
 
@@ -30,6 +34,10 @@ function createHarness(args: {
 					...DEFAULT_WEB_SEARCH_CONFIG,
 					models: ["newapi/gpt-5.5"],
 					...(args.webSearch ?? {}),
+				},
+				imageGeneration: {
+					...DEFAULT_IMAGE_GENERATION_CONFIG,
+					models: [...DEFAULT_IMAGE_GENERATION_CONFIG.models],
 				},
 			},
 			warnings: [],

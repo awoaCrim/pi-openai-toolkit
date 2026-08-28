@@ -6,11 +6,13 @@ import {
 	DEFAULT_COMPACTION_CONFIG,
 	DEFAULT_TOOLKIT_CONFIG,
 	DEFAULT_AUTO_COMPACTION_CONFIG,
+	DEFAULT_IMAGE_GENERATION_CONFIG,
 	DEFAULT_WEB_SEARCH_CONFIG,
 	RESPONSES_COMPACT_CAPABLE_APIS,
 	THINKING_LEVELS,
 	TOOLKIT_ID,
 	type CompactionConfig,
+	type ImageGenerationConfig,
 	type LoadedToolkitConfig,
 	type ToolkitConfig,
 	type WebSearchConfig,
@@ -19,7 +21,7 @@ import {
 export const CONFIG_DIR = path.join(os.homedir(), ".pi", "agent", "extensions", TOOLKIT_ID);
 export const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 
-const TOP_LEVEL_FIELDS = new Set(["compaction", "webSearch"]);
+const TOP_LEVEL_FIELDS = new Set(["compaction", "webSearch", "imageGeneration"]);
 const COMPACTION_FIELDS = new Set([
 	"enabled",
 	"allowCompactionContinuityBreak",
@@ -37,6 +39,7 @@ const COMPACTION_FIELDS = new Set([
 ]);
 const AUTO_COMPACTION_FIELDS = new Set(["enabled", "continuation", "unsupportedFallback", "reserveTokens"]);
 const WEB_SEARCH_FIELDS = new Set(["enabled", "models"]);
+const IMAGE_GENERATION_FIELDS = new Set(["enabled", "models"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
@@ -193,6 +196,10 @@ function cloneDefaults(): ToolkitConfig {
 			...DEFAULT_WEB_SEARCH_CONFIG,
 			models: [...DEFAULT_WEB_SEARCH_CONFIG.models],
 		},
+		imageGeneration: {
+			...DEFAULT_IMAGE_GENERATION_CONFIG,
+			models: [...DEFAULT_IMAGE_GENERATION_CONFIG.models],
+		},
 	};
 }
 
@@ -305,6 +312,21 @@ function applyWebSearchConfig(
 	}
 }
 
+function applyImageGenerationConfig(
+	raw: Record<string, unknown>,
+	resolved: ImageGenerationConfig,
+	warnings: string[],
+): void {
+	warnUnknownFields(raw, IMAGE_GENERATION_FIELDS, "imageGeneration", warnings);
+	resolved.enabled =
+		toBoolean(raw.enabled, "imageGeneration.enabled", warnings) ?? resolved.enabled;
+
+	const models = toModelAllowlist(raw.models, "imageGeneration.models", warnings);
+	if (models !== undefined) {
+		resolved.models = models;
+	}
+}
+
 /**
  * Load the canonical toolkit config from
  * `~/.pi/agent/extensions/pi-openai-toolkit/config.json`.
@@ -333,6 +355,14 @@ export function loadToolkitConfig(configPath: string = CONFIG_PATH): LoadedToolk
 				applyWebSearchConfig(raw.webSearch, resolved.webSearch, warnings);
 			} else {
 				warnings.push("Ignoring webSearch: expected a JSON object.");
+			}
+		}
+
+		if (raw.imageGeneration !== undefined) {
+			if (isRecord(raw.imageGeneration)) {
+				applyImageGenerationConfig(raw.imageGeneration, resolved.imageGeneration, warnings);
+			} else {
+				warnings.push("Ignoring imageGeneration: expected a JSON object.");
 			}
 		}
 	}

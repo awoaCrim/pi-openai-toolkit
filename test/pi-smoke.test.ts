@@ -8,6 +8,7 @@ const targets = [
 	["compaction entry", "compaction"],
 	["inline compaction loop", "inline_compaction"],
 	["Web Search entry", "web_search"],
+	["image generation entry", "image_generation"],
 	["complete package", "package"],
 ] as const;
 

@@ -32,6 +32,7 @@ describe("Compaction and Web Search integration", () => {
 		expect(packageJson.pi?.extensions).toEqual([
 			"./extensions/compaction.ts",
 			"./extensions/web-search.ts",
+			"./extensions/image-generation.ts",
 		]);
 	});
 

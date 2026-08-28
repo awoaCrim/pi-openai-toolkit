@@ -1,9 +1,9 @@
 {
   "name": "pi-openai-toolkit",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "private": false,
   "type": "module",
-  "description": "OpenAI-focused Pi toolkit providing remote Responses compaction and native Web Search.",
+  "description": "OpenAI-focused Pi toolkit providing remote Responses compaction, native Web Search, and native image generation.",
   "author": "awoaCrim and contributors",
   "license": "MIT",
   "repository": {
@@ -24,18 +24,21 @@
     "openai",
     "compaction",
     "web-search",
+    "image-generation",
     "codex",
     "responses"
   ],
   "pi": {
     "extensions": [
       "./extensions/compaction.ts",
-      "./extensions/web-search.ts"
+      "./extensions/web-search.ts",
+      "./extensions/image-generation.ts"
     ]
   },
   "files": [
     "extensions/compaction.ts",
     "extensions/web-search.ts",
+    "extensions/image-generation.ts",
     "src/compact-client.ts",
     "src/config.ts",
     "src/debug.ts",
@@ -43,9 +46,20 @@
     "src/deferred-tool-carryover.ts",
     "src/inline-compaction.ts",
     "src/extension-runtime.ts",
+    "src/image-generation/artifacts.ts",
+    "src/image-generation/client.ts",
+    "src/image-generation/eligibility.ts",
+    "src/image-generation/extension.ts",
+    "src/image-generation/protocol.ts",
+    "src/image-generation/references.ts",
+    "src/image-generation/render.ts",
+    "src/image-generation/service.ts",
+    "src/image-generation/types.ts",
+    "src/model-scope.ts",
     "src/native-fallback.ts",
     "src/payload-rewrite.ts",
     "src/provider-headers.ts",
+    "src/responses-headers.ts",
     "src/remote-v2-client.ts",
     "src/request-context-cache.ts",
     "src/runtime.ts",
@@ -71,12 +85,14 @@
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": ">=0.80.0"
+    "@earendil-works/pi-coding-agent": ">=0.80.0",
+    "@earendil-works/pi-tui": ">=0.80.0"
   },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "0.84.3",
     "@earendil-works/pi-ai": "0.84.3",
     "@earendil-works/pi-coding-agent": "0.84.3",
+    "@earendil-works/pi-tui": "0.84.3",
     "@types/node": "24.12.4",
     "bun": "1.2.23",
     "typescript": "5.9.3"

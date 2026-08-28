@@ -7,6 +7,7 @@ import { transformWebSearchPayload } from "./web-search/payload";
 import { WEB_SEARCH_SOURCE_INCLUDE } from "./web-search/types";
 import {
 	DEFAULT_COMPACTION_CONFIG,
+	DEFAULT_IMAGE_GENERATION_CONFIG,
 	DEFAULT_WEB_SEARCH_CONFIG,
 	NATIVE_COMPACTION_FALLBACK_SUMMARY,
 	createNativeCompactionDetails,
@@ -378,6 +379,10 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 				webSearch: {
 					...DEFAULT_WEB_SEARCH_CONFIG,
 					models: [...DEFAULT_WEB_SEARCH_CONFIG.models],
+				},
+				imageGeneration: {
+					...DEFAULT_IMAGE_GENERATION_CONFIG,
+					models: [...DEFAULT_IMAGE_GENERATION_CONFIG.models],
 				},
 			},
 			source: undefined,

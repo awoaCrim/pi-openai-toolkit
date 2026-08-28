@@ -23,6 +23,7 @@ import {
 } from "./inline-compaction";
 import {
 	DEFAULT_COMPACTION_CONFIG,
+	DEFAULT_IMAGE_GENERATION_CONFIG,
 	DEFAULT_TOOLKIT_CONFIG,
 	DEFAULT_WEB_SEARCH_CONFIG,
 	type CompactionConfig,
@@ -78,6 +79,10 @@ function createLoadedConfig(overrides: Partial<CompactionConfig> = {}): LoadedTo
 			webSearch: {
 				...DEFAULT_WEB_SEARCH_CONFIG,
 				models: [...DEFAULT_WEB_SEARCH_CONFIG.models],
+			},
+			imageGeneration: {
+				...DEFAULT_IMAGE_GENERATION_CONFIG,
+				models: [...DEFAULT_IMAGE_GENERATION_CONFIG.models],
 			},
 		},
 		warnings: [],
