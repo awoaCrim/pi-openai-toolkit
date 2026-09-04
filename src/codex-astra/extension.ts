@@ -72,7 +72,12 @@ export function registerCodexAstraExtension(
 			if (!astra.enabled || astra.models.length === 0) return undefined;
 
 			const model = ctx.model;
-			if (!model || model.api !== "openai-codex-responses") return undefined;
+			// Both Responses wire families carry the same reasoning.effort prefix
+			// problem, and upstream OMP plans on both providers; which models
+			// accept the item is decided by the allowlist, not by API family.
+			if (!model || (model.api !== "openai-codex-responses" && model.api !== "openai-responses")) {
+				return undefined;
+			}
 			if (!isExactModelAllowed(model, astra.models)) return undefined;
 
 			const payload = parseAstraPayload(event.payload);

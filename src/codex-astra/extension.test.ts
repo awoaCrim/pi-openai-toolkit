@@ -122,10 +122,35 @@ describe("codex astra extension wiring", () => {
 		expect(fire("before_provider_request", { type: "before_provider_request", payload: foreign })).toBeUndefined();
 	});
 
-	test("non-codex models are never rewritten", () => {
+	test("allowlisted openai-responses gateway models are rewritten too", () => {
 		const { fire } = createHarness({
-			model: codexModel({ provider: "openai", api: "openai-responses", id: "gpt-6-astra", baseUrl: "https://api.openai.com/v1" }),
-			codexAstra: { enabled: true, models: ["openai/gpt-6-astra"] },
+			model: codexModel({ provider: "uwoacrimson", api: "openai-responses", id: "gpt-6-astra", baseUrl: "https://newapi.example/v1" }),
+			codexAstra: { enabled: true, models: ["uwoacrimson/gpt-6-astra"] },
+		});
+		expect(
+			fire("before_provider_request", {
+				type: "before_provider_request",
+				payload: { ...requestPayload("low"), model: "gpt-6-astra" },
+			}),
+		).toBeUndefined(); // baselines; same as codex family
+		const changed = fire("before_provider_request", {
+			type: "before_provider_request",
+			payload: {
+				model: "gpt-6-astra",
+				input: [
+					{ role: "user", content: "a" },
+					{ role: "user", content: "b" },
+				],
+				reasoning: { effort: "max" },
+			},
+		});
+		expect(changed).toBeDefined();
+	});
+
+	test("non-Responses APIs are never rewritten", () => {
+		const { fire } = createHarness({
+			model: codexModel({ provider: "uwoacrimson", api: "openai-completions", id: "gpt-6-astra", baseUrl: "https://newapi.example/v1" }),
+			codexAstra: { enabled: true, models: ["uwoacrimson/gpt-6-astra"] },
 		});
 		expect(
 			fire("before_provider_request", { type: "before_provider_request", payload: requestPayload("high") }),
