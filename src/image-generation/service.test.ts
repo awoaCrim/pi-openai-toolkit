@@ -19,10 +19,7 @@ function config() {
 				...DEFAULT_WEB_SEARCH_CONFIG,
 				models: [...DEFAULT_WEB_SEARCH_CONFIG.models],
 			},
-			imageGeneration: {
-				...DEFAULT_IMAGE_GENERATION_CONFIG,
-				models: ["newapi/gpt-5.5"],
-			},
+			imageGeneration: { ...DEFAULT_IMAGE_GENERATION_CONFIG, enabled: true },
 		},
 		warnings: [],
 	};
@@ -147,14 +144,14 @@ describe("image generation service", () => {
 		expect(dispatched).toBe(false);
 	});
 
-	test("fails before dispatch for an ineligible model", async () => {
+	test("fails before dispatch when the feature is disabled", async () => {
 		let dispatched = false;
 		const deps = {
 			loadConfig: () => ({
 				...config(),
 				config: {
 					...config().config,
-					imageGeneration: { enabled: true, models: ["newapi/other"] },
+					imageGeneration: { enabled: false },
 				},
 			}),
 			requestImage: async () => {

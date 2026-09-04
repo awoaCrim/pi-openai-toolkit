@@ -42,7 +42,7 @@ function createHarness(eligible = true) {
 			},
 			imageGeneration: {
 				...DEFAULT_IMAGE_GENERATION_CONFIG,
-				models: eligible ? ["newapi/gpt-5.5"] : ["newapi/other"],
+				enabled: eligible,
 			},
 		},
 		warnings: [],
@@ -80,7 +80,7 @@ function createHarness(eligible = true) {
 }
 
 describe("image generation extension", () => {
-	test("registers once and activates only for eligible exact models", () => {
+	test("registers once and activates only for eligible Responses-capable models", () => {
 		const harness = createHarness(true);
 		registerImageGenerationExtension(
 			harness.pi as never,
@@ -109,7 +109,7 @@ describe("image generation extension", () => {
 		expect(harness.getActiveTools()).toContain(IMAGE_GENERATION_TOOL_NAME);
 	});
 
-	test("removes the tool for an unlisted model", () => {
+	test("removes the tool when the feature is disabled", () => {
 		const harness = createHarness(false);
 		registerImageGenerationExtension(
 			harness.pi as never,
@@ -140,6 +140,7 @@ describe("image generation extension", () => {
 		]);
 		expect(parameters.properties.referenceImagePaths.description).toContain("Use null");
 		expect(parameters.properties.outputPath.description).toContain("Use null");
+		expect(tool.promptSnippet).toContain("Generate or edit PNG images");
 		expect(tool.promptGuidelines.some((guideline: string) => guideline.includes("never invent paths"))).toBe(true);
 		expect(tool.promptGuidelines.some((guideline: string) => guideline.includes("never invent a destination"))).toBe(true);
 	});

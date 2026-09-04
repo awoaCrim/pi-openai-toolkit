@@ -380,10 +380,7 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 					...DEFAULT_WEB_SEARCH_CONFIG,
 					models: [...DEFAULT_WEB_SEARCH_CONFIG.models],
 				},
-				imageGeneration: {
-					...DEFAULT_IMAGE_GENERATION_CONFIG,
-					models: [...DEFAULT_IMAGE_GENERATION_CONFIG.models],
-				},
+				imageGeneration: { ...DEFAULT_IMAGE_GENERATION_CONFIG },
 			},
 			source: undefined,
 			warnings: [],
@@ -1342,7 +1339,7 @@ test("same-endpoint switching reuses the latest opaque checkpoint despite provid
 	expect(rewritten.input).toContainEqual(opaqueWindow[0]);
 });
 
-test("responses compact failure falls back to the configured native model and returns its result", async () => {
+test("a failed remote v2 request is compacted natively by remoteCompactModel", async () => {
 	const fallbackResult = {
 		summary: "## Goal\nFinish the compaction refactor.",
 		firstKeptEntryId: "entry_user",
@@ -1351,16 +1348,108 @@ test("responses compact failure falls back to the configured native model and re
 	};
 	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
 		compactResult: { ok: false, reason: "non-2xx", status: 404 },
+		// nativeFallback.model must be ignored once a remote request was attempted.
 		nativeFallbackResult: {
 			ok: true,
 			result: fallbackResult,
-			model: { provider: "google", id: "gemini-2.5-flash" },
+			model: { provider: "openai", id: "gpt-5.6-luna" },
 		},
-		config: { model: "google/gemini-2.5-flash" },
+		config: {
+			remoteCompactModel: "openai/gpt-5.6-luna",
+			nativeFallback: { enabled: true, model: "google/gemini-2.5-flash", thinkingLevel: "off" },
+		},
 	});
 	const model = { ...defaultModel };
+	const luna = { ...defaultModel, id: "gpt-5.6-luna" };
 	const user = createUserEntry("entry_user", "Compact this conversation.");
 	const event = {
+		signal: new AbortController().signal,
+		customInstructions: undefined,
+		preparation: {
+			tokensBefore: 512,
+			firstKeptEntryId: user.id,
+			previousSummary: undefined,
+			messagesToSummarize: [toReplayMessage(user)],
+			turnPrefixMessages: [],
+		},
+	};
+
+	const result = (await sessionBeforeCompact(
+		event,
+		createContext({
+			model,
+			registryModels: [luna],
+			systemPrompt: "Current instructions v1",
+			sessionContextMessages: [toReplayMessage(user)],
+		}),
+	)) as { compaction: Record<string, unknown> };
+
+	// The remote endpoint was attempted once, then the remote producer compacted natively.
+	expect(compactCalls).toHaveLength(1);
+	expect(fallbackCalls).toHaveLength(1);
+	expect(fallbackCalls[0]).toMatchObject({ modelSpec: "openai/gpt-5.6-luna" });
+	expect(result.compaction).toEqual(fallbackResult);
+});
+
+test("a failed remote v2 request without an override keeps the active model", async () => {
+	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
+		// nativeFallback.model must not be borrowed just because no remote override exists.
+		config: { nativeFallback: { enabled: true, model: "google/gemini-2.5-flash", thinkingLevel: "off" } },
+		compactResult: { ok: false, reason: "non-2xx", status: 404 },
+		nativeFallbackResult: { ok: false, reason: "no-model-configured" },
+	});
+	const model = { ...defaultModel };
+	const user = createUserEntry("entry_no_override", "Compact this without a remote override.");
+	const event = {
+		reason: "manual",
+		signal: new AbortController().signal,
+		customInstructions: undefined,
+		preparation: {
+			tokensBefore: 512,
+			firstKeptEntryId: user.id,
+			previousSummary: undefined,
+			messagesToSummarize: [toReplayMessage(user)],
+			turnPrefixMessages: [],
+		},
+	};
+
+	const result = await sessionBeforeCompact(
+		event,
+		createContext({
+			model,
+			systemPrompt: "Current instructions v1",
+			sessionContextMessages: [toReplayMessage(user)],
+		}),
+	);
+
+	// No override means no explicit native model, so Pi compacts with the active model itself.
+	expect(compactCalls).toHaveLength(1);
+	expect(fallbackCalls).toHaveLength(1);
+	expect(fallbackCalls[0]).toMatchObject({ modelSpec: undefined });
+	expect(result).toBeUndefined();
+});
+
+test("nativeFallback disabled leaves a successful remote v2 compaction intact", async () => {
+	const opaqueWindow = [{ type: "compaction", encrypted_content: "opaque-remote-checkpoint" }];
+	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
+		config: { nativeFallback: { enabled: false, model: "google/gemini-2.5-flash", thinkingLevel: "off" } },
+		compactResult: {
+			ok: true,
+			status: 200,
+			compactedWindow: opaqueWindow,
+			compactResponseId: "resp_remote_ok",
+			createdAt: nextTimestamp(),
+			response: {
+				id: "resp_remote_ok",
+				status: "completed",
+				output: opaqueWindow,
+			},
+		},
+	});
+	const model = { ...defaultModel };
+	const user = createUserEntry("entry_remote_ok", "Compact this remotely.");
+	const event = {
+		reason: "manual",
 		signal: new AbortController().signal,
 		customInstructions: undefined,
 		preparation: {
@@ -1379,12 +1468,55 @@ test("responses compact failure falls back to the configured native model and re
 			systemPrompt: "Current instructions v1",
 			sessionContextMessages: [toReplayMessage(user)],
 		}),
-	)) as { compaction: Record<string, unknown> };
+	)) as { compaction: { details: { compactedWindow: unknown[] } } };
 
-	// The responses compact endpoint was attempted once, then the fallback took over.
+	// The switch only governs the native chain; remote v2 still runs and still wins.
 	expect(compactCalls).toHaveLength(1);
+	expect(fallbackCalls).toHaveLength(0);
+	expect(result.compaction.details.compactedWindow).toEqual(opaqueWindow);
+});
+
+test("nativeFallback disabled sends a failed remote v2 straight to Pi's default path", async () => {
+	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
+		config: {
+			remoteCompactModel: "openai/gpt-5.6-luna",
+			nativeFallback: { enabled: false, model: "google/gemini-2.5-flash", thinkingLevel: "off" },
+		},
+		compactResult: { ok: false, reason: "non-2xx", status: 404 },
+		nativeFallbackResult: { ok: false, reason: "disabled" },
+	});
+	const model = { ...defaultModel };
+	const luna = { ...defaultModel, id: "gpt-5.6-luna" };
+	const user = createUserEntry("entry_remote_fail", "Compact this remotely and fail.");
+	const event = {
+		reason: "manual",
+		signal: new AbortController().signal,
+		customInstructions: undefined,
+		preparation: {
+			tokensBefore: 512,
+			firstKeptEntryId: user.id,
+			previousSummary: undefined,
+			messagesToSummarize: [toReplayMessage(user)],
+			turnPrefixMessages: [],
+		},
+	};
+
+	const result = await sessionBeforeCompact(
+		event,
+		createContext({
+			model,
+			registryModels: [luna],
+			systemPrompt: "Current instructions v1",
+			sessionContextMessages: [toReplayMessage(user)],
+		}),
+	);
+
+	// Remote v2 was still attempted once with the override; only the native step is switched off.
+	expect(compactCalls).toHaveLength(1);
+	expect((compactCalls[0] as { runtime: { model: string } }).runtime.model).toBe(luna.id);
 	expect(fallbackCalls).toHaveLength(1);
-	expect(result.compaction).toEqual(fallbackResult);
+	expect(fallbackCalls[0]).toMatchObject({ modelSpec: "openai/gpt-5.6-luna" });
+	expect(result).toBeUndefined();
 });
 
 test("non-Responses model routes straight to the native-method fallback", async () => {
@@ -1408,7 +1540,11 @@ test("non-Responses model routes straight to the native-method fallback", async 
 			result: fallbackResult,
 			model: { provider: "google", id: "gemini-2.5-flash" },
 		},
-		config: { model: "google/gemini-2.5-flash" },
+		// A remote producer must never drive the native chain for a non-Responses model.
+		config: {
+			remoteCompactModel: "openai/gpt-5.6-luna",
+			nativeFallback: { enabled: true, model: "google/gemini-2.5-flash", thinkingLevel: "off" },
+		},
 	});
 	const user = createUserEntry("entry_user", "Compact this Anthropic conversation.");
 	const event = {
@@ -1435,6 +1571,7 @@ test("non-Responses model routes straight to the native-method fallback", async 
 	// The compact endpoint is never touched for a non-Responses API.
 	expect(compactCalls).toHaveLength(0);
 	expect(fallbackCalls).toHaveLength(1);
+	expect(fallbackCalls[0]).toMatchObject({ modelSpec: "google/gemini-2.5-flash" });
 	expect(result.compaction).toEqual(fallbackResult);
 });
 

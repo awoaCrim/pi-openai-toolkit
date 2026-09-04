@@ -4,8 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { CONFIG_PATH, loadToolkitConfig } from "./config";
 import {
+	DEFAULT_AUTO_MODE_CONFIG,
 	DEFAULT_COMPACTION_CONFIG,
 	DEFAULT_IMAGE_GENERATION_CONFIG,
+	DEFAULT_NATIVE_FALLBACK_CONFIG,
 	DEFAULT_WEB_SEARCH_CONFIG,
 } from "./types";
 
@@ -42,8 +44,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.enabled).toBe(true);
 		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(false);
 		expect(loaded.config.compaction.remoteCompactModel).toBeUndefined();
-		expect(loaded.config.compaction.model).toBeUndefined();
-		expect(loaded.config.compaction.thinkingLevel).toBe("off");
+		expect(loaded.config.compaction.nativeFallback).toEqual({ ...DEFAULT_NATIVE_FALLBACK_CONFIG });
 		expect(loaded.config.compaction.autoCompaction).toEqual({
 			enabled: true,
 			continuation: "inline",
@@ -57,9 +58,11 @@ describe("loadToolkitConfig", () => {
 			...DEFAULT_WEB_SEARCH_CONFIG,
 			models: [...DEFAULT_WEB_SEARCH_CONFIG.models],
 		});
-		expect(loaded.config.imageGeneration).toEqual({
-			...DEFAULT_IMAGE_GENERATION_CONFIG,
-			models: [...DEFAULT_IMAGE_GENERATION_CONFIG.models],
+		expect(loaded.config.imageGeneration).toEqual({ ...DEFAULT_IMAGE_GENERATION_CONFIG });
+		expect(loaded.config.autoMode).toEqual({
+			...DEFAULT_AUTO_MODE_CONFIG,
+			models: [...DEFAULT_AUTO_MODE_CONFIG.models],
+			extraTools: [...DEFAULT_AUTO_MODE_CONFIG.extraTools],
 		});
 	});
 
@@ -70,8 +73,11 @@ describe("loadToolkitConfig", () => {
 					enabled: true,
 					allowCompactionContinuityBreak: true,
 					remoteCompactModel: " uwoacrimson/gpt-5.6-luna ",
-					model: " google/gemini-2.5-flash ",
-					thinkingLevel: "medium",
+					nativeFallback: {
+						enabled: true,
+						model: " google/gemini-2.5-flash ",
+						thinkingLevel: "medium",
+					},
 					autoCompaction: {
 						enabled: true,
 						continuation: "followUp",
@@ -89,7 +95,14 @@ describe("loadToolkitConfig", () => {
 				},
 				imageGeneration: {
 					enabled: false,
-					models: [" provider/image-model ", "provider/image-model", ""],
+				},
+				autoMode: {
+					enabled: true,
+					models: [" uwoacrimson/gpt-5.6-luna ", "uwoacrimson/gpt-5.6-luna", ""],
+					reviewerModel: " uwoacrimson/gpt-5.6-sol ",
+					gate: "all",
+					extraTools: [" openai_generate_image ", "openai_generate_image", ""],
+					timeoutMs: 45000,
 				},
 			}),
 		);
@@ -100,8 +113,11 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.warnings).toEqual([]);
 		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(true);
 		expect(loaded.config.compaction.remoteCompactModel).toBe("uwoacrimson/gpt-5.6-luna");
-		expect(loaded.config.compaction.model).toBe("google/gemini-2.5-flash");
-		expect(loaded.config.compaction.thinkingLevel).toBe("medium");
+		expect(loaded.config.compaction.nativeFallback).toEqual({
+			enabled: true,
+			model: "google/gemini-2.5-flash",
+			thinkingLevel: "medium",
+		});
 		expect(loaded.config.compaction.autoCompaction).toEqual({
 			enabled: true,
 			continuation: "followUp",
@@ -113,20 +129,28 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.notifyOnLoad).toBe(true);
 		expect(loaded.config.compaction.artifactRoot).toBe(path.join(os.homedir(), "artifacts/pot"));
 		expect(loaded.config.webSearch).toEqual({ enabled: false, models: ["provider/model"] });
-		expect(loaded.config.imageGeneration).toEqual({
-			enabled: false,
-			models: ["provider/image-model"],
+		expect(loaded.config.imageGeneration).toEqual({ enabled: false });
+		expect(loaded.config.autoMode).toEqual({
+			enabled: true,
+			models: ["uwoacrimson/gpt-5.6-luna"],
+			reviewerModel: "uwoacrimson/gpt-5.6-sol",
+			gate: "all",
+			extraTools: ["openai_generate_image"],
+			timeoutMs: 45000,
 		});
 	});
 
 	test("null model specs preserve the default remote path and clear the fallback spec", () => {
 		const configPath = writeTempConfig(
-			JSON.stringify({ compaction: { remoteCompactModel: null, model: null } }),
+			JSON.stringify({
+				compaction: { remoteCompactModel: null, nativeFallback: { model: null } },
+			}),
 		);
 		const loaded = loadToolkitConfig(configPath);
 
 		expect(loaded.config.compaction.remoteCompactModel).toBeUndefined();
-		expect(loaded.config.compaction.model).toBeUndefined();
+		expect(loaded.config.compaction.nativeFallback.model).toBeUndefined();
+		expect(loaded.config.compaction.nativeFallback.enabled).toBe(true);
 		expect(loaded.warnings).toEqual([]);
 	});
 
@@ -137,8 +161,12 @@ describe("loadToolkitConfig", () => {
 					enabled: "yes",
 					allowCompactionContinuityBreak: "yes",
 					remoteCompactModel: { provider: "uwoacrimson" },
-					model: 42,
-					thinkingLevel: "ultra",
+					nativeFallback: {
+						enabled: "yes",
+						model: 42,
+						thinkingLevel: "ultra",
+						futureOption: true,
+					},
 					autoCompaction: {
 						enabled: "yes",
 						continuation: "later",
@@ -154,7 +182,15 @@ describe("loadToolkitConfig", () => {
 				},
 				imageGeneration: {
 					enabled: "yes",
+					models: ["provider/image-model"],
+				},
+				autoMode: {
+					enabled: "yes",
 					models: 42,
+					reviewerModel: 42,
+					gate: "everything",
+					extraTools: "bash",
+					timeoutMs: 0,
 				},
 			}),
 		);
@@ -164,8 +200,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.enabled).toBe(true);
 		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(false);
 		expect(loaded.config.compaction.remoteCompactModel).toBeUndefined();
-		expect(loaded.config.compaction.model).toBeUndefined();
-		expect(loaded.config.compaction.thinkingLevel).toBe("off");
+		expect(loaded.config.compaction.nativeFallback).toEqual({ ...DEFAULT_NATIVE_FALLBACK_CONFIG });
 		expect(loaded.config.compaction.autoCompaction).toEqual({
 			enabled: true,
 			continuation: "inline",
@@ -174,8 +209,13 @@ describe("loadToolkitConfig", () => {
 		});
 		expect(loaded.config.compaction.responsesApis).toEqual(["openai-responses"]);
 		expect(loaded.config.webSearch).toEqual({ enabled: true, models: ["provider/model"] });
-		expect(loaded.config.imageGeneration).toEqual({ enabled: true, models: [] });
-		expect(loaded.warnings.length).toBeGreaterThanOrEqual(13);
+		expect(loaded.config.imageGeneration).toEqual({ enabled: false });
+		expect(loaded.config.autoMode).toEqual({
+			...DEFAULT_AUTO_MODE_CONFIG,
+			models: [],
+			extraTools: [],
+		});
+		expect(loaded.warnings.length).toBeGreaterThanOrEqual(21);
 	});
 
 	test("unknown fields and malformed feature sections warn without changing defaults", () => {
@@ -184,14 +224,16 @@ describe("loadToolkitConfig", () => {
 				legacyEnabled: false,
 				compaction: false,
 				webSearch: { futureOption: true, apis: ["openai-responses"] },
-				imageGeneration: { futureOption: true, apis: ["openai-responses"] },
+				imageGeneration: { futureOption: true, apis: ["openai-responses"], models: ["openai/gpt-5"] },
+				autoMode: { futureOption: true, reviewer: "openai/gpt-5" },
 			}),
 		);
 		const loaded = loadToolkitConfig(configPath);
 
 		expect(loaded.config.compaction.enabled).toBe(true);
 		expect(loaded.config.webSearch.enabled).toBe(true);
-		expect(loaded.config.imageGeneration.enabled).toBe(true);
+		expect(loaded.config.imageGeneration.enabled).toBe(false);
+		expect(loaded.config.autoMode.reviewerModel).toBeUndefined();
 		expect(loaded.warnings).toEqual([
 			"Ignoring legacyEnabled: unknown field.",
 			"Ignoring compaction: expected a JSON object.",
@@ -199,6 +241,9 @@ describe("loadToolkitConfig", () => {
 			"Ignoring webSearch.apis: unknown field.",
 			"Ignoring imageGeneration.futureOption: unknown field.",
 			"Ignoring imageGeneration.apis: unknown field.",
+			"Ignoring imageGeneration.models: unknown field.",
+			"Ignoring autoMode.futureOption: unknown field.",
+			"Ignoring autoMode.reviewer: unknown field.",
 		]);
 	});
 
@@ -213,7 +258,7 @@ describe("loadToolkitConfig", () => {
 		const loaded = loadToolkitConfig(configPath);
 
 		expect(loaded.config.compaction.enabled).toBe(true);
-		expect(loaded.config.compaction.model).toBeUndefined();
+		expect(loaded.config.compaction.nativeFallback.model).toBeUndefined();
 		expect(loaded.config.compaction.artifactRoot).toContain(
 			path.join(".pi", "agent", "artifacts", "pi-openai-toolkit", "compaction"),
 		);
@@ -228,7 +273,8 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.warnings).toHaveLength(1);
 		expect(loaded.config.compaction.enabled).toBe(true);
 		expect(loaded.config.webSearch.enabled).toBe(true);
-		expect(loaded.config.imageGeneration.enabled).toBe(true);
+		expect(loaded.config.imageGeneration.enabled).toBe(false);
+		expect(loaded.config.autoMode.enabled).toBe(true);
 	});
 
 	test("relative artifactRoot resolves against the config directory", () => {

@@ -12,6 +12,7 @@ import type { CompactionConfig } from "./types";
 export { parseModelSpec } from "./runtime";
 
 export type NativeFallbackFailureReason =
+	| "disabled"
 	| "no-model-configured"
 	| "invalid-model-spec"
 	| "model-not-found"
@@ -53,23 +54,35 @@ function toErrorMessage(error: unknown): string {
 }
 
 /**
- * Run pi's native compaction method with the user-configured compaction model.
+ * Run pi's native compaction method with a caller-resolved summary model.
  *
- * Only handles the "configured model differs from the current one" case: when no model
- * is configured (or it equals the current model), the caller should return undefined from
- * session_before_compact so pi runs the same native path itself, keeping its internal
+ * The two compaction chains stay separate: the caller passes `remoteCompactModel` only when a
+ * remote v2 request was actually attempted and failed, and `nativeFallback.model` only when the
+ * active model cannot use remote v2 at all. This function never inspects `remoteCompactModel`
+ * itself, so a model that cannot compact remotely can never inherit the remote producer.
+ *
+ * Only the "resolved model differs from the current one" case is handled here: when the feature
+ * is disabled, nothing is resolved, or it equals the current model, the caller returns undefined
+ * from session_before_compact so pi runs the same native path itself, keeping its internal
  * streamFn/thinkingLevel wiring.
  */
 export async function runNativeFallbackCompaction(args: {
 	ctx: ExtensionContext;
 	event: SessionBeforeCompactEvent;
 	config: CompactionConfig;
+	/** Model spec supplied by the caller for this specific fallback reason. */
+	modelSpec?: string;
 	compactFn?: NativeCompactFn;
 }): Promise<NativeFallbackResult> {
 	const { ctx, event, config } = args;
 	const compactFn = args.compactFn ?? compact;
+	const nativeFallback = config.nativeFallback;
 
-	const spec = config.model?.trim();
+	if (!nativeFallback.enabled) {
+		return { ok: false, reason: "disabled" };
+	}
+
+	const spec = args.modelSpec?.trim() ?? "";
 	if (!spec) {
 		return { ok: false, reason: "no-model-configured" };
 	}
@@ -106,7 +119,7 @@ export async function runNativeFallbackCompaction(args: {
 			mergeProviderHeaders(auth.headers),
 			event.customInstructions,
 			event.signal,
-			config.thinkingLevel,
+			nativeFallback.thinkingLevel,
 			undefined,
 			auth.env,
 		);

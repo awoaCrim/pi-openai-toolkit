@@ -35,10 +35,7 @@ function createHarness(args: {
 					models: ["newapi/gpt-5.5"],
 					...(args.webSearch ?? {}),
 				},
-				imageGeneration: {
-					...DEFAULT_IMAGE_GENERATION_CONFIG,
-					models: [...DEFAULT_IMAGE_GENERATION_CONFIG.models],
-				},
+				imageGeneration: { ...DEFAULT_IMAGE_GENERATION_CONFIG },
 			},
 			warnings: [],
 		}),

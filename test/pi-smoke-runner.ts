@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -29,6 +29,7 @@ const targetByName: Record<string, string> = {
 	inline_compaction: join(packageDir, "extensions/compaction.ts"),
 	web_search: join(packageDir, "extensions/web-search.ts"),
 	image_generation: join(packageDir, "extensions/image-generation.ts"),
+	auto_mode: join(packageDir, "extensions/auto-mode.ts"),
 	package: packageDir,
 };
 const targetName = process.argv[2];
@@ -52,9 +53,23 @@ process.env.APPDATA = join(isolatedHome, "AppData", "Roaming");
 process.env.LOCALAPPDATA = join(isolatedHome, "AppData", "Local");
 const agentDir = join(isolatedHome, ".pi", "agent");
 const inlineSmoke = targetName === "inline_compaction";
+const imageSmoke = targetName === "image_generation";
+if (imageSmoke) {
+	const toolkitConfigDir = join(agentDir, "extensions", "pi-openai-toolkit");
+	await mkdir(toolkitConfigDir, { recursive: true });
+	await writeFile(
+		join(toolkitConfigDir, "config.json"),
+		JSON.stringify({
+			imageGeneration: {
+				enabled: true,
+			},
+		}),
+		"utf8",
+	);
+}
 const faux = fauxProvider({
 	provider: "faux",
-	api: "faux",
+	api: imageSmoke ? "openai-responses" : "faux",
 	models: [{ id: "faux-1", contextWindow: inlineSmoke ? 256 : 128_000, maxTokens: 128 }],
 });
 let inlineNextMessages: Context["messages"] | undefined;
@@ -186,9 +201,26 @@ try {
 				tools: ["first_tool", "second_tool"],
 				customTools: [firstTool, secondTool],
 			}
-			: { noTools: "all" as const }),
+			: imageSmoke
+				? { noTools: "builtin" as const }
+				: { noTools: "all" as const }),
 	});
 	try {
+		if (imageSmoke) {
+			if (!session.getActiveToolNames().includes("openai_generate_image")) {
+				throw new Error("Eligible image generation tool was not active in official Pi");
+			}
+			if (
+				!session.systemPrompt.includes(
+					"Generate or edit PNG images through the current Responses-capable model and gpt-image-2.",
+				)
+			) {
+				throw new Error("Official Pi system prompt omitted the image Available tools snippet");
+			}
+			if (!session.systemPrompt.includes("Use openai_generate_image when the user explicitly asks")) {
+				throw new Error("Official Pi system prompt omitted the image prompt guidelines");
+			}
+		}
 		if (inlineSmoke) {
 			const prototype = Object.getPrototypeOf(session) as Record<PropertyKey, unknown>;
 			const marker = prototype[Symbol.for("pi-openai-toolkit.inline-compaction.adapter.v1")];
@@ -208,6 +240,17 @@ try {
 			.join("");
 		if (!inlineSmoke && text !== "OK") {
 			throw new Error(`Unexpected faux response: ${text}`);
+		}
+		if (imageSmoke) {
+			const imageToolResult = session.messages.find(
+				(message) => message.role === "toolResult" && message.toolName === "openai_generate_image",
+			);
+			if (imageToolResult) {
+				throw new Error("Image smoke unexpectedly executed the paid image tool");
+			}
+			if (faux.state.callCount !== 1) {
+				throw new Error(`Image smoke expected one text-only provider request, got ${faux.state.callCount}`);
+			}
 		}
 		if (inlineSmoke) {
 			if (text !== "INLINE-DONE") {

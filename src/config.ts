@@ -6,14 +6,21 @@ import {
 	DEFAULT_COMPACTION_CONFIG,
 	DEFAULT_TOOLKIT_CONFIG,
 	DEFAULT_AUTO_COMPACTION_CONFIG,
+	DEFAULT_AUTO_MODE_CONFIG,
 	DEFAULT_IMAGE_GENERATION_CONFIG,
+	DEFAULT_NATIVE_FALLBACK_CONFIG,
 	DEFAULT_WEB_SEARCH_CONFIG,
 	RESPONSES_COMPACT_CAPABLE_APIS,
+	REVIEWER_TIMEOUT_MAX_MS,
+	REVIEWER_TIMEOUT_MIN_MS,
 	THINKING_LEVELS,
 	TOOLKIT_ID,
+	type AutoModeConfig,
+	type AutoModeGate,
 	type CompactionConfig,
 	type ImageGenerationConfig,
 	type LoadedToolkitConfig,
+	type NativeFallbackConfig,
 	type ToolkitConfig,
 	type WebSearchConfig,
 } from "./types";
@@ -21,13 +28,12 @@ import {
 export const CONFIG_DIR = path.join(os.homedir(), ".pi", "agent", "extensions", TOOLKIT_ID);
 export const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 
-const TOP_LEVEL_FIELDS = new Set(["compaction", "webSearch", "imageGeneration"]);
+const TOP_LEVEL_FIELDS = new Set(["compaction", "webSearch", "imageGeneration", "autoMode"]);
 const COMPACTION_FIELDS = new Set([
 	"enabled",
 	"allowCompactionContinuityBreak",
 	"remoteCompactModel",
-	"model",
-	"thinkingLevel",
+	"nativeFallback",
 	"autoCompaction",
 	"responsesApis",
 	"notifyOnLoad",
@@ -37,9 +43,11 @@ const COMPACTION_FIELDS = new Set([
 	"redactSensitiveData",
 	"artifactRoot",
 ]);
+const NATIVE_FALLBACK_FIELDS = new Set(["enabled", "model", "thinkingLevel"]);
 const AUTO_COMPACTION_FIELDS = new Set(["enabled", "continuation", "unsupportedFallback", "reserveTokens"]);
 const WEB_SEARCH_FIELDS = new Set(["enabled", "models"]);
-const IMAGE_GENERATION_FIELDS = new Set(["enabled", "models"]);
+const IMAGE_GENERATION_FIELDS = new Set(["enabled"]);
+const AUTO_MODE_FIELDS = new Set(["enabled", "models", "reviewerModel", "gate", "extraTools", "timeoutMs"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
@@ -175,7 +183,7 @@ function toSupportedApis(
 	return accepted;
 }
 
-function toModelAllowlist(value: unknown, fieldPath: string, warnings: string[]): string[] | undefined {
+function toStringList(value: unknown, fieldPath: string, warnings: string[]): string[] | undefined {
 	if (value === undefined) return undefined;
 	if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
 		warnings.push(`Ignoring ${fieldPath}: expected a string array.`);
@@ -185,10 +193,34 @@ function toModelAllowlist(value: unknown, fieldPath: string, warnings: string[])
 	return [...new Set(value.map((entry) => entry.trim()).filter(Boolean))];
 }
 
+function toAutoModeGate(value: unknown, fieldPath: string, warnings: string[]): AutoModeGate | undefined {
+	if (value === undefined) return undefined;
+	if (value === "side-effect" || value === "all") return value;
+	warnings.push(`Ignoring ${fieldPath}: expected one of side-effect, all.`);
+	return undefined;
+}
+
+function toReviewerTimeoutMs(value: unknown, fieldPath: string, warnings: string[]): number | undefined {
+	if (value === undefined) return undefined;
+	if (
+		typeof value === "number" &&
+		Number.isInteger(value) &&
+		value >= REVIEWER_TIMEOUT_MIN_MS &&
+		value <= REVIEWER_TIMEOUT_MAX_MS
+	) {
+		return value;
+	}
+	warnings.push(
+		`Ignoring ${fieldPath}: expected an integer between ${REVIEWER_TIMEOUT_MIN_MS} and ${REVIEWER_TIMEOUT_MAX_MS} ms.`,
+	);
+	return undefined;
+}
+
 function cloneDefaults(): ToolkitConfig {
 	return {
 		compaction: {
 			...DEFAULT_COMPACTION_CONFIG,
+			nativeFallback: { ...DEFAULT_NATIVE_FALLBACK_CONFIG },
 			autoCompaction: { ...DEFAULT_AUTO_COMPACTION_CONFIG },
 			responsesApis: [...DEFAULT_COMPACTION_CONFIG.responsesApis],
 		},
@@ -196,11 +228,32 @@ function cloneDefaults(): ToolkitConfig {
 			...DEFAULT_WEB_SEARCH_CONFIG,
 			models: [...DEFAULT_WEB_SEARCH_CONFIG.models],
 		},
-		imageGeneration: {
-			...DEFAULT_IMAGE_GENERATION_CONFIG,
-			models: [...DEFAULT_IMAGE_GENERATION_CONFIG.models],
+		imageGeneration: { ...DEFAULT_IMAGE_GENERATION_CONFIG },
+		autoMode: {
+			...DEFAULT_AUTO_MODE_CONFIG,
+			models: [...DEFAULT_AUTO_MODE_CONFIG.models],
+			extraTools: [...DEFAULT_AUTO_MODE_CONFIG.extraTools],
 		},
 	};
+}
+
+function applyNativeFallbackConfig(
+	raw: Record<string, unknown>,
+	resolved: NativeFallbackConfig,
+	warnings: string[],
+): void {
+	warnUnknownFields(raw, NATIVE_FALLBACK_FIELDS, "compaction.nativeFallback", warnings);
+	resolved.enabled =
+		toBoolean(raw.enabled, "compaction.nativeFallback.enabled", warnings) ?? resolved.enabled;
+
+	const modelSpec = toModelSpec(raw.model, "compaction.nativeFallback.model", warnings);
+	if (modelSpec !== undefined) {
+		resolved.model = modelSpec === null ? undefined : modelSpec;
+	}
+
+	resolved.thinkingLevel =
+		toThinkingLevel(raw.thinkingLevel, "compaction.nativeFallback.thinkingLevel", warnings) ??
+		resolved.thinkingLevel;
 }
 
 function applyAutoCompactionConfig(
@@ -265,13 +318,13 @@ function applyCompactionConfig(
 		resolved.remoteCompactModel = remoteCompactModelSpec === null ? undefined : remoteCompactModelSpec;
 	}
 
-	const modelSpec = toModelSpec(raw.model, "compaction.model", warnings);
-	if (modelSpec !== undefined) {
-		resolved.model = modelSpec === null ? undefined : modelSpec;
+	if (raw.nativeFallback !== undefined) {
+		if (isRecord(raw.nativeFallback)) {
+			applyNativeFallbackConfig(raw.nativeFallback, resolved.nativeFallback, warnings);
+		} else {
+			warnings.push("Ignoring compaction.nativeFallback: expected a JSON object.");
+		}
 	}
-
-	resolved.thinkingLevel =
-		toThinkingLevel(raw.thinkingLevel, "compaction.thinkingLevel", warnings) ?? resolved.thinkingLevel;
 
 	if (raw.autoCompaction !== undefined) {
 		if (isRecord(raw.autoCompaction)) {
@@ -306,7 +359,7 @@ function applyWebSearchConfig(
 	warnUnknownFields(raw, WEB_SEARCH_FIELDS, "webSearch", warnings);
 	resolved.enabled = toBoolean(raw.enabled, "webSearch.enabled", warnings) ?? resolved.enabled;
 
-	const models = toModelAllowlist(raw.models, "webSearch.models", warnings);
+	const models = toStringList(raw.models, "webSearch.models", warnings);
 	if (models !== undefined) {
 		resolved.models = models;
 	}
@@ -320,10 +373,36 @@ function applyImageGenerationConfig(
 	warnUnknownFields(raw, IMAGE_GENERATION_FIELDS, "imageGeneration", warnings);
 	resolved.enabled =
 		toBoolean(raw.enabled, "imageGeneration.enabled", warnings) ?? resolved.enabled;
+}
 
-	const models = toModelAllowlist(raw.models, "imageGeneration.models", warnings);
+function applyAutoModeConfig(
+	raw: Record<string, unknown>,
+	resolved: AutoModeConfig,
+	warnings: string[],
+): void {
+	warnUnknownFields(raw, AUTO_MODE_FIELDS, "autoMode", warnings);
+	resolved.enabled = toBoolean(raw.enabled, "autoMode.enabled", warnings) ?? resolved.enabled;
+
+	const models = toStringList(raw.models, "autoMode.models", warnings);
 	if (models !== undefined) {
 		resolved.models = models;
+	}
+
+	const reviewerModel = toModelSpec(raw.reviewerModel, "autoMode.reviewerModel", warnings);
+	if (reviewerModel !== undefined) {
+		resolved.reviewerModel = reviewerModel === null ? undefined : reviewerModel;
+	}
+
+	resolved.gate = toAutoModeGate(raw.gate, "autoMode.gate", warnings) ?? resolved.gate;
+
+	const extraTools = toStringList(raw.extraTools, "autoMode.extraTools", warnings);
+	if (extraTools !== undefined) {
+		resolved.extraTools = extraTools;
+	}
+
+	const timeoutMs = toReviewerTimeoutMs(raw.timeoutMs, "autoMode.timeoutMs", warnings);
+	if (timeoutMs !== undefined) {
+		resolved.timeoutMs = timeoutMs;
 	}
 }
 
@@ -363,6 +442,14 @@ export function loadToolkitConfig(configPath: string = CONFIG_PATH): LoadedToolk
 				applyImageGenerationConfig(raw.imageGeneration, resolved.imageGeneration, warnings);
 			} else {
 				warnings.push("Ignoring imageGeneration: expected a JSON object.");
+			}
+		}
+
+		if (raw.autoMode !== undefined) {
+			if (isRecord(raw.autoMode)) {
+				applyAutoModeConfig(raw.autoMode, resolved.autoMode, warnings);
+			} else {
+				warnings.push("Ignoring autoMode: expected a JSON object.");
 			}
 		}
 	}

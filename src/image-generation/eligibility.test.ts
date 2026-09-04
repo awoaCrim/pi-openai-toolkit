@@ -1,45 +1,49 @@
 import { describe, expect, test } from "bun:test";
 import { getExactModelKey, isExactModelAllowed } from "../model-scope";
+import { DEFAULT_IMAGE_GENERATION_CONFIG } from "../types";
 import { isImageGenerationEnabledForModel } from "./eligibility";
 
-const eligibleModel = {
+const responsesModel = {
 	provider: "newapi",
 	api: "openai-responses",
 	id: "gpt-5.5",
 };
 
-const enabled = { enabled: true, models: ["newapi/gpt-5.5"] };
-
 describe("exact model scope", () => {
 	test("builds and matches the exact provider/model-id", () => {
-		expect(getExactModelKey(eligibleModel)).toBe("newapi/gpt-5.5");
-		expect(isExactModelAllowed(eligibleModel, ["newapi/gpt-5.5"])).toBe(true);
-		expect(isExactModelAllowed(eligibleModel, ["other/gpt-5.5", "newapi/other"])).toBe(false);
+		expect(getExactModelKey(responsesModel)).toBe("newapi/gpt-5.5");
+		expect(isExactModelAllowed(responsesModel, ["newapi/gpt-5.5"])).toBe(true);
+		expect(isExactModelAllowed(responsesModel, ["other/gpt-5.5", "newapi/other"])).toBe(false);
 	});
 });
 
 describe("image generation eligibility", () => {
-	test("requires enabled, a supported Responses API, and an exact allowlist match", () => {
-		expect(isImageGenerationEnabledForModel(eligibleModel, enabled)).toBe(true);
-		expect(isImageGenerationEnabledForModel(eligibleModel, { ...enabled, enabled: false })).toBe(false);
-		expect(isImageGenerationEnabledForModel(eligibleModel, { enabled: true, models: [] })).toBe(false);
+	test("is disabled by default because each success may be billed", () => {
+		expect(DEFAULT_IMAGE_GENERATION_CONFIG.enabled).toBe(false);
+		expect(isImageGenerationEnabledForModel(responsesModel, DEFAULT_IMAGE_GENERATION_CONFIG)).toBe(false);
+	});
+
+	test("depends only on the switch and a Responses-capable API", () => {
+		expect(isImageGenerationEnabledForModel(responsesModel, { enabled: true })).toBe(true);
 		expect(
 			isImageGenerationEnabledForModel(
-				{ ...eligibleModel, api: "openai-codex-responses" },
-				enabled,
+				{ ...responsesModel, api: "openai-codex-responses" },
+				{ enabled: true },
 			),
 		).toBe(true);
 		expect(
 			isImageGenerationEnabledForModel(
-				{ ...eligibleModel, api: "anthropic-messages" },
-				enabled,
+				{ ...responsesModel, provider: "another-provider", id: "some-other-model" },
+				{ enabled: true },
 			),
-		).toBe(false);
+		).toBe(true);
+	});
+
+	test("stays off for non-Responses APIs and models without API metadata", () => {
 		expect(
-			isImageGenerationEnabledForModel(
-				{ ...eligibleModel, provider: "other" },
-				enabled,
-			),
+			isImageGenerationEnabledForModel({ ...responsesModel, api: "anthropic-messages" }, { enabled: true }),
 		).toBe(false);
+		expect(isImageGenerationEnabledForModel({ ...responsesModel, api: undefined }, { enabled: true })).toBe(false);
+		expect(isImageGenerationEnabledForModel(undefined, { enabled: true })).toBe(false);
 	});
 });

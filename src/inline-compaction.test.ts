@@ -72,6 +72,7 @@ function createLoadedConfig(overrides: Partial<CompactionConfig> = {}): LoadedTo
 			...DEFAULT_TOOLKIT_CONFIG,
 			compaction: {
 				...DEFAULT_COMPACTION_CONFIG,
+				nativeFallback: { ...DEFAULT_COMPACTION_CONFIG.nativeFallback },
 				autoCompaction: { ...DEFAULT_COMPACTION_CONFIG.autoCompaction },
 				responsesApis: [...DEFAULT_COMPACTION_CONFIG.responsesApis],
 				...overrides,
@@ -82,7 +83,6 @@ function createLoadedConfig(overrides: Partial<CompactionConfig> = {}): LoadedTo
 			},
 			imageGeneration: {
 				...DEFAULT_IMAGE_GENERATION_CONFIG,
-				models: [...DEFAULT_IMAGE_GENERATION_CONFIG.models],
 			},
 		},
 		warnings: [],

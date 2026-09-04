@@ -5,6 +5,7 @@ export const TOOLKIT_ID = "pi-openai-toolkit";
 export const COMPACTION_EXTENSION_ID = `${TOOLKIT_ID}:compaction`;
 export const WEB_SEARCH_EXTENSION_ID = `${TOOLKIT_ID}:web-search`;
 export const IMAGE_GENERATION_EXTENSION_ID = `${TOOLKIT_ID}:image-generation`;
+export const AUTO_MODE_EXTENSION_ID = `${TOOLKIT_ID}:auto-mode`;
 export const DEFAULT_ARTIFACT_ROOT = "~/.pi/agent/artifacts/pi-openai-toolkit/compaction";
 export const REDACTED_VALUE = "[REDACTED]";
 /**
@@ -39,6 +40,20 @@ export type DebugArtifactKind =
 
 export type CompactionContinuationMode = "inline" | "followUp" | "off";
 
+/** Native-method fallback compaction: which model runs pi's compact() and how deeply. */
+export type NativeFallbackConfig = {
+	enabled: boolean;
+	/**
+	 * "provider/model-id" used for native-method fallback compaction when the active model
+	 * cannot use remote v2 at all. A failed remote request is instead summarized by
+	 * `remoteCompactModel`; the two sources never substitute for each other. Unset means the
+	 * active model via pi's default path.
+	 */
+	model?: string;
+	/** Thinking level passed to pi's native compact() when the fallback model runs. */
+	thinkingLevel: ThinkingLevel;
+};
+
 export type AutoCompactionConfig = {
 	enabled: boolean;
 	continuation: CompactionContinuationMode;
@@ -58,13 +73,8 @@ export type CompactionConfig = {
 	 * remains the checkpoint consumer and continues handling normal requests.
 	 */
 	remoteCompactModel?: string;
-	/**
-	 * "provider/model-id" used for native-method fallback compaction (non-Responses APIs,
-	 * or when the compact endpoint fails). Unset = current model via pi's default path.
-	 */
-	model?: string;
-	/** Thinking level passed to pi's native compact() when the fallback model runs. */
-	thinkingLevel: ThinkingLevel;
+	/** Native-method fallback compaction policy (non-Responses APIs, or when the compact endpoint fails). */
+	nativeFallback: NativeFallbackConfig;
 	/** Threshold-triggered compaction and same-tool-loop continuation policy. */
 	autoCompaction: AutoCompactionConfig;
 	/** Subset of RESPONSES_COMPACT_CAPABLE_APIS that should use remote compaction. */
@@ -85,14 +95,32 @@ export type WebSearchConfig = {
 
 export type ImageGenerationConfig = {
 	enabled: boolean;
-	/** Exact provider/model keys allowed to use toolkit-native image generation. */
-	models: string[];
 };
+
+/** `side-effect` reviews bash/write/edit plus extras; `all` reviews every tool call. */
+export type AutoModeGate = "side-effect" | "all";
+
+export type AutoModeConfig = {
+	enabled: boolean;
+	/** Exact provider/model keys whose sessions may engage auto mode. */
+	models: string[];
+	/** "provider/model-id" that approves gated tool calls while auto mode is engaged. */
+	reviewerModel?: string;
+	gate: AutoModeGate;
+	/** Extra tool names reviewed on top of the side-effect default set. */
+	extraTools: string[];
+	/** Reviewer deadline in ms; expiry degrades to human confirmation or fail-closed. */
+	timeoutMs: number;
+};
+
+export const REVIEWER_TIMEOUT_MIN_MS = 1_000;
+export const REVIEWER_TIMEOUT_MAX_MS = 120_000;
 
 export type ToolkitConfig = {
 	compaction: CompactionConfig;
 	webSearch: WebSearchConfig;
 	imageGeneration: ImageGenerationConfig;
+	autoMode: AutoModeConfig;
 };
 
 export type LoadedToolkitConfig = {
@@ -425,12 +453,17 @@ export const DEFAULT_AUTO_COMPACTION_CONFIG: AutoCompactionConfig = {
 	reserveTokens: undefined,
 };
 
+export const DEFAULT_NATIVE_FALLBACK_CONFIG: NativeFallbackConfig = {
+	enabled: true,
+	model: undefined,
+	thinkingLevel: "off",
+};
+
 export const DEFAULT_COMPACTION_CONFIG: CompactionConfig = {
 	enabled: true,
 	allowCompactionContinuityBreak: false,
 	remoteCompactModel: undefined,
-	model: undefined,
-	thinkingLevel: "off",
+	nativeFallback: { ...DEFAULT_NATIVE_FALLBACK_CONFIG },
 	autoCompaction: { ...DEFAULT_AUTO_COMPACTION_CONFIG },
 	responsesApis: [...RESPONSES_COMPACT_CAPABLE_APIS],
 	notifyOnLoad: false,
@@ -447,12 +480,21 @@ export const DEFAULT_WEB_SEARCH_CONFIG: WebSearchConfig = {
 };
 
 export const DEFAULT_IMAGE_GENERATION_CONFIG: ImageGenerationConfig = {
+	enabled: false,
+};
+
+export const DEFAULT_AUTO_MODE_CONFIG: AutoModeConfig = {
 	enabled: true,
 	models: [],
+	reviewerModel: undefined,
+	gate: "side-effect",
+	extraTools: [],
+	timeoutMs: 30_000,
 };
 
 export const DEFAULT_TOOLKIT_CONFIG: ToolkitConfig = {
 	compaction: DEFAULT_COMPACTION_CONFIG,
 	webSearch: DEFAULT_WEB_SEARCH_CONFIG,
 	imageGeneration: DEFAULT_IMAGE_GENERATION_CONFIG,
+	autoMode: DEFAULT_AUTO_MODE_CONFIG,
 };

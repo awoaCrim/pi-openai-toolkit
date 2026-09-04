@@ -316,6 +316,7 @@ async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx:
 	}
 
 	// Branch 1: Responses-family APIs use remote_compaction_v2 on the normal Responses stream.
+	let remoteAttempted = false;
 	const resolution = await resolveRemoteCompactionExecution(
 		ctx,
 		{
@@ -325,6 +326,7 @@ async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx:
 		config.remoteCompactModel,
 	);
 	if (resolution.ok) {
+		remoteAttempted = true;
 		const responsesOutcome = await runResponsesNativeCompact(event, ctx, config, resolution.execution);
 		if (responsesOutcome.outcome === "success") {
 			return { compaction: responsesOutcome.compaction };
@@ -357,8 +359,10 @@ async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx:
 		}
 	}
 
-	// Branch 2: run pi's native compaction method with the configured model.
-	const fallback = await runNativeFallbackCompaction({ ctx, event, config });
+	// Branch 2: run pi's native compaction method. A failed remote request is compacted by the
+	// remote producer itself; a model that cannot use remote v2 at all uses nativeFallback.model.
+	const fallbackModelSpec = remoteAttempted ? config.remoteCompactModel : config.nativeFallback.model;
+	const fallback = await runNativeFallbackCompaction({ ctx, event, config, modelSpec: fallbackModelSpec });
 	if (fallback.ok) {
 		if (ctx.hasUI) {
 			ctx.ui.notify(
@@ -394,8 +398,12 @@ async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx:
 		ctx,
 	);
 
-	// Intentional pi-default paths: no configured model, or it matches the current one.
-	if (fallback.reason !== "no-model-configured" && fallback.reason !== "same-as-current-model") {
+	// Intentional pi-default paths: feature disabled, nothing configured, or it matches the current one.
+	const intentionalSkip =
+		fallback.reason === "disabled" ||
+		fallback.reason === "no-model-configured" ||
+		fallback.reason === "same-as-current-model";
+	if (!intentionalSkip) {
 		notifyWarning(
 			ctx,
 			`compaction model "${fallback.modelSpec}" unusable (${fallback.reason}${fallback.errorMessage ? `: ${fallback.errorMessage}` : ""}); using pi's default compaction`,

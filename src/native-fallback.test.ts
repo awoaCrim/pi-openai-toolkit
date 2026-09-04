@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { DEFAULT_COMPACTION_CONFIG, type CompactionConfig } from "./types";
+import { DEFAULT_COMPACTION_CONFIG, DEFAULT_NATIVE_FALLBACK_CONFIG, type CompactionConfig, type NativeFallbackConfig } from "./types";
 
 let importCounter = 0;
 
@@ -60,8 +60,13 @@ function createConfig(overrides: Partial<CompactionConfig> = {}): CompactionConf
 	return {
 		...DEFAULT_COMPACTION_CONFIG,
 		responsesApis: [...DEFAULT_COMPACTION_CONFIG.responsesApis],
+		nativeFallback: { ...DEFAULT_NATIVE_FALLBACK_CONFIG },
 		...overrides,
 	};
+}
+
+function withFallback(overrides: Partial<NativeFallbackConfig> = {}): Partial<CompactionConfig> {
+	return { nativeFallback: { ...DEFAULT_NATIVE_FALLBACK_CONFIG, ...overrides } };
 }
 
 afterEach(() => {
@@ -94,7 +99,7 @@ describe("parseModelSpec", () => {
 });
 
 describe("runNativeFallbackCompaction", () => {
-	test("returns no-model-configured when compaction.model is unset", async () => {
+	test("returns no-model-configured when the caller supplies no model spec", async () => {
 		const { runNativeFallbackCompaction } = await loadNativeFallbackModule();
 
 		const result = await runNativeFallbackCompaction({
@@ -106,13 +111,75 @@ describe("runNativeFallbackCompaction", () => {
 		expect(result).toEqual({ ok: false, reason: "no-model-configured" });
 	});
 
+	test("returns disabled without touching the registry when the switch is off", async () => {
+		const { runNativeFallbackCompaction } = await loadNativeFallbackModule();
+
+		const result = await runNativeFallbackCompaction({
+			ctx: createCtx({ registryModels: [{ provider: "google", id: "gemini-2.5-flash" }] }),
+			event: createEvent(),
+			config: createConfig(withFallback({ enabled: false })),
+			modelSpec: "google/gemini-2.5-flash",
+		});
+
+		expect(result).toEqual({ ok: false, reason: "disabled" });
+	});
+
+	test("the native chain ignores remoteCompactModel unless the caller passes it explicitly", async () => {
+		const { runNativeFallbackCompaction } = await loadNativeFallbackModule();
+		let compactCalls = 0;
+
+		const result = await runNativeFallbackCompaction({
+			ctx: createCtx({
+				currentModel: { provider: "uwoacrimson", id: "gpt-5.6-sol" },
+				registryModels: [{ provider: "uwoacrimson", id: "gpt-5.6-luna" }],
+			}),
+			event: createEvent(),
+			config: createConfig({ remoteCompactModel: "uwoacrimson/gpt-5.6-luna" }),
+			compactFn: (async () => {
+				compactCalls += 1;
+				return { summary: "unused", firstKeptEntryId: "entry-keep", tokensBefore: 1, details: {} };
+			}) as never,
+		});
+
+		expect(result).toEqual({ ok: false, reason: "no-model-configured" });
+		expect(compactCalls).toBe(0);
+	});
+
+	test("the caller-supplied spec drives the native chain regardless of remoteCompactModel", async () => {
+		const { runNativeFallbackCompaction } = await loadNativeFallbackModule();
+		const explicitModel = { provider: "google", id: "gemini-2.5-flash" };
+
+		const result = await runNativeFallbackCompaction({
+			ctx: createCtx({
+				currentModel: { provider: "uwoacrimson", id: "gpt-5.6-sol" },
+				registryModels: [{ provider: "uwoacrimson", id: "gpt-5.6-luna" }, explicitModel],
+			}),
+			event: createEvent(),
+			config: createConfig({
+				remoteCompactModel: "uwoacrimson/gpt-5.6-luna",
+				nativeFallback: { ...DEFAULT_NATIVE_FALLBACK_CONFIG, model: "google/gemini-2.5-flash" },
+			}),
+			modelSpec: "google/gemini-2.5-flash",
+			compactFn: (async () => ({
+				summary: "## Goal\nExplicit summary model.",
+				firstKeptEntryId: "entry-keep",
+				tokensBefore: 1234,
+				details: {},
+			})) as never,
+		});
+
+		expect(result.ok).toBe(true);
+		if (result.ok) expect(result.model).toEqual({ provider: "google", id: "gemini-2.5-flash" });
+	});
+
 	test("returns invalid-model-spec for malformed specs", async () => {
 		const { runNativeFallbackCompaction } = await loadNativeFallbackModule();
 
 		const result = await runNativeFallbackCompaction({
 			ctx: createCtx({}),
 			event: createEvent(),
-			config: createConfig({ model: "not-a-spec" }),
+			config: createConfig(),
+			modelSpec: "not-a-spec",
 		});
 
 		expect(result).toEqual({ ok: false, reason: "invalid-model-spec", modelSpec: "not-a-spec" });
@@ -124,7 +191,8 @@ describe("runNativeFallbackCompaction", () => {
 		const result = await runNativeFallbackCompaction({
 			ctx: createCtx({ registryModels: [] }),
 			event: createEvent(),
-			config: createConfig({ model: "google/gemini-2.5-flash" }),
+			config: createConfig(),
+			modelSpec: "google/gemini-2.5-flash",
 		});
 
 		expect(result).toEqual({ ok: false, reason: "model-not-found", modelSpec: "google/gemini-2.5-flash" });
@@ -137,7 +205,8 @@ describe("runNativeFallbackCompaction", () => {
 		const result = await runNativeFallbackCompaction({
 			ctx: createCtx({ currentModel: model, registryModels: [model] }),
 			event: createEvent(),
-			config: createConfig({ model: "anthropic/claude-fable-5" }),
+			config: createConfig(),
+			modelSpec: "anthropic/claude-fable-5",
 		});
 
 		expect(result).toEqual({
@@ -157,7 +226,8 @@ describe("runNativeFallbackCompaction", () => {
 				auth: { ok: false, error: "no API key configured" },
 			}),
 			event: createEvent(),
-			config: createConfig({ model: "google/gemini-2.5-flash" }),
+			config: createConfig(),
+			modelSpec: "google/gemini-2.5-flash",
 		});
 
 		expect(result).toEqual({
@@ -192,7 +262,8 @@ describe("runNativeFallbackCompaction", () => {
 				},
 			}),
 			event,
-			config: createConfig({ model: "google/gemini-2.5-flash", thinkingLevel: "low" }),
+			config: createConfig(withFallback({ thinkingLevel: "low" })),
+			modelSpec: "google/gemini-2.5-flash",
 			compactFn: (async (...args: unknown[]) => {
 				compactCalls.push(args);
 				return compactionResult;
@@ -226,7 +297,8 @@ describe("runNativeFallbackCompaction", () => {
 				registryModels: [{ provider: "google", id: "gemini-2.5-flash" }],
 			}),
 			event: createEvent(),
-			config: createConfig({ model: "google/gemini-2.5-flash" }),
+			config: createConfig(),
+			modelSpec: "google/gemini-2.5-flash",
 			compactFn: (async () => {
 				throw new DOMException("The operation was aborted.", "AbortError");
 			}) as never,
@@ -247,7 +319,8 @@ describe("runNativeFallbackCompaction", () => {
 				registryModels: [{ provider: "google", id: "gemini-2.5-flash" }],
 			}),
 			event: createEvent(),
-			config: createConfig({ model: "google/gemini-2.5-flash" }),
+			config: createConfig(),
+			modelSpec: "google/gemini-2.5-flash",
 			compactFn: (async () => {
 				throw new Error("Summarization failed: rate limited");
 			}) as never,
@@ -269,7 +342,8 @@ describe("runNativeFallbackCompaction", () => {
 				registryModels: [{ provider: "google", id: "gemini-2.5-flash" }],
 			}),
 			event: createEvent(),
-			config: createConfig({ model: "google/gemini-2.5-flash" }),
+			config: createConfig(),
+			modelSpec: "google/gemini-2.5-flash",
 			compactFn: (async () => ({
 				summary: "   ",
 				firstKeptEntryId: "entry-keep",

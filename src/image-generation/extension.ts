@@ -98,10 +98,10 @@ export function registerImageGenerationExtension(
 		name: IMAGE_GENERATION_TOOL_NAME,
 		label: "OpenAI Generate Image",
 		description:
-			"Generate a PNG image, or edit from one to five user-approved local reference images, through the current allowlisted Responses model and the hosted gpt-image-2 image_generation tool. This is a paid provider operation.",
-		promptSnippet: "Generate or edit PNG images through the current allowlisted Responses model and gpt-image-2.",
+			"Generate a PNG image, or edit from one to five user-approved local reference images, through the current Responses-capable model and the hosted gpt-image-2 image_generation tool. This is a paid provider operation.",
+		promptSnippet: "Generate or edit PNG images through the current Responses-capable model and gpt-image-2.",
 		promptGuidelines: [
-			"Use openai_generate_image when the user explicitly asks to create, draw, render, or edit a raster image.",
+			"Use openai_generate_image when the user explicitly asks to create, draw, render, or edit a raster image and the active model speaks a Responses API.",
 			"Do not call openai_generate_image speculatively: it consumes the user's provider or gateway image quota.",
 			"Keep the image prompt faithful to the user's requested subject and constraints; do not invent unrequested style details.",
 			"Set referenceImagePaths to null unless the user explicitly identified local files; never invent paths or placeholder strings, and remember upload requires user approval.",
