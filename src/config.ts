@@ -8,6 +8,7 @@ import {
 	DEFAULT_AUTO_COMPACTION_CONFIG,
 	DEFAULT_AUTO_MODE_CONFIG,
 	DEFAULT_IMAGE_GENERATION_CONFIG,
+	DEFAULT_CODEX_ASTRA_CONFIG,
 	DEFAULT_NATIVE_FALLBACK_CONFIG,
 	DEFAULT_WEB_SEARCH_CONFIG,
 	RESPONSES_COMPACT_CAPABLE_APIS,
@@ -28,6 +29,7 @@ import {
 	type AutoModeClassifierConfig,
 	type AutoModeConfig,
 	type AutoModeGate,
+	type CodexAstraConfig,
 	type CompactionConfig,
 	type ImageGenerationConfig,
 	type LoadedToolkitConfig,
@@ -39,7 +41,7 @@ import {
 export const CONFIG_DIR = path.join(os.homedir(), ".pi", "agent", "extensions", TOOLKIT_ID);
 export const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 
-const TOP_LEVEL_FIELDS = new Set(["compaction", "webSearch", "imageGeneration", "autoMode"]);
+const TOP_LEVEL_FIELDS = new Set(["compaction", "webSearch", "imageGeneration", "autoMode", "codexAstra"]);
 const COMPACTION_FIELDS = new Set([
 	"enabled",
 	"allowCompactionContinuityBreak",
@@ -58,6 +60,7 @@ const NATIVE_FALLBACK_FIELDS = new Set(["enabled", "model", "thinkingLevel"]);
 const AUTO_COMPACTION_FIELDS = new Set(["enabled", "continuation", "unsupportedFallback", "reserveTokens"]);
 const WEB_SEARCH_FIELDS = new Set(["enabled", "models"]);
 const IMAGE_GENERATION_FIELDS = new Set(["enabled"]);
+const CODEX_ASTRA_FIELDS = new Set(["enabled", "models"]);
 const AUTO_MODE_FIELDS = new Set([
 	"enabled",
 	"models",
@@ -269,6 +272,10 @@ function cloneDefaults(): ToolkitConfig {
 			models: [...DEFAULT_WEB_SEARCH_CONFIG.models],
 		},
 		imageGeneration: { ...DEFAULT_IMAGE_GENERATION_CONFIG },
+		codexAstra: {
+			...DEFAULT_CODEX_ASTRA_CONFIG,
+			models: [...DEFAULT_CODEX_ASTRA_CONFIG.models],
+		},
 		autoMode: {
 			...DEFAULT_AUTO_MODE_CONFIG,
 			models: [...DEFAULT_AUTO_MODE_CONFIG.models],
@@ -415,6 +422,20 @@ function applyImageGenerationConfig(
 	warnUnknownFields(raw, IMAGE_GENERATION_FIELDS, "imageGeneration", warnings);
 	resolved.enabled =
 		toBoolean(raw.enabled, "imageGeneration.enabled", warnings) ?? resolved.enabled;
+}
+
+function applyCodexAstraConfig(
+	raw: Record<string, unknown>,
+	resolved: CodexAstraConfig,
+	warnings: string[],
+): void {
+	warnUnknownFields(raw, CODEX_ASTRA_FIELDS, "codexAstra", warnings);
+	resolved.enabled = toBoolean(raw.enabled, "codexAstra.enabled", warnings) ?? resolved.enabled;
+
+	const models = toStringList(raw.models, "codexAstra.models", warnings);
+	if (models !== undefined) {
+		resolved.models = models;
+	}
 }
 
 function applyAutoModeConfig(
@@ -602,6 +623,14 @@ export function loadToolkitConfig(configPath: string = CONFIG_PATH): LoadedToolk
 				applyAutoModeConfig(raw.autoMode, resolved.autoMode, warnings);
 			} else {
 				warnings.push("Ignoring autoMode: expected a JSON object.");
+			}
+		}
+
+		if (raw.codexAstra !== undefined) {
+			if (isRecord(raw.codexAstra)) {
+				applyCodexAstraConfig(raw.codexAstra, resolved.codexAstra, warnings);
+			} else {
+				warnings.push("Ignoring codexAstra: expected a JSON object.");
 			}
 		}
 	}

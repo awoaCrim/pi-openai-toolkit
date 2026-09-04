@@ -97,6 +97,12 @@ export type ImageGenerationConfig = {
 	enabled: boolean;
 };
 
+export type CodexAstraConfig = {
+	enabled: boolean;
+	/** Exact provider/model keys that receive the stable-effort `configuration_update` rewrite. */
+	models: string[];
+};
+
 /** `side-effect` reviews bash/write/edit plus extras; `all` reviews every tool call. */
 export type AutoModeGate = "side-effect" | "all";
 
@@ -162,6 +168,7 @@ export type ToolkitConfig = {
 	webSearch: WebSearchConfig;
 	imageGeneration: ImageGenerationConfig;
 	autoMode: AutoModeConfig;
+	codexAstra: CodexAstraConfig;
 };
 
 export type LoadedToolkitConfig = {
@@ -524,6 +531,11 @@ export const DEFAULT_IMAGE_GENERATION_CONFIG: ImageGenerationConfig = {
 	enabled: false,
 };
 
+export const DEFAULT_CODEX_ASTRA_CONFIG: CodexAstraConfig = {
+	enabled: false,
+	models: [],
+};
+
 export const DEFAULT_AUTO_MODE_CONFIG: AutoModeConfig = {
 	enabled: true,
 	models: [],
@@ -552,4 +564,5 @@ export const DEFAULT_TOOLKIT_CONFIG: ToolkitConfig = {
 	webSearch: DEFAULT_WEB_SEARCH_CONFIG,
 	imageGeneration: DEFAULT_IMAGE_GENERATION_CONFIG,
 	autoMode: DEFAULT_AUTO_MODE_CONFIG,
+	codexAstra: DEFAULT_CODEX_ASTRA_CONFIG,
 };

@@ -54,6 +54,12 @@ export type ResponsesRuntime = {
 	headers?: ProviderHeaders;
 	responsesPath: string;
 	responsesUrl: string;
+	/**
+	 * Conversation identity for Codex prompt-cache affinity headers. Synthetic
+	 * compaction/review requests must present the same id the live transcript
+	 * requests used or the backend treats them as a new conversation.
+	 */
+	sessionId?: string;
 	currentModel: RuntimeModel;
 };
 
@@ -229,6 +235,15 @@ export function getRuntimeModelDescriptor(model: RuntimeModel | undefined): {
 	};
 }
 
+/** Best-effort conversation id; header emission then simply skips the affinity headers. */
+export function resolveRuntimeSessionId(ctx: ExtensionContext): string | undefined {
+	try {
+		return ctx.sessionManager.getSessionId();
+	} catch {
+		return undefined;
+	}
+}
+
 async function resolveNativeCompactionEnvironmentForModel(
 	ctx: ExtensionContext,
 	currentModel: RuntimeModel | undefined,
@@ -336,6 +351,7 @@ async function resolveNativeCompactionEnvironmentForModel(
 			responsesUrl: buildResponsesUrl(baseUrl, descriptor.api),
 			compactPath: buildCompactPath(descriptor.api),
 			compactUrl: buildCompactUrl(baseUrl, descriptor.api),
+			sessionId: resolveRuntimeSessionId(ctx),
 			payload: requestPayload,
 			currentModel,
 		},
@@ -361,6 +377,7 @@ export async function resolveResponsesEnvironment(
 			headers: runtime.headers,
 			responsesPath: runtime.responsesPath,
 			responsesUrl: runtime.responsesUrl,
+			sessionId: runtime.sessionId,
 			currentModel: runtime.currentModel,
 		},
 	};

@@ -1,6 +1,6 @@
 {
   "name": "pi-openai-toolkit",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": false,
   "type": "module",
   "description": "OpenAI-focused Pi toolkit providing remote Responses compaction, native Web Search, native image generation, and model-reviewed auto mode.",
@@ -34,7 +34,8 @@
       "./extensions/compaction.ts",
       "./extensions/web-search.ts",
       "./extensions/image-generation.ts",
-      "./extensions/auto-mode.ts"
+      "./extensions/auto-mode.ts",
+      "./extensions/codex-astra.ts"
     ]
   },
   "files": [
@@ -65,6 +66,9 @@
     "src/auto-mode/reviewer.ts",
     "src/auto-mode/classifier.ts",
     "src/auto-mode/types.ts",
+    "extensions/codex-astra.ts",
+    "src/codex-astra/effort-planner.ts",
+    "src/codex-astra/extension.ts",
     "src/model-scope.ts",
     "src/native-fallback.ts",
     "src/payload-rewrite.ts",

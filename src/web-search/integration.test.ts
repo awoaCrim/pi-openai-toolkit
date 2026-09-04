@@ -34,6 +34,7 @@ describe("Compaction and Web Search integration", () => {
 			"./extensions/web-search.ts",
 			"./extensions/image-generation.ts",
 			"./extensions/auto-mode.ts",
+			"./extensions/codex-astra.ts",
 		]);
 		const extensions = packageJson.pi?.extensions ?? [];
 		expect(extensions.indexOf("./extensions/compaction.ts")).toBeLessThan(

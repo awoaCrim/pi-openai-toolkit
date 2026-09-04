@@ -1,5 +1,6 @@
 import { writeDebugArtifact } from "./debug";
 import { buildResponsesRequestHeaders } from "./responses-headers";
+import { stripConfigurationUpdateItems } from "./remote-v2-client";
 import type { NativeCompactionRuntime } from "./runtime";
 import type { NativeCompactionRequestBody } from "./serializer";
 import type { ArtifactContext, CompactionConfig } from "./types";
@@ -114,7 +115,10 @@ export function extractCompactedSummaryText(output: readonly unknown[]): string 
 
 function toHeaders(runtime: NativeCompactionRuntime): Record<string, string> {
 	return Object.fromEntries(
-		buildResponsesRequestHeaders(runtime, { accept: JSON_CONTENT_TYPE }).entries(),
+		buildResponsesRequestHeaders(runtime, {
+			accept: JSON_CONTENT_TYPE,
+			sessionId: runtime.sessionId,
+		}).entries(),
 	);
 }
 
@@ -133,7 +137,13 @@ function writeCompactArtifact(
 export async function executeNativeCompaction(
 	options: ExecuteNativeCompactionOptions,
 ): Promise<NativeCompactionClientResult> {
-	const { runtime, request, signal, settings, context } = options;
+	const { runtime, signal, settings, context } = options;
+	// Same Astra-history rejection as remote v2: `/responses/compact` rejects
+	// `configuration_update` items, so a replayed history never carries one.
+	const request: NativeCompactionRequestBody = {
+		...options.request,
+		input: stripConfigurationUpdateItems(options.request.input) as NativeCompactionRequestBody["input"],
+	};
 	const headers = toHeaders(runtime);
 
 	if (signal?.aborted) {

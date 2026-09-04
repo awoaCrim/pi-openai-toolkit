@@ -10,6 +10,7 @@ const targets = [
 	["Web Search entry", "web_search"],
 	["image generation entry", "image_generation"],
 	["auto mode entry", "auto_mode"],
+	["codex astra entry", "codex_astra"],
 	["complete package", "package"],
 ] as const;
 

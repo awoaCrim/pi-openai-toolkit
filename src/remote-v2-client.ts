@@ -119,8 +119,21 @@ function toHeaders(runtime: NativeCompactionRuntime): Record<string, string> {
 		buildResponsesRequestHeaders(runtime, {
 			accept: SSE_CONTENT_TYPE,
 			contentType: JSON_CONTENT_TYPE,
+			sessionId: runtime.sessionId,
 		}).entries(),
 	);
+}
+
+/**
+ * Codex `/responses` rejects histories that mix this Astra-only item into a
+ * compaction request (verified upstream in Oh My Pi: the compaction path is
+ * deliberately built outside the effort planner). The host never emits the
+ * item into a payload we would replay today, but the item is transparently
+ * carried by our opaque-window replay, so strip it defensively on every
+ * remote v2 request regardless of API family.
+ */
+export function stripConfigurationUpdateItems(input: readonly unknown[]): unknown[] {
+	return input.filter((item) => !isRecord(item) || item["type"] !== "configuration_update");
 }
 
 export function buildRemoteV2CompactionRequest(
@@ -128,7 +141,10 @@ export function buildRemoteV2CompactionRequest(
 ): RemoteV2CompactionRequestBody {
 	return {
 		...structuredClone(request),
-		input: [...structuredClone(request.input), { type: "compaction_trigger" }],
+		input: [
+			...(stripConfigurationUpdateItems(structuredClone(request.input)) as ResponsesInputItem[]),
+			{ type: "compaction_trigger" },
+		],
 		store: false,
 		stream: true,
 	};

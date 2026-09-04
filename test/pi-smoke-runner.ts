@@ -30,6 +30,7 @@ const targetByName: Record<string, string> = {
 	web_search: join(packageDir, "extensions/web-search.ts"),
 	image_generation: join(packageDir, "extensions/image-generation.ts"),
 	auto_mode: join(packageDir, "extensions/auto-mode.ts"),
+	codex_astra: join(packageDir, "extensions/codex-astra.ts"),
 	package: packageDir,
 };
 const targetName = process.argv[2];

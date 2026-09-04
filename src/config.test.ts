@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { CONFIG_PATH, loadToolkitConfig } from "./config";
 import {
 	DEFAULT_AUTO_MODE_CONFIG,
+	DEFAULT_CODEX_ASTRA_CONFIG,
 	DEFAULT_COMPACTION_CONFIG,
 	DEFAULT_IMAGE_GENERATION_CONFIG,
 	DEFAULT_NATIVE_FALLBACK_CONFIG,
@@ -59,6 +60,10 @@ describe("loadToolkitConfig", () => {
 			models: [...DEFAULT_WEB_SEARCH_CONFIG.models],
 		});
 		expect(loaded.config.imageGeneration).toEqual({ ...DEFAULT_IMAGE_GENERATION_CONFIG });
+		expect(loaded.config.codexAstra).toEqual({
+			...DEFAULT_CODEX_ASTRA_CONFIG,
+			models: [...DEFAULT_CODEX_ASTRA_CONFIG.models],
+		});
 		expect(loaded.config.autoMode).toEqual({
 			...DEFAULT_AUTO_MODE_CONFIG,
 			models: [...DEFAULT_AUTO_MODE_CONFIG.models],
@@ -114,6 +119,10 @@ describe("loadToolkitConfig", () => {
 					},
 					circuitBreaker: { consecutiveDenials: 4, recentDenials: 12, windowSize: 40 },
 				},
+				codexAstra: {
+					enabled: true,
+					models: [" openai-codex/gpt-6-astra ", "openai-codex/gpt-6-astra", ""],
+				},
 			}),
 		);
 
@@ -158,6 +167,30 @@ describe("loadToolkitConfig", () => {
 			},
 			circuitBreaker: { consecutiveDenials: 4, recentDenials: 12, windowSize: 40 },
 		});
+		expect(loaded.config.codexAstra).toEqual({
+			enabled: true,
+			models: ["openai-codex/gpt-6-astra"],
+		});
+	});
+
+	test("codexAstra section validates fields independently and warns on unknown keys", () => {
+		const configPath = writeTempConfig(
+			JSON.stringify({
+				codexAstra: {
+					enabled: "yes",
+					models: "openai-codex/gpt-6-astra",
+					notAField: true,
+				},
+			}),
+		);
+		const loaded = loadToolkitConfig(configPath);
+
+		expect(loaded.config.codexAstra).toEqual({ enabled: false, models: [] });
+		expect(loaded.warnings).toEqual([
+			"Ignoring codexAstra.notAField: unknown field.",
+			'Ignoring codexAstra.enabled: expected a boolean.',
+			"Ignoring codexAstra.models: expected a string array.",
+		]);
 	});
 
 	test("auto mode review knobs keep their defaults and warn per invalid field", () => {

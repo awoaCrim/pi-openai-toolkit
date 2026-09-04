@@ -473,3 +473,128 @@ test("executeNativeCompaction serializes codex-aligned passthrough fields and ex
 	expect(requestBody.text).toEqual({ verbosity: "low" });
 	expect("service_tier" in requestBody).toBe(false);
 });
+
+test("remote v2 compaction request strips Astra configuration_update items from replayed history", async () => {
+	let requestBody: Record<string, unknown> = {};
+	globalThis.fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+		requestBody = JSON.parse(String(init?.body));
+		const opaque = { type: "compaction", id: "cmp_v2", encrypted_content: "opaque-v2" };
+		return new Response(
+			[
+				`event: response.created\ndata: ${JSON.stringify({ type: "response.created", response: { id: "resp_v2", status: "in_progress", output: [] } })}`,
+				`event: response.output_item.done\ndata: ${JSON.stringify({ type: "response.output_item.done", item: opaque })}`,
+				`event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { id: "resp_v2", created_at: 1_800_000_000, status: "completed", output: [opaque], usage: {} } })}`,
+			].join("\n\n"),
+			{ status: 200, headers: { "content-type": "text/event-stream" } },
+		);
+	}) as typeof fetch;
+
+	const result = await executeRemoteV2Compaction({
+		runtime: {
+			provider: "openai-codex",
+			api: "openai-codex-responses",
+			model: "gpt-6-astra",
+			baseUrl: "https://chatgpt.com/backend-api",
+			apiKey: createJwtWithAccountId("acct_1"),
+			responsesPath: "codex/responses",
+			responsesUrl: buildResponsesUrl("https://chatgpt.com/backend-api", "openai-codex-responses"),
+			compactPath: "codex/responses/compact",
+			compactUrl: buildCompactUrl("https://chatgpt.com/backend-api", "openai-codex-responses"),
+			sessionId: "sess-astra",
+			currentModel: { ...baseModel, provider: "openai-codex", api: "openai-codex-responses", id: "gpt-6-astra", name: "gpt-6-astra", baseUrl: "https://chatgpt.com/backend-api" },
+		},
+		request: {
+			model: "gpt-6-astra",
+			instructions: "compact this",
+			input: [
+				{ role: "user", content: [{ type: "input_text", text: "hello" }] },
+				{ type: "configuration_update", reasoning: { effort: "high" } },
+				{ role: "user", content: [{ type: "input_text", text: "again" }] },
+			],
+		},
+	});
+
+	expect(result.ok).toBe(true);
+	const input = requestBody.input as Array<Record<string, unknown>>;
+	expect(input.some((item) => item.type === "configuration_update")).toBe(false);
+	expect(input[input.length - 1]).toEqual({ type: "compaction_trigger" });
+	expect(requestBody.model).toBe("gpt-6-astra");
+});
+
+test("native v1 compact request strips Astra configuration_update items", async () => {
+	let requestBody: Record<string, unknown> = {};
+	globalThis.fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+		requestBody = JSON.parse(String(init?.body));
+		return new Response(JSON.stringify({ output: [{ type: "compaction", encrypted_content: "opaque" }] }), {
+			status: 200,
+			headers: { "content-type": "application/json" },
+		});
+	}) as typeof fetch;
+
+	const result = await executeNativeCompaction({
+		runtime: {
+			provider: "openai-codex",
+			api: "openai-codex-responses",
+			model: "gpt-6-astra",
+			baseUrl: "https://chatgpt.com/backend-api",
+			apiKey: createJwtWithAccountId("acct_1"),
+			responsesPath: "codex/responses",
+			responsesUrl: buildResponsesUrl("https://chatgpt.com/backend-api", "openai-codex-responses"),
+			compactPath: "codex/responses/compact",
+			compactUrl: buildCompactUrl("https://chatgpt.com/backend-api", "openai-codex-responses"),
+			sessionId: "sess-astra",
+			currentModel: { ...baseModel, provider: "openai-codex", api: "openai-codex-responses", id: "gpt-6-astra", name: "gpt-6-astra", baseUrl: "https://chatgpt.com/backend-api" },
+		},
+		request: {
+			model: "gpt-6-astra",
+			instructions: "compact this",
+			input: [
+				{ type: "configuration_update", reasoning: { effort: "max" } },
+				{ role: "user", content: [{ type: "input_text", text: "hello" }] },
+			],
+		},
+	});
+
+	expect(result.ok).toBe(true);
+	const input = requestBody.input as Array<Record<string, unknown>>;
+	expect(input).toHaveLength(1);
+	expect(input[0]!.type).not.toBe("configuration_update");
+});
+
+test("codex compaction requests carry the version gate and session affinity headers", async () => {
+	let fetchInit: RequestInit | undefined;
+	globalThis.fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
+		fetchInit = init;
+		return new Response(JSON.stringify({ output: [{ type: "compaction", encrypted_content: "opaque" }] }), {
+			status: 200,
+			headers: { "content-type": "application/json" },
+		});
+	}) as typeof fetch;
+
+	await executeNativeCompaction({
+		runtime: {
+			provider: "openai-codex",
+			api: "openai-codex-responses",
+			model: "gpt-6-astra",
+			baseUrl: "https://chatgpt.com/backend-api",
+			apiKey: createJwtWithAccountId("acct_9"),
+			responsesPath: "codex/responses",
+			responsesUrl: buildResponsesUrl("https://chatgpt.com/backend-api", "openai-codex-responses"),
+			compactPath: "codex/responses/compact",
+			compactUrl: buildCompactUrl("https://chatgpt.com/backend-api", "openai-codex-responses"),
+			sessionId: "sess-affinity",
+			currentModel: { ...baseModel, provider: "openai-codex", api: "openai-codex-responses", id: "gpt-6-astra", name: "gpt-6-astra", baseUrl: "https://chatgpt.com/backend-api" },
+		},
+		request: {
+			model: "gpt-6-astra",
+			instructions: "compact this",
+			input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
+		},
+	});
+
+	const headers = new Headers(fetchInit?.headers);
+	expect(headers.get("version")).toBe("0.153.0");
+	expect(headers.get("session-id")).toBe("sess-affinity");
+	expect(headers.get("x-client-request-id")).toBe("sess-affinity");
+	expect(headers.get("chatgpt-account-id")).toBe("acct_9");
+});
