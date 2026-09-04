@@ -11,10 +11,21 @@ import {
 	DEFAULT_NATIVE_FALLBACK_CONFIG,
 	DEFAULT_WEB_SEARCH_CONFIG,
 	RESPONSES_COMPACT_CAPABLE_APIS,
+	BREAKER_LIMIT_MAX,
+	BREAKER_LIMIT_MIN,
+	BREAKER_WINDOW_MAX,
+	BREAKER_WINDOW_MIN,
+	CLASSIFIER_MAX_LAG_MAX,
+	CLASSIFIER_MAX_LAG_MIN,
+	DEFAULT_CLASSIFIER_TIMEOUT_MS,
+	EVIDENCE_ROUNDS_MAX,
+	EVIDENCE_ROUNDS_MIN,
 	REVIEWER_TIMEOUT_MAX_MS,
 	REVIEWER_TIMEOUT_MIN_MS,
 	THINKING_LEVELS,
 	TOOLKIT_ID,
+	type AutoModeCircuitBreakerConfig,
+	type AutoModeClassifierConfig,
 	type AutoModeConfig,
 	type AutoModeGate,
 	type CompactionConfig,
@@ -47,7 +58,21 @@ const NATIVE_FALLBACK_FIELDS = new Set(["enabled", "model", "thinkingLevel"]);
 const AUTO_COMPACTION_FIELDS = new Set(["enabled", "continuation", "unsupportedFallback", "reserveTokens"]);
 const WEB_SEARCH_FIELDS = new Set(["enabled", "models"]);
 const IMAGE_GENERATION_FIELDS = new Set(["enabled"]);
-const AUTO_MODE_FIELDS = new Set(["enabled", "models", "reviewerModel", "gate", "extraTools", "timeoutMs"]);
+const AUTO_MODE_FIELDS = new Set([
+	"enabled",
+	"models",
+	"reviewerModel",
+	"gate",
+	"extraTools",
+	"timeoutMs",
+	"transcript",
+	"evidenceTools",
+	"maxEvidenceRounds",
+	"classifier",
+	"circuitBreaker",
+]);
+const AUTO_MODE_CLASSIFIER_FIELDS = new Set(["enabled", "model", "timeoutMs", "maxLag"]);
+const AUTO_MODE_BREAKER_FIELDS = new Set(["consecutiveDenials", "recentDenials", "windowSize"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
@@ -156,6 +181,21 @@ function toNonNegativeInteger(value: unknown, fieldPath: string, warnings: strin
 	return undefined;
 }
 
+function toBoundedInteger(
+	value: unknown,
+	fieldPath: string,
+	warnings: string[],
+	min: number,
+	max: number,
+): number | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value === "number" && Number.isInteger(value) && Number.isFinite(value) && value >= min && value <= max) {
+		return value;
+	}
+	warnings.push(`Ignoring ${fieldPath}: expected an integer between ${min} and ${max}.`);
+	return undefined;
+}
+
 function toSupportedApis(
 	value: unknown,
 	fieldPath: string,
@@ -233,6 +273,8 @@ function cloneDefaults(): ToolkitConfig {
 			...DEFAULT_AUTO_MODE_CONFIG,
 			models: [...DEFAULT_AUTO_MODE_CONFIG.models],
 			extraTools: [...DEFAULT_AUTO_MODE_CONFIG.extraTools],
+			classifier: { ...DEFAULT_AUTO_MODE_CONFIG.classifier },
+			circuitBreaker: { ...DEFAULT_AUTO_MODE_CONFIG.circuitBreaker },
 		},
 	};
 }
@@ -403,6 +445,116 @@ function applyAutoModeConfig(
 	const timeoutMs = toReviewerTimeoutMs(raw.timeoutMs, "autoMode.timeoutMs", warnings);
 	if (timeoutMs !== undefined) {
 		resolved.timeoutMs = timeoutMs;
+	}
+
+	resolved.transcript = toBoolean(raw.transcript, "autoMode.transcript", warnings) ?? resolved.transcript;
+	resolved.evidenceTools =
+		toBoolean(raw.evidenceTools, "autoMode.evidenceTools", warnings) ?? resolved.evidenceTools;
+
+	const maxEvidenceRounds = toBoundedInteger(
+		raw.maxEvidenceRounds,
+		"autoMode.maxEvidenceRounds",
+		warnings,
+		EVIDENCE_ROUNDS_MIN,
+		EVIDENCE_ROUNDS_MAX,
+	);
+	if (maxEvidenceRounds !== undefined) {
+		resolved.maxEvidenceRounds = maxEvidenceRounds;
+	}
+
+	if (raw.classifier !== undefined) {
+		if (isRecord(raw.classifier)) {
+			applyAutoModeClassifierConfig(raw.classifier, resolved.classifier, warnings);
+		} else {
+			warnings.push("Ignoring autoMode.classifier: expected a JSON object.");
+		}
+	}
+
+	if (raw.circuitBreaker !== undefined) {
+		if (isRecord(raw.circuitBreaker)) {
+			applyAutoModeBreakerConfig(raw.circuitBreaker, resolved.circuitBreaker, warnings);
+		} else {
+			warnings.push("Ignoring autoMode.circuitBreaker: expected a JSON object.");
+		}
+	}
+}
+
+function applyAutoModeClassifierConfig(
+	raw: Record<string, unknown>,
+	resolved: AutoModeClassifierConfig,
+	warnings: string[],
+): void {
+	warnUnknownFields(raw, AUTO_MODE_CLASSIFIER_FIELDS, "autoMode.classifier", warnings);
+	resolved.enabled =
+		toBoolean(raw.enabled, "autoMode.classifier.enabled", warnings) ?? resolved.enabled;
+
+	const model = toModelSpec(raw.model, "autoMode.classifier.model", warnings);
+	if (model !== undefined) {
+		resolved.model = model === null ? undefined : model;
+	}
+
+	const timeoutMs =
+		toBoundedInteger(
+			raw.timeoutMs,
+			"autoMode.classifier.timeoutMs",
+			warnings,
+			REVIEWER_TIMEOUT_MIN_MS,
+			REVIEWER_TIMEOUT_MAX_MS,
+		) ?? DEFAULT_CLASSIFIER_TIMEOUT_MS;
+	if (raw.timeoutMs !== undefined) {
+		resolved.timeoutMs = timeoutMs;
+	}
+
+	const maxLag = toBoundedInteger(
+		raw.maxLag,
+		"autoMode.classifier.maxLag",
+		warnings,
+		CLASSIFIER_MAX_LAG_MIN,
+		CLASSIFIER_MAX_LAG_MAX,
+	);
+	if (maxLag !== undefined) {
+		resolved.maxLag = maxLag;
+	}
+}
+
+function applyAutoModeBreakerConfig(
+	raw: Record<string, unknown>,
+	resolved: AutoModeCircuitBreakerConfig,
+	warnings: string[],
+): void {
+	warnUnknownFields(raw, AUTO_MODE_BREAKER_FIELDS, "autoMode.circuitBreaker", warnings);
+
+	const consecutiveDenials = toBoundedInteger(
+		raw.consecutiveDenials,
+		"autoMode.circuitBreaker.consecutiveDenials",
+		warnings,
+		BREAKER_LIMIT_MIN,
+		BREAKER_LIMIT_MAX,
+	);
+	if (consecutiveDenials !== undefined) {
+		resolved.consecutiveDenials = consecutiveDenials;
+	}
+
+	const recentDenials = toBoundedInteger(
+		raw.recentDenials,
+		"autoMode.circuitBreaker.recentDenials",
+		warnings,
+		BREAKER_LIMIT_MIN,
+		BREAKER_LIMIT_MAX,
+	);
+	if (recentDenials !== undefined) {
+		resolved.recentDenials = recentDenials;
+	}
+
+	const windowSize = toBoundedInteger(
+		raw.windowSize,
+		"autoMode.circuitBreaker.windowSize",
+		warnings,
+		BREAKER_WINDOW_MIN,
+		BREAKER_WINDOW_MAX,
+	);
+	if (windowSize !== undefined) {
+		resolved.windowSize = windowSize;
 	}
 }
 

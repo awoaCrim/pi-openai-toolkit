@@ -103,6 +103,16 @@ describe("loadToolkitConfig", () => {
 					gate: "all",
 					extraTools: [" openai_generate_image ", "openai_generate_image", ""],
 					timeoutMs: 45000,
+					transcript: false,
+					evidenceTools: true,
+					maxEvidenceRounds: 5,
+					classifier: {
+						enabled: true,
+						model: " uwoacrimson/gpt-5.6-luna ",
+						timeoutMs: 20000,
+						maxLag: 4,
+					},
+					circuitBreaker: { consecutiveDenials: 4, recentDenials: 12, windowSize: 40 },
 				},
 			}),
 		);
@@ -137,7 +147,73 @@ describe("loadToolkitConfig", () => {
 			gate: "all",
 			extraTools: ["openai_generate_image"],
 			timeoutMs: 45000,
+			transcript: false,
+			evidenceTools: true,
+			maxEvidenceRounds: 5,
+			classifier: {
+				enabled: true,
+				model: "uwoacrimson/gpt-5.6-luna",
+				timeoutMs: 20000,
+				maxLag: 4,
+			},
+			circuitBreaker: { consecutiveDenials: 4, recentDenials: 12, windowSize: 40 },
 		});
+	});
+
+	test("auto mode review knobs keep their defaults and warn per invalid field", () => {
+		const configPath = writeTempConfig(
+			JSON.stringify({
+				autoMode: {
+					transcript: "yes",
+					maxEvidenceRounds: 99,
+					classifier: { enabled: "on", model: 42, timeoutMs: 10, maxLag: -1, bogus: 1 },
+					circuitBreaker: { consecutiveDenials: -5, recentDenials: 999, windowSize: 0, nope: true },
+					notAField: true,
+				},
+			}),
+		);
+		const loaded = loadToolkitConfig(configPath);
+
+		expect(loaded.config.autoMode.transcript).toBe(true);
+		expect(loaded.config.autoMode.maxEvidenceRounds).toBe(3);
+		expect(loaded.config.autoMode.classifier).toEqual({
+			enabled: false,
+			model: undefined,
+			timeoutMs: 15000,
+			maxLag: 2,
+		});
+		expect(loaded.config.autoMode.circuitBreaker).toEqual({
+			consecutiveDenials: 3,
+			recentDenials: 10,
+			windowSize: 50,
+		});
+		expect(loaded.warnings).toEqual([
+			"Ignoring autoMode.notAField: unknown field.",
+			"Ignoring autoMode.transcript: expected a boolean.",
+			"Ignoring autoMode.maxEvidenceRounds: expected an integer between 0 and 8.",
+			"Ignoring autoMode.classifier.bogus: unknown field.",
+			"Ignoring autoMode.classifier.enabled: expected a boolean.",
+			'Ignoring autoMode.classifier.model: expected "provider/model-id" or null.',
+			"Ignoring autoMode.classifier.timeoutMs: expected an integer between 1000 and 120000.",
+			"Ignoring autoMode.classifier.maxLag: expected an integer between 0 and 20.",
+			"Ignoring autoMode.circuitBreaker.nope: unknown field.",
+			"Ignoring autoMode.circuitBreaker.consecutiveDenials: expected an integer between 0 and 100.",
+			"Ignoring autoMode.circuitBreaker.recentDenials: expected an integer between 0 and 100.",
+			"Ignoring autoMode.circuitBreaker.windowSize: expected an integer between 1 and 200.",
+		]);
+	});
+
+	test("a non-object auto mode section warns without replacing defaults", () => {
+		const configPath = writeTempConfig(
+			JSON.stringify({ autoMode: { classifier: true, circuitBreaker: "off" } }),
+		);
+		const loaded = loadToolkitConfig(configPath);
+		expect(loaded.config.autoMode.classifier.enabled).toBe(false);
+		expect(loaded.config.autoMode.circuitBreaker.consecutiveDenials).toBe(3);
+		expect(loaded.warnings).toEqual([
+			"Ignoring autoMode.classifier: expected a JSON object.",
+			"Ignoring autoMode.circuitBreaker: expected a JSON object.",
+		]);
 	});
 
 	test("null model specs preserve the default remote path and clear the fallback spec", () => {

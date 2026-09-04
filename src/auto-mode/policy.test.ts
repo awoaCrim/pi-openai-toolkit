@@ -2,11 +2,16 @@ import { describe, expect, test } from "bun:test";
 import { DEFAULT_AUTO_MODE_CONFIG, type AutoModeConfig } from "../types";
 import {
 	applyConfiguredGate,
+	createRejectionBreaker,
 	createRuntimeState,
 	describeGate,
 	isAutoModeEligible,
+	recordDenial,
+	recordNonDenial,
+	resetRejectionBreaker,
 	setGateOverride,
 	shouldReviewTool,
+	wasDeniedThisTurn,
 } from "./policy";
 
 const eligibleModel = { provider: "uwoacrimson", id: "gpt-5.6-luna" };
@@ -77,5 +82,73 @@ describe("auto mode gating", () => {
 		expect(describeGate(createRuntimeState(configWith({ extraTools: ["mcp__x__y"] })))).toBe(
 			"bash, write, edit, mcp__x__y",
 		);
+	});
+});
+
+
+describe("rejection circuit breaker", () => {
+	const breaker = { consecutiveDenials: 3, recentDenials: 4, windowSize: 6 };
+
+	test("a run of consecutive denials interrupts the turn", () => {
+		const state = createRejectionBreaker();
+		expect(recordDenial(state, breaker, "bash")).toBe("continue");
+		expect(recordDenial(state, breaker, "bash")).toBe("continue");
+		expect(recordDenial(state, breaker, "write")).toBe("interrupt");
+		expect(state.interrupted).toBe(true);
+	});
+
+	test("an allowed action breaks the streak", () => {
+		const state = createRejectionBreaker();
+		recordDenial(state, breaker, "bash");
+		recordDenial(state, breaker, "bash");
+		recordNonDenial(state);
+		expect(recordDenial(state, breaker, "bash")).toBe("continue");
+		expect(recordDenial(state, breaker, "bash")).toBe("interrupt");
+	});
+
+	test("the sliding window catches a scattered denial rate with no streak", () => {
+		const scattered = { consecutiveDenials: 5, recentDenials: 3, windowSize: 5 };
+		const state = createRejectionBreaker();
+		expect(recordDenial(state, scattered, "bash")).toBe("continue");
+		recordNonDenial(state);
+		expect(recordDenial(state, scattered, "write")).toBe("continue");
+		recordNonDenial(state);
+
+		// Five reviewed calls, three of them denials: never a run of two, but the
+		// agent is still being refused often enough to stop negotiating.
+		expect(state.consecutiveDenials).toBe(0);
+		expect(recordDenial(state, scattered, "edit")).toBe("interrupt");
+	});
+
+	test("the window forgets denials older than its size", () => {
+		const state = createRejectionBreaker();
+		for (let index = 0; index < 10; index += 1) {
+			recordDenial(state, { ...breaker, recentDenials: 0 }, "bash");
+			expect(state.recentDenials.length).toBeLessThanOrEqual(6);
+		}
+	});
+
+	test("a zero threshold disables that trigger instead of interrupting everything", () => {
+		const state = createRejectionBreaker();
+		const disabled = { consecutiveDenials: 0, recentDenials: 0, windowSize: 50 };
+		expect(recordDenial(state, disabled, "bash")).toBe("continue");
+		expect(recordDenial(state, disabled, "bash")).toBe("continue");
+	});
+
+	test("a tool denied this turn is recognised as a likely workaround attempt", () => {
+		const state = createRejectionBreaker();
+		expect(wasDeniedThisTurn(state, "bash")).toBe(false);
+		recordDenial(state, breaker, "bash");
+		expect(wasDeniedThisTurn(state, "bash")).toBe(true);
+		expect(wasDeniedThisTurn(state, "write")).toBe(false);
+	});
+
+	test("turn reset clears counts, denied tools, and the interrupt flag", () => {
+		const state = createRejectionBreaker();
+		recordDenial(state, breaker, "bash");
+		resetRejectionBreaker(state);
+		expect(state).toMatchObject({ consecutiveDenials: 0, interrupted: false });
+		expect(state.recentDenials).toEqual([]);
+		expect(wasDeniedThisTurn(state, "bash")).toBe(false);
 	});
 });

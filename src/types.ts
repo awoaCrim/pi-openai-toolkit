@@ -111,10 +111,51 @@ export type AutoModeConfig = {
 	extraTools: string[];
 	/** Reviewer deadline in ms; expiry degrades to human confirmation or fail-closed. */
 	timeoutMs: number;
+	/** Give the reviewer a bounded transcript so it can judge user authorization. */
+	transcript: boolean;
+	/** Let the reviewer spend read-only tool calls establishing facts before deciding. */
+	evidenceTools: boolean;
+	maxEvidenceRounds: number;
+	/** Non-blocking trajectory pre-scorer that can satisfy ordinary gated calls. */
+	classifier: AutoModeClassifierConfig;
+	/** End a turn that keeps getting denied instead of negotiating forever. */
+	circuitBreaker: AutoModeCircuitBreakerConfig;
+};
+
+export type AutoModeClassifierConfig = {
+	enabled: boolean;
+	/** "provider/model-id"; falls back to `autoMode.reviewerModel` when unset. */
+	model?: string;
+	timeoutMs: number;
+	/** How many tool calls may elapse between scoring and use before a score is stale. */
+	maxLag: number;
+};
+
+export type AutoModeCircuitBreakerConfig = {
+	/** Consecutive reviewer denials in one turn that end the turn. 0 disables. */
+	consecutiveDenials: number;
+	/** Denials inside `windowSize` reviewed calls that end the turn. 0 disables. */
+	recentDenials: number;
+	windowSize: number;
 };
 
 export const REVIEWER_TIMEOUT_MIN_MS = 1_000;
 export const REVIEWER_TIMEOUT_MAX_MS = 120_000;
+
+/** Read-only investigation rounds the reviewer may spend before it must answer. */
+export const EVIDENCE_ROUNDS_MIN = 0;
+export const EVIDENCE_ROUNDS_MAX = 8;
+
+export const CLASSIFIER_MAX_LAG_MIN = 0;
+export const CLASSIFIER_MAX_LAG_MAX = 20;
+
+export const DEFAULT_CLASSIFIER_TIMEOUT_MS = 15_000;
+
+/** Denial counts are small integers; 0 disables the matching trigger. */
+export const BREAKER_LIMIT_MIN = 0;
+export const BREAKER_LIMIT_MAX = 100;
+export const BREAKER_WINDOW_MIN = 1;
+export const BREAKER_WINDOW_MAX = 200;
 
 export type ToolkitConfig = {
 	compaction: CompactionConfig;
@@ -490,6 +531,20 @@ export const DEFAULT_AUTO_MODE_CONFIG: AutoModeConfig = {
 	gate: "side-effect",
 	extraTools: [],
 	timeoutMs: 30_000,
+	transcript: true,
+	evidenceTools: true,
+	maxEvidenceRounds: 3,
+	classifier: {
+		enabled: false,
+		model: undefined,
+		timeoutMs: DEFAULT_CLASSIFIER_TIMEOUT_MS,
+		maxLag: 2,
+	},
+	circuitBreaker: {
+		consecutiveDenials: 3,
+		recentDenials: 10,
+		windowSize: 50,
+	},
 };
 
 export const DEFAULT_TOOLKIT_CONFIG: ToolkitConfig = {
