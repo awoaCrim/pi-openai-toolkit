@@ -1,16 +1,8 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { DEFAULT_COMPACTION_CONFIG, DEFAULT_NATIVE_FALLBACK_CONFIG, type CompactionConfig, type NativeFallbackConfig } from "./types";
 
-let importCounter = 0;
-
 async function loadNativeFallbackModule() {
-	mock.module("@earendil-works/pi-coding-agent", () => ({
-		compact: async () => {
-			throw new Error("unexpected call to pi's real compact()");
-		},
-		convertToLlm: (messages: unknown[]) => messages,
-	}));
-	return import(`./native-fallback.ts?nf=${importCounter++}`);
+	return import("./native-fallback");
 }
 
 type FakeModel = {

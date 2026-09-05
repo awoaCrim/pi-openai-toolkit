@@ -1,5 +1,6 @@
 import type {
 	BeforeProviderRequestEvent,
+	ContextEvent,
 	CompactionResult,
 	ExtensionAPI,
 	ExtensionContext,
@@ -11,11 +12,11 @@ import { resolveLatestNativeCompactionEntry } from "./details-store";
 import { runNativeFallbackCompaction } from "./native-fallback";
 import {
 	rewriteResponsesPayloadWithNativeReplay,
+	removeNativeCompactionRetainedMessages,
 	serializeLiveTailToResponsesInput,
 } from "./payload-rewrite";
 import { getCompactionRequestExtras, rememberRequestContext } from "./request-context-cache";
 import { executeRemoteV2Compaction } from "./remote-v2-client";
-import { registerInlineCompactionRuntime } from "./inline-compaction";
 import {
 	resolveNativeCompactionEnvironment,
 	resolveRemoteCompactionExecution,
@@ -32,6 +33,12 @@ import {
 	type NativeCompactionDetails,
 	type NativeCompactionRequestMeta,
 } from "./types";
+
+type CompactionDependencies = {
+	loadConfig: typeof loadToolkitConfig;
+	remoteCompact: typeof executeRemoteV2Compaction;
+	nativeFallback: typeof runNativeFallbackCompaction;
+};
 
 type ResponsesCompactOutcome =
 	| { outcome: "success"; compaction: CompactionResult<NativeCompactionDetails> }
@@ -98,6 +105,7 @@ async function runResponsesNativeCompact(
 	ctx: ExtensionContext,
 	config: CompactionConfig,
 	execution: RemoteCompactionExecution,
+	remoteCompact: typeof executeRemoteV2Compaction,
 ): Promise<ResponsesCompactOutcome> {
 	const { consumer, compactor } = execution;
 	const instructions = buildCompactionInstructions(ctx.getSystemPrompt(), event.customInstructions);
@@ -179,12 +187,12 @@ async function runResponsesNativeCompact(
 		model: consumer.model,
 		baseUrl: consumer.baseUrl,
 		sessionId: getSessionId(ctx),
-	});
+	}, compactor.currentModel);
 	if (extras) {
 		request = { ...request, ...extras };
 	}
 
-	const compactResult = await executeRemoteV2Compaction({
+	const compactResult = await remoteCompact({
 		runtime: compactor,
 		request,
 		signal: event.signal,
@@ -287,8 +295,12 @@ async function runResponsesNativeCompact(
 	return { outcome: "success", compaction };
 }
 
-async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx: ExtensionContext) {
-	const { config: toolkitConfig } = loadToolkitConfig();
+async function handleSessionBeforeCompact(
+	event: SessionBeforeCompactEvent,
+	ctx: ExtensionContext,
+	dependencies: CompactionDependencies,
+) {
+	const { config: toolkitConfig } = dependencies.loadConfig();
 	const config = toolkitConfig.compaction;
 	if (!config.enabled) {
 		return undefined;
@@ -327,7 +339,7 @@ async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx:
 	);
 	if (resolution.ok) {
 		remoteAttempted = true;
-		const responsesOutcome = await runResponsesNativeCompact(event, ctx, config, resolution.execution);
+		const responsesOutcome = await runResponsesNativeCompact(event, ctx, config, resolution.execution, dependencies.remoteCompact);
 		if (responsesOutcome.outcome === "success") {
 			return { compaction: responsesOutcome.compaction };
 		}
@@ -362,7 +374,7 @@ async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx:
 	// Branch 2: run pi's native compaction method. A failed remote request is compacted by the
 	// remote producer itself; a model that cannot use remote v2 at all uses nativeFallback.model.
 	const fallbackModelSpec = remoteAttempted ? config.remoteCompactModel : config.nativeFallback.model;
-	const fallback = await runNativeFallbackCompaction({ ctx, event, config, modelSpec: fallbackModelSpec });
+	const fallback = await dependencies.nativeFallback({ ctx, event, config, modelSpec: fallbackModelSpec });
 	if (fallback.ok) {
 		if (ctx.hasUI) {
 			ctx.ui.notify(
@@ -414,8 +426,35 @@ async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx:
 	return undefined;
 }
 
-async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ctx: ExtensionContext) {
-	const { config: toolkitConfig } = loadToolkitConfig();
+async function handleContext(event: ContextEvent, ctx: ExtensionContext, loadConfig: typeof loadToolkitConfig) {
+	const { config: { compaction: config } } = loadConfig();
+	if (!config.enabled) return undefined;
+	// Resolve the effective authenticated endpoint before dropping any history.
+	// A checkpoint for a different endpoint must keep Pi's original context.
+	const resolution = await resolveNativeCompactionEnvironment(ctx, {
+		enabled: config.enabled,
+		responsesApis: config.responsesApis,
+	});
+	if (!resolution.ok) return undefined;
+	const branchEntries = ctx.sessionManager.getBranch();
+	const latest = resolveLatestNativeCompactionEntry(branchEntries, { baseUrl: resolution.runtime.baseUrl });
+	if (!latest.ok) return undefined;
+	const result = removeNativeCompactionRetainedMessages({ messages: event.messages, branchEntries, compactionEntry: latest.entry });
+	if (!result.ok) {
+		writeReplayFailureArtifact({ reason: result.reason, compactionEntryId: latest.entry.id }, config, ctx);
+		if (ctx.hasUI) ctx.ui.notify(`${COMPACTION_EXTENSION_ID}: replay failed (${result.reason}); request aborted`, "error");
+		ctx.abort();
+		return undefined;
+	}
+	return result.messages === event.messages ? undefined : { messages: result.messages };
+}
+
+async function handleBeforeProviderRequest(
+	event: BeforeProviderRequestEvent,
+	ctx: ExtensionContext,
+	loadConfig: typeof loadToolkitConfig,
+) {
+	const { config: toolkitConfig } = loadConfig();
 	const config = toolkitConfig.compaction;
 	if (!config.enabled) {
 		return undefined;
@@ -570,11 +609,18 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 	return rewrite.rewrittenPayload;
 }
 
-export default function (pi: ExtensionAPI) {
-	const inlineCompaction = registerInlineCompactionRuntime(pi, loadToolkitConfig);
-
+export default function registerCompactionExtension(
+	pi: ExtensionAPI,
+	overrides: Partial<CompactionDependencies> = {},
+) {
+	const dependencies: CompactionDependencies = {
+		loadConfig: loadToolkitConfig,
+		remoteCompact: executeRemoteV2Compaction,
+		nativeFallback: runNativeFallbackCompaction,
+		...overrides,
+	};
 	pi.on("session_start", (_event, ctx) => {
-		const { config: toolkitConfig, source, warnings } = loadToolkitConfig();
+		const { config: toolkitConfig, source, warnings } = dependencies.loadConfig();
 		const config = toolkitConfig.compaction;
 		if (!config.enabled) return;
 
@@ -604,8 +650,7 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("session_before_compact", handleSessionBeforeCompact);
-	pi.on("before_provider_request", handleBeforeProviderRequest);
-	pi.on("turn_end", (event, ctx) => inlineCompaction.handlePublicTurnEnd(event, ctx));
-	pi.on("session_shutdown", (_event, ctx) => inlineCompaction.dispose(ctx));
+	pi.on("context", (event, ctx) => handleContext(event, ctx, dependencies.loadConfig));
+	pi.on("session_before_compact", (event, ctx) => handleSessionBeforeCompact(event, ctx, dependencies));
+	pi.on("before_provider_request", (event, ctx) => handleBeforeProviderRequest(event, ctx, dependencies.loadConfig));
 }

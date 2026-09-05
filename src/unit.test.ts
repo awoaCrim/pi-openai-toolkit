@@ -25,13 +25,8 @@ const baseModel = {
 	maxTokens: 1000,
 };
 
-let serializerImportCounter = 0;
-
 async function loadSerializerModule() {
-	mock.module("@earendil-works/pi-coding-agent", () => ({
-		convertToLlm: (messages: unknown[]) => messages,
-	}));
-	return import(`./serializer.ts?unit=${serializerImportCounter++}`);
+	return import("./serializer");
 }
 
 function createJwtWithAccountId(accountId: string): string {
@@ -46,8 +41,9 @@ function createJwtWithAccountId(accountId: string): string {
 	return `${header}.${payload}.signature`;
 }
 
+const originalFetch = globalThis.fetch;
 afterEach(() => {
-	serializerImportCounter = 0;
+	globalThis.fetch = originalFetch;
 	mock.restore();
 });
 

@@ -3,6 +3,9 @@
   "version": "0.11.1",
   "private": false,
   "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "description": "OpenAI-focused Pi toolkit providing remote Responses compaction, native Web Search, native image generation, and model-reviewed auto mode.",
   "author": "awoaCrim and contributors",
   "license": "MIT",
@@ -48,7 +51,6 @@
     "src/debug.ts",
     "src/details-store.ts",
     "src/deferred-tool-carryover.ts",
-    "src/inline-compaction.ts",
     "src/extension-runtime.ts",
     "src/image-generation/artifacts.ts",
     "src/image-generation/client.ts",
@@ -97,16 +99,16 @@
     "typecheck": "tsc -p tsconfig.check.json"
   },
   "peerDependencies": {
-    "@earendil-works/pi-agent-core": "*",
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": ">=0.80.0",
-    "@earendil-works/pi-tui": ">=0.80.0"
+    "@earendil-works/pi-agent-core": ">=0.85.1",
+    "@earendil-works/pi-ai": ">=0.85.1",
+    "@earendil-works/pi-coding-agent": ">=0.85.1",
+    "@earendil-works/pi-tui": ">=0.85.1"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.84.3",
-    "@earendil-works/pi-ai": "0.84.3",
-    "@earendil-works/pi-coding-agent": "0.84.3",
-    "@earendil-works/pi-tui": "0.84.3",
+    "@earendil-works/pi-agent-core": "0.85.1",
+    "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@earendil-works/pi-tui": "0.85.1",
     "@types/node": "24.12.4",
     "bun": "1.2.23",
     "typescript": "5.9.3"

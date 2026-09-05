@@ -14,6 +14,7 @@ import type {
 	UserMessage,
 } from "@earendil-works/pi-ai";
 import type { ResponsesCompatibleRequestPayload } from "./runtime";
+import type { CompactionRequestExtras } from "./request-context-cache";
 
 /**
  * pi stopped exporting the CompactionPreparation type name in 0.80.x, but it is still
@@ -95,21 +96,11 @@ export type ResponsesInputItem =
 	| ResponsesFunctionCallOutputItem
 	| ResponsesReasoningItem;
 
-export type NativeCompactionRequestBody = {
+/** The synthetic request shares the live-request extras allowlist. */
+export type NativeCompactionRequestBody = CompactionRequestExtras & {
 	model: string;
 	input: ResponsesInputItem[];
 	instructions: string;
-	/**
-	 * Optional passthrough fields mirroring the latest codex_rs CompactionInput.
-	 * Sourced from the most recent provider request payload when available;
-	 * undefined fields are omitted from the serialized JSON body.
-	 */
-	tools?: unknown[];
-	parallel_tool_calls?: boolean;
-	reasoning?: Record<string, unknown>;
-	service_tier?: string;
-	prompt_cache_key?: string;
-	text?: Record<string, unknown>;
 };
 
 export type SerializeResponsesMessagesOptions = {
@@ -308,6 +299,7 @@ function transformMessagesForResponses(messages: Message[]): Message[] {
 		transformed.push(message);
 	}
 
+	transformed.push(...createSyntheticToolResults(pendingToolCalls, existingToolResultIds));
 	return transformed;
 }
 

@@ -5,7 +5,6 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
 	DEFAULT_COMPACTION_CONFIG,
 	DEFAULT_TOOLKIT_CONFIG,
-	DEFAULT_AUTO_COMPACTION_CONFIG,
 	DEFAULT_AUTO_MODE_CONFIG,
 	DEFAULT_IMAGE_GENERATION_CONFIG,
 	DEFAULT_CODEX_ASTRA_CONFIG,
@@ -47,7 +46,6 @@ const COMPACTION_FIELDS = new Set([
 	"allowCompactionContinuityBreak",
 	"remoteCompactModel",
 	"nativeFallback",
-	"autoCompaction",
 	"responsesApis",
 	"notifyOnLoad",
 	"debug",
@@ -57,7 +55,6 @@ const COMPACTION_FIELDS = new Set([
 	"artifactRoot",
 ]);
 const NATIVE_FALLBACK_FIELDS = new Set(["enabled", "model", "thinkingLevel"]);
-const AUTO_COMPACTION_FIELDS = new Set(["enabled", "continuation", "unsupportedFallback", "reserveTokens"]);
 const WEB_SEARCH_FIELDS = new Set(["enabled", "models"]);
 const IMAGE_GENERATION_FIELDS = new Set(["enabled"]);
 const CODEX_ASTRA_FIELDS = new Set(["enabled", "models"]);
@@ -153,37 +150,6 @@ function toThinkingLevel(value: unknown, fieldPath: string, warnings: string[]):
 	return undefined;
 }
 
-function toCompactionContinuation(
-	value: unknown,
-	fieldPath: string,
-	warnings: string[],
-): "inline" | "followUp" | "off" | undefined {
-	if (value === undefined) return undefined;
-	if (value === "inline" || value === "followUp" || value === "off") return value;
-	warnings.push(`Ignoring ${fieldPath}: expected one of inline, followUp, off.`);
-	return undefined;
-}
-
-function toUnsupportedFallback(
-	value: unknown,
-	fieldPath: string,
-	warnings: string[],
-): "followUp" | "off" | undefined {
-	if (value === undefined) return undefined;
-	if (value === "followUp" || value === "off") return value;
-	warnings.push(`Ignoring ${fieldPath}: expected one of followUp, off.`);
-	return undefined;
-}
-
-function toNonNegativeInteger(value: unknown, fieldPath: string, warnings: string[]): number | undefined {
-	if (value === undefined) return undefined;
-	if (typeof value === "number" && Number.isInteger(value) && Number.isFinite(value) && value >= 0) {
-		return value;
-	}
-	warnings.push(`Ignoring ${fieldPath}: expected a non-negative integer.`);
-	return undefined;
-}
-
 function toBoundedInteger(
 	value: unknown,
 	fieldPath: string,
@@ -264,7 +230,6 @@ function cloneDefaults(): ToolkitConfig {
 		compaction: {
 			...DEFAULT_COMPACTION_CONFIG,
 			nativeFallback: { ...DEFAULT_NATIVE_FALLBACK_CONFIG },
-			autoCompaction: { ...DEFAULT_AUTO_COMPACTION_CONFIG },
 			responsesApis: [...DEFAULT_COMPACTION_CONFIG.responsesApis],
 		},
 		webSearch: {
@@ -303,32 +268,6 @@ function applyNativeFallbackConfig(
 	resolved.thinkingLevel =
 		toThinkingLevel(raw.thinkingLevel, "compaction.nativeFallback.thinkingLevel", warnings) ??
 		resolved.thinkingLevel;
-}
-
-function applyAutoCompactionConfig(
-	raw: Record<string, unknown>,
-	resolved: CompactionConfig["autoCompaction"],
-	warnings: string[],
-): void {
-	warnUnknownFields(raw, AUTO_COMPACTION_FIELDS, "compaction.autoCompaction", warnings);
-	resolved.enabled = toBoolean(raw.enabled, "compaction.autoCompaction.enabled", warnings) ?? resolved.enabled;
-	resolved.continuation =
-		toCompactionContinuation(raw.continuation, "compaction.autoCompaction.continuation", warnings) ??
-		resolved.continuation;
-	resolved.unsupportedFallback =
-		toUnsupportedFallback(
-			raw.unsupportedFallback,
-			"compaction.autoCompaction.unsupportedFallback",
-			warnings,
-		) ?? resolved.unsupportedFallback;
-	const reserveTokens = toNonNegativeInteger(
-		raw.reserveTokens,
-		"compaction.autoCompaction.reserveTokens",
-		warnings,
-	);
-	if (reserveTokens !== undefined) {
-		resolved.reserveTokens = reserveTokens;
-	}
 }
 
 function applyCompactionConfig(
@@ -372,14 +311,6 @@ function applyCompactionConfig(
 			applyNativeFallbackConfig(raw.nativeFallback, resolved.nativeFallback, warnings);
 		} else {
 			warnings.push("Ignoring compaction.nativeFallback: expected a JSON object.");
-		}
-	}
-
-	if (raw.autoCompaction !== undefined) {
-		if (isRecord(raw.autoCompaction)) {
-			applyAutoCompactionConfig(raw.autoCompaction, resolved.autoCompaction, warnings);
-		} else {
-			warnings.push("Ignoring compaction.autoCompaction: expected a JSON object.");
 		}
 	}
 

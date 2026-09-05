@@ -33,7 +33,6 @@ function createHarness(eligible = true) {
 		config: {
 			compaction: {
 				...DEFAULT_COMPACTION_CONFIG,
-				autoCompaction: { ...DEFAULT_COMPACTION_CONFIG.autoCompaction },
 				responsesApis: [...DEFAULT_COMPACTION_CONFIG.responsesApis],
 			},
 			webSearch: {

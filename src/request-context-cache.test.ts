@@ -99,3 +99,56 @@ describe("request context cache", () => {
 		expect(getCompactionRequestExtras(identity)).toBeUndefined();
 	});
 });
+
+describe("Pi prompt cache parity", () => {
+	for (const fields of [
+		{ prompt_cache_options: { ttl: "30m" } },
+		{ prompt_cache_options: { mode: "explicit" } },
+		{ prompt_cache_retention: "24h" },
+	]) {
+		test(`preserves ${JSON.stringify(fields)} and clears it on the next default request`, () => {
+			rememberRequestContext({ model: identity.model, input: [], ...fields }, identity);
+			expect(getCompactionRequestExtras(identity)).toEqual(fields);
+			rememberRequestContext({ model: identity.model, input: [] }, identity);
+			expect(getCompactionRequestExtras(identity)).toEqual({});
+		});
+	}
+	test("clones cache options on capture and retrieval", () => {
+		const options = { ttl: "30m" };
+		rememberRequestContext({ model: identity.model, input: [], prompt_cache_options: options }, identity);
+		options.ttl = "mutated";
+		const extras = getCompactionRequestExtras(identity)!;
+		expect(extras).toEqual({ prompt_cache_options: { ttl: "30m" } });
+		if (extras.prompt_cache_options) extras.prompt_cache_options.ttl = "mutated again";
+		expect(getCompactionRequestExtras(identity)).toEqual({ prompt_cache_options: { ttl: "30m" } });
+	});
+	test("ignores malformed cache fields", () => {
+		for (const value of [null, [], "30m", true]) {
+			rememberRequestContext({ model: identity.model, input: [], prompt_cache_options: value, prompt_cache_retention: value }, identity);
+			expect(getCompactionRequestExtras(identity)).toEqual({});
+		}
+	});
+});
+
+describe("synthetic producer cache eligibility", () => {
+	const fields = { prompt_cache_options: { ttl: "30m" }, prompt_cache_retention: "24h", prompt_cache_key: "session-1" };
+	for (const [producer, expected] of [
+		[{ api: "openai-responses", compat: { supportsExplicitPromptCacheMode: true } }, { prompt_cache_options: { ttl: "30m" }, prompt_cache_key: "session-1" }],
+		[{ api: "openai-responses" }, { prompt_cache_retention: "24h", prompt_cache_key: "session-1" }],
+		[{ api: "openai-responses", compat: { supportsExplicitPromptCacheMode: true, supportsLongCacheRetention: false } }, { prompt_cache_key: "session-1" }],
+		[{ api: "openai-responses", compat: { supportsLongCacheRetention: false } }, { prompt_cache_key: "session-1" }],
+		[{ api: "openai-codex-responses" }, { prompt_cache_key: "session-1" }],
+	] as const) {
+		test(`filters only incompatible fields for ${JSON.stringify(producer)}`, () => {
+			rememberRequestContext({ model: identity.model, input: [], ...fields }, identity);
+			expect(getCompactionRequestExtras(identity, producer)).toEqual(expected);
+			// Filtering one producer must not corrupt the stored consumer context.
+			expect(getCompactionRequestExtras(identity)).toEqual(fields);
+		});
+	}
+	test("preserves explicit none without a cache key even when long retention is unsupported", () => {
+		rememberRequestContext({ model: identity.model, input: [], prompt_cache_options: { mode: "explicit" } }, identity);
+		expect(getCompactionRequestExtras(identity, { api: "openai-responses", compat: { supportsExplicitPromptCacheMode: true, supportsLongCacheRetention: false } }))
+			.toEqual({ prompt_cache_options: { mode: "explicit" } });
+	});
+});

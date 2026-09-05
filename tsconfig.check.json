@@ -21,7 +21,6 @@
     "src/debug.ts",
     "src/details-store.ts",
     "src/deferred-tool-carryover.ts",
-    "src/inline-compaction.ts",
     "src/extension-runtime.ts",
     "src/image-generation/artifacts.ts",
     "src/image-generation/client.ts",

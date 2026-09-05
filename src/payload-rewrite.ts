@@ -1,3 +1,4 @@
+import { sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type {
@@ -33,7 +34,8 @@ export type NativeReplayPayloadRewriteFailureReason =
 	| "first-kept-entry-not-found"
 	| "invalid-compacted-window"
 	| "unexpected-compaction-after-boundary"
-	| "compaction-summary-not-found";
+	| "compaction-summary-not-found"
+	| "retained-context-mismatch";
 
 export type NativeReplayPayloadRewriteFailure = {
 	ok: false;
@@ -311,6 +313,41 @@ export function collectLiveTailMessages(entries: readonly SessionEntry[]): Agent
 	return collectReplayMessages(entries);
 }
 
+/**
+ * Remote V2 covers the complete pre-compaction context. Pi 0.85.1 also retains
+ * recent messages, so remove those verified copies before provider conversion
+ * (where IDs/fields may change across models). Persisted session entries are
+ * untouched. Preserve transient additions and all post-compaction messages.
+ */
+export function removeNativeCompactionRetainedMessages(args: {
+	messages: AgentMessage[];
+	branchEntries: readonly SessionEntry[];
+	compactionEntry: NativeCompactionEntry;
+}): { ok: true; messages: AgentMessage[] } | NativeReplayPayloadRewriteFailure {
+	const boundary = findCompactionBoundaryIndex(args.branchEntries, args.compactionEntry.id);
+	if (boundary === undefined) return { ok: false, reason: "compaction-boundary-not-found" };
+	const firstKept = findEntryIndexByIdBeforeBoundary(args.branchEntries, args.compactionEntry.firstKeptEntryId, boundary);
+	if (firstKept === undefined) return { ok: false, reason: "first-kept-entry-not-found" };
+	const summary = sessionEntryToContextMessages(args.compactionEntry)[0];
+	const summaryIndex = args.messages.findIndex((message) => areEquivalentValues(message, summary));
+	if (summaryIndex < 0) return { ok: false, reason: "compaction-summary-not-found" };
+	const retained = args.branchEntries.slice(firstKept, boundary).flatMap(sessionEntryToContextMessages);
+	const removed = new Set<number>();
+	let cursor = summaryIndex + 1;
+	for (const expected of retained) {
+		const index = args.messages.findIndex((message, index) => index >= cursor && areEquivalentValues(message, expected));
+		if (index >= 0) {
+			removed.add(index);
+			cursor = index + 1;
+		}
+	}
+	// Already removed by another context handler: leave it alone. Partial
+	// matches are ambiguous; never remove half a call/result batch.
+	if (removed.size === 0) return { ok: true, messages: args.messages };
+	if (removed.size !== retained.length) return { ok: false, reason: "retained-context-mismatch" };
+	return { ok: true, messages: args.messages.filter((_, index) => !removed.has(index)) };
+}
+
 export function serializeLiveTailToResponsesInput<TApi extends Api>(args: {
 	model: Model<TApi>;
 	entries: readonly SessionEntry[];
@@ -370,15 +407,8 @@ function buildNativeReplaySegmentsInternal<TApi extends Api>(args: {
 		};
 	}
 
-	const preCompactionEntries = args.branchEntries.slice(firstKeptEntryIndex, boundaryIndex);
-	const postCompactionEntries = args.branchEntries.slice(boundaryIndex + 1);
-
-	// Pi-authored compaction summary item. Pi 0.84.3 renders the context after a
-	// compaction as [leading prompts][summary item][all post-compaction messages]:
-	// pre-compaction messages never appear in the payload (entry.retainedTail is
-	// never persisted by appendCompaction), so the summary item itself is the only
-	// anchor and the only thing that gets replaced. Everything else is preserved
-	// verbatim, so transient messages injected by other extensions stay intact.
+	// The context hook has removed Pi's verified retained copies. Replace only
+	// the summary anchor here; preserve provider fields and transient/post items.
 	const summaryIndex = findCompactionSummaryIndex(args.payload.input, args.compactionEntry.summary);
 	if (summaryIndex < 0) {
 		return {

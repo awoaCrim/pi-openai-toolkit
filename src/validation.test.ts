@@ -1,4 +1,4 @@
-import { afterEach, expect, mock, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { join } from "node:path";
@@ -7,6 +7,7 @@ import { transformWebSearchPayload } from "./web-search/payload";
 import { WEB_SEARCH_SOURCE_INCLUDE } from "./web-search/types";
 import {
 	DEFAULT_COMPACTION_CONFIG,
+	DEFAULT_TOOLKIT_CONFIG,
 	DEFAULT_IMAGE_GENERATION_CONFIG,
 	DEFAULT_WEB_SEARCH_CONFIG,
 	NATIVE_COMPACTION_FALLBACK_SUMMARY,
@@ -37,7 +38,12 @@ type TestModel = {
 	baseUrl: string;
 	input: string[];
 	reasoning: boolean;
-	compat?: { supportsAdditionalTools?: boolean; supportsToolSearch?: boolean };
+	compat?: {
+		supportsAdditionalTools?: boolean;
+		supportsToolSearch?: boolean;
+		supportsExplicitPromptCacheMode?: boolean;
+		supportsLongCacheRetention?: boolean;
+	};
 };
 
 type TestSessionEntry =
@@ -83,39 +89,10 @@ const COMPACTION_SUMMARY_SUFFIX = `\n</summary>`;
 // temporary root instead of the real HOME artifact directory.
 const testArtifactRoot = join(os.tmpdir(), "pi-openai-toolkit-validation-artifacts");
 
-let serializerImportCounter = 0;
 let timestampCounter = 0;
 
-function registerPiCodingAgentMock(): void {
-	mock.module("@earendil-works/pi-coding-agent", () => ({
-		compact: async () => {
-			throw new Error("unexpected call to pi's real compact() in validation tests");
-		},
-		convertToLlm: (messages: Array<Record<string, unknown>>) =>
-			messages
-				.map((message) => {
-					if (message.role === "compactionSummary") {
-						return {
-							role: "user",
-							content: [
-								{
-									type: "text",
-									text: `${COMPACTION_SUMMARY_PREFIX}${message.summary ?? ""}${COMPACTION_SUMMARY_SUFFIX}`,
-								},
-							],
-							timestamp: message.timestamp,
-						};
-					}
-
-					return message;
-				})
-				.filter(Boolean),
-	}));
-}
-
 async function loadSerializerModule() {
-	registerPiCodingAgentMock();
-	return import(`./serializer.ts?validation=${serializerImportCounter++}`);
+	return import("./serializer");
 }
 
 async function serializeResponsesInput(model: TestModel, messages: Record<string, unknown>[]): Promise<unknown[]> {
@@ -289,7 +266,7 @@ async function buildPiReplayPayload(args: {
 	}
 
 	const postCompactionEntries = args.branchEntries.slice(boundaryIndex + 1);
-	// Pi 0.84.3 renders the post-compaction context as [leading][summary item]
+	// After the public context hook removes retained copies, the provider sees [leading][summary item]
 	// [all post-compaction messages]: pre-compaction messages never appear in the
 	// payload (appendCompaction never persists entry.retainedTail), and trailing
 	// provider prompts are ordinary input items after the live tail.
@@ -355,6 +332,7 @@ function createContext(args: {
 }
 
 async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
+	contextHook: HookHandler;
 	sessionBeforeCompact: HookHandler;
 	beforeProviderRequest: HookHandler;
 	compactCalls: Array<Record<string, unknown>>;
@@ -365,70 +343,56 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 	const fallbackCalls: Array<Record<string, unknown>> = [];
 	const abortCalls = { count: 0 };
 
-	registerPiCodingAgentMock();
-
-	mock.module("./config", () => ({
-		loadToolkitConfig: () => ({
+	const handlers = new Map<string, HookHandler>();
+	const { default: extension } = await import("./extension-runtime");
+	extension({
+		on: (eventName: string, handler: HookHandler) => {
+			handlers.set(eventName, handler);
+		},
+	} as never, {
+		loadConfig: () => ({
 			config: {
+				...DEFAULT_TOOLKIT_CONFIG,
 				compaction: {
 					...DEFAULT_COMPACTION_CONFIG,
 					responsesApis: [...DEFAULT_COMPACTION_CONFIG.responsesApis],
 					artifactRoot: options.config?.artifactRoot ?? testArtifactRoot,
 					...(options.config ?? {}),
 				},
-				webSearch: {
-					...DEFAULT_WEB_SEARCH_CONFIG,
-					models: [...DEFAULT_WEB_SEARCH_CONFIG.models],
-				},
+				webSearch: { ...DEFAULT_WEB_SEARCH_CONFIG, models: [...DEFAULT_WEB_SEARCH_CONFIG.models] },
 				imageGeneration: { ...DEFAULT_IMAGE_GENERATION_CONFIG },
 			},
 			source: undefined,
 			warnings: [],
 		}),
-	}));
-
-	mock.module("./native-fallback", () => ({
-		runNativeFallbackCompaction: async (args: Record<string, unknown>) => {
+		nativeFallback: async (args) => {
 			fallbackCalls.push(args);
-			return options.nativeFallbackResult ?? { ok: false, reason: "no-model-configured" };
+			return (options.nativeFallbackResult ?? { ok: false, reason: "no-model-configured" }) as never;
 		},
-	}));
-
-	mock.module("./remote-v2-client", () => ({
-		executeRemoteV2Compaction: async (args: Record<string, unknown>) => {
+		remoteCompact: async (args) => {
 			compactCalls.push(args);
-			return (
-				options.compactResult ?? {
-					ok: true,
-					status: 200,
-					compactedWindow: [{ type: "message", role: "assistant", status: "completed", id: "cmp_default", content: [] }],
-					compactResponseId: "resp_default",
-					createdAt: nextTimestamp(),
-					response: {
-						id: "resp_default",
-						created_at: nextTimestamp(),
-						output: [{ type: "message", role: "assistant", status: "completed", id: "cmp_default", content: [] }],
-					},
-				}
-			);
+			return (options.compactResult ?? {
+				ok: true,
+				status: 200,
+				compactedWindow: [{ type: "compaction", encrypted_content: "opaque-default" }],
+				compactResponseId: "resp_default",
+				createdAt: nextTimestamp(),
+				response: { id: "resp_default", status: "completed", output: [{ type: "compaction", encrypted_content: "opaque-default" }] },
+			}) as never;
 		},
-	}));
+	});
+	// Pi owns scheduling. The compaction extension only supplies/replays results.
+	expect([...handlers.keys()]).toEqual(["session_start", "context", "session_before_compact", "before_provider_request"]);
 
-	const handlers = new Map<string, HookHandler>();
-	const { default: extension } = await import(`./extension-runtime.ts?test=${crypto.randomUUID()}`);
-	extension({
-		on: (eventName: string, handler: HookHandler) => {
-			handlers.set(eventName, handler);
-		},
-	} as never);
-
+	const contextHook = handlers.get("context");
 	const sessionBeforeCompact = handlers.get("session_before_compact");
 	const beforeProviderRequest = handlers.get("before_provider_request");
-	if (!sessionBeforeCompact || !beforeProviderRequest) {
+	if (!contextHook || !sessionBeforeCompact || !beforeProviderRequest) {
 		throw new Error("Expected pi-openai-toolkit compaction hooks to register");
 	}
 
 	return {
+		contextHook,
 		sessionBeforeCompact,
 		beforeProviderRequest,
 		compactCalls,
@@ -438,10 +402,8 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 }
 
 afterEach(() => {
-	serializerImportCounter = 0;
 	timestampCounter = 0;
 	clearRequestContextCache();
-	mock.restore();
 	fs.rmSync(testArtifactRoot, { recursive: true, force: true });
 });
 
@@ -935,7 +897,7 @@ test("replay succeeds with extension-injected tail messages absent from session 
 	expect(JSON.stringify(rewritten.input)).not.toContain("Kept user context that Pi should stop duplicating.");
 });
 
-test("replay tolerates post-sentinel content unrelated to session entries (Pi never re-renders the pre-compaction window)", async () => {
+test("replay tolerates post-sentinel content unrelated to session entries (after retained-context filtering)", async () => {
 	const { beforeProviderRequest } = await loadHookHarness();
 	const model = { ...defaultModel };
 	const keptUser = createUserEntry("kept_user_pass", "Kept user context that Pi never re-renders after compaction.");
@@ -957,7 +919,7 @@ test("replay tolerates post-sentinel content unrelated to session entries (Pi ne
 	});
 
 	// Anything after the sentinel is preserved verbatim, no matter how it differs
-	// from session entries: Pi 0.84.3 never re-renders the pre-compaction window.
+	// from session entries: the context hook already removed the verified retained copies.
 	payload.input.push({ role: "user", content: [{ type: "input_text", text: "injected guidance with no session entry" }] });
 	const rewritten = (await beforeProviderRequest(
 		{ payload },
@@ -1886,4 +1848,95 @@ test("remote v2 stores an opaque checkpoint marker instead of inventing a readab
 	)) as { compaction: Record<string, unknown> };
 
 	expect(result.compaction.summary).toBe(NATIVE_COMPACTION_FALLBACK_SUMMARY);
+});
+
+test("first and recursive compaction preserve Pi cache policy and complete a trailing partial tool batch", async () => {
+	const model = { ...defaultModel, id: "gpt-6-astra", compat: { supportsExplicitPromptCacheMode: true } };
+	for (const recursive of [false, true]) {
+		for (const cache of [{ ttl: "30m" }, { mode: "explicit" }]) {
+			const { sessionBeforeCompact, beforeProviderRequest, compactCalls } = await loadHookHarness();
+			const old = createUserEntry("old", "Old context");
+			const previous = createCompactionEntry({ id: "checkpoint", firstKeptEntryId: old.id, model, compactedWindow: [{ type: "compaction", encrypted_content: "opaque-prior" }] });
+			const a = createToolCallBlock("call_a", "read", { path: "a" }, "fc_a");
+			const b = createToolCallBlock("call_b", "read", { path: "b" }, "fc_b");
+			const assistant = createAssistantEntry("assistant", [a, b], model, "toolUse");
+			const real = createToolResultEntry("result", a.id, "read", "real-a");
+			const branchEntries = recursive ? [old, previous, assistant, real] : [old, assistant, real];
+			const context = createContext({ model, branchEntries });
+			const payload = { model: model.id, input: [], prompt_cache_options: cache };
+			// No need to invent a replay payload just to seed the cache; the first
+			// request in this session supplies the actual live cache selection.
+			await beforeProviderRequest({ payload }, createContext({ model }));
+			const before = structuredClone(branchEntries);
+			await sessionBeforeCompact({ signal: new AbortController().signal, preparation: { tokensBefore: 100,
+				firstKeptEntryId: old.id, messagesToSummarize: [], turnPrefixMessages: [] } }, context);
+			expect(compactCalls).toHaveLength(1);
+			const request = compactCalls[0].request as { input: Array<Record<string, unknown>>; prompt_cache_options: unknown };
+			expect(request.prompt_cache_options).toEqual(cache);
+			const results = request.input.filter((item) => item.type === "function_call_output");
+			expect(results).toEqual([{ type: "function_call_output", call_id: "call_a", output: "real-a" },
+				{ type: "function_call_output", call_id: "call_b", output: "No result provided" }]);
+			if (recursive) expect(request.input[0]).toEqual({ type: "compaction", encrypted_content: "opaque-prior" });
+			expect(branchEntries).toEqual(before);
+			expect(payload.prompt_cache_options).toEqual(cache);
+		}
+	}
+});
+
+test("remote model override filters cache fields by the producer, not the consumer", async () => {
+	const cases = [
+		{ source: { supportsExplicitPromptCacheMode: true }, target: {}, fields: { prompt_cache_options: { ttl: "30m" } }, expected: {} },
+		{ source: {}, target: { supportsExplicitPromptCacheMode: true }, fields: { prompt_cache_retention: "24h" }, expected: {} },
+		{ source: { supportsExplicitPromptCacheMode: true }, target: { supportsExplicitPromptCacheMode: true, supportsLongCacheRetention: false }, fields: { prompt_cache_options: { ttl: "30m" } }, expected: {} },
+		{ source: {}, target: {}, fields: { prompt_cache_retention: "24h" }, expected: { prompt_cache_retention: "24h" } },
+	] as const;
+	for (const scenario of cases) {
+		const consumer = { ...defaultModel, id: "consumer", compat: scenario.source };
+		const producer = { ...defaultModel, id: "producer", compat: scenario.target };
+		const { sessionBeforeCompact, beforeProviderRequest, compactCalls } = await loadHookHarness({
+			config: { remoteCompactModel: "openai/producer" },
+		});
+		const payload = { model: consumer.id, input: [], prompt_cache_key: "cache-identity", ...scenario.fields };
+		const snapshot = structuredClone(payload);
+		await beforeProviderRequest({ payload }, createContext({ model: consumer }));
+		const user = createUserEntry("user", "Compact this history.");
+		await sessionBeforeCompact({ signal: new AbortController().signal, preparation: {
+			tokensBefore: 100, firstKeptEntryId: user.id, messagesToSummarize: [], turnPrefixMessages: [],
+		} }, createContext({ model: consumer, registryModels: [producer], branchEntries: [user] }));
+		expect(compactCalls).toHaveLength(1);
+		const request = compactCalls[0].request as Record<string, unknown>;
+		expect(request.model).toBe(producer.id);
+		expect(Object.fromEntries(Object.entries(request).filter(([key]) => key.startsWith("prompt_cache_"))))
+			.toEqual({ prompt_cache_key: "cache-identity", ...scenario.expected });
+		expect(payload).toEqual(snapshot);
+	}
+});
+
+test("context filtering honors effective auth endpoints and aborts partial retained matches", async () => {
+	const { contextHook } = await loadHookHarness();
+	const keptUser = createUserEntry("kept-user", "Covered user message");
+	const keptAssistant = createAssistantEntry("kept-assistant", [createTextBlock("Covered answer")]);
+	const checkpoint = createCompactionEntry({ id: "checkpoint", firstKeptEntryId: keptUser.id,
+		compactedWindow: [{ type: "compaction", encrypted_content: "opaque" }] });
+	const post = createUserEntry("post", "New message");
+	const branchEntries = [keptUser, keptAssistant, checkpoint, post];
+	const summary = createCompactionSummaryMessage(checkpoint);
+	const transient = { role: "user", content: "Transient extension content", timestamp: 999 };
+	const messages = [summary, toReplayMessage(keptUser), transient, toReplayMessage(keptAssistant), toReplayMessage(post)];
+	const before = structuredClone({ messages, branchEntries });
+	let aborts = 0;
+	const context = createContext({ branchEntries, model: { ...defaultModel, baseUrl: "https://configured.invalid/v1" },
+		resolveAuth: () => ({ ok: true, apiKey: "test-only", baseUrl: defaultModel.baseUrl }), onAbort: () => { aborts++; } });
+	const result = await contextHook({ messages }, context);
+	expect(result).toEqual({ messages: [summary, transient, toReplayMessage(post)] });
+	expect({ messages, branchEntries }).toEqual(before);
+	expect(aborts).toBe(0);
+	const otherEndpoint = createContext({ branchEntries,
+		resolveAuth: () => ({ ok: true, apiKey: "test-only", baseUrl: "https://other.invalid/v1" }) });
+	expect(await contextHook({ messages }, otherEndpoint)).toBeUndefined();
+	const modified = structuredClone(messages);
+	modified[3].content = [{ type: "text", text: "Modified retained answer" }];
+	expect(await contextHook({ messages: modified }, context)).toBeUndefined();
+	expect(aborts).toBe(1);
+	expect({ messages, branchEntries }).toEqual(before);
 });

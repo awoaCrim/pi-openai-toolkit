@@ -47,6 +47,7 @@ describe("transformWebSearchPayload", () => {
 			input: [],
 			tools: [existingTool],
 			include: ["reasoning.encrypted_content"],
+			prompt_cache_options: { ttl: "30m" },
 		};
 		const snapshot = structuredClone(payload);
 

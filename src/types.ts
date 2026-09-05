@@ -38,8 +38,6 @@ export type DebugArtifactKind =
 	| "compaction-event"
 	| "lifecycle";
 
-export type CompactionContinuationMode = "inline" | "followUp" | "off";
-
 /** Native-method fallback compaction: which model runs pi's compact() and how deeply. */
 export type NativeFallbackConfig = {
 	enabled: boolean;
@@ -52,13 +50,6 @@ export type NativeFallbackConfig = {
 	model?: string;
 	/** Thinking level passed to pi's native compact() when the fallback model runs. */
 	thinkingLevel: ThinkingLevel;
-};
-
-export type AutoCompactionConfig = {
-	enabled: boolean;
-	continuation: CompactionContinuationMode;
-	unsupportedFallback: "followUp" | "off";
-	reserveTokens?: number;
 };
 
 export type CompactionConfig = {
@@ -75,8 +66,6 @@ export type CompactionConfig = {
 	remoteCompactModel?: string;
 	/** Native-method fallback compaction policy (non-Responses APIs, or when the compact endpoint fails). */
 	nativeFallback: NativeFallbackConfig;
-	/** Threshold-triggered compaction and same-tool-loop continuation policy. */
-	autoCompaction: AutoCompactionConfig;
 	/** Subset of RESPONSES_COMPACT_CAPABLE_APIS that should use remote compaction. */
 	responsesApis: string[];
 	notifyOnLoad: boolean;
@@ -494,13 +483,6 @@ export function createNativeCompactionResult(
 	};
 }
 
-export const DEFAULT_AUTO_COMPACTION_CONFIG: AutoCompactionConfig = {
-	enabled: true,
-	continuation: "inline",
-	unsupportedFallback: "followUp",
-	reserveTokens: undefined,
-};
-
 export const DEFAULT_NATIVE_FALLBACK_CONFIG: NativeFallbackConfig = {
 	enabled: true,
 	model: undefined,
@@ -512,7 +494,6 @@ export const DEFAULT_COMPACTION_CONFIG: CompactionConfig = {
 	allowCompactionContinuityBreak: false,
 	remoteCompactModel: undefined,
 	nativeFallback: { ...DEFAULT_NATIVE_FALLBACK_CONFIG },
-	autoCompaction: { ...DEFAULT_AUTO_COMPACTION_CONFIG },
 	responsesApis: [...RESPONSES_COMPACT_CAPABLE_APIS],
 	notifyOnLoad: false,
 	debug: false,

@@ -46,12 +46,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(false);
 		expect(loaded.config.compaction.remoteCompactModel).toBeUndefined();
 		expect(loaded.config.compaction.nativeFallback).toEqual({ ...DEFAULT_NATIVE_FALLBACK_CONFIG });
-		expect(loaded.config.compaction.autoCompaction).toEqual({
-			enabled: true,
-			continuation: "inline",
-			unsupportedFallback: "followUp",
-			reserveTokens: undefined,
-		});
+		expect(loaded.config.compaction).not.toHaveProperty("autoCompaction");
 		expect(loaded.config.compaction.responsesApis).toEqual([
 			...DEFAULT_COMPACTION_CONFIG.responsesApis,
 		]);
@@ -82,12 +77,6 @@ describe("loadToolkitConfig", () => {
 						enabled: true,
 						model: " google/gemini-2.5-flash ",
 						thinkingLevel: "medium",
-					},
-					autoCompaction: {
-						enabled: true,
-						continuation: "followUp",
-						unsupportedFallback: "off",
-						reserveTokens: 4096,
 					},
 					responsesApis: ["openai-responses"],
 					debug: true,
@@ -137,12 +126,7 @@ describe("loadToolkitConfig", () => {
 			model: "google/gemini-2.5-flash",
 			thinkingLevel: "medium",
 		});
-		expect(loaded.config.compaction.autoCompaction).toEqual({
-			enabled: true,
-			continuation: "followUp",
-			unsupportedFallback: "off",
-			reserveTokens: 4096,
-		});
+		expect(loaded.config.compaction).not.toHaveProperty("autoCompaction");
 		expect(loaded.config.compaction.responsesApis).toEqual(["openai-responses"]);
 		expect(loaded.config.compaction.debug).toBe(true);
 		expect(loaded.config.compaction.notifyOnLoad).toBe(true);
@@ -276,12 +260,6 @@ describe("loadToolkitConfig", () => {
 						thinkingLevel: "ultra",
 						futureOption: true,
 					},
-					autoCompaction: {
-						enabled: "yes",
-						continuation: "later",
-						unsupportedFallback: "retry",
-						reserveTokens: -1,
-					},
 					responsesApis: ["openai-responses", "anthropic-messages"],
 					artifactRoot: "",
 				},
@@ -310,12 +288,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(false);
 		expect(loaded.config.compaction.remoteCompactModel).toBeUndefined();
 		expect(loaded.config.compaction.nativeFallback).toEqual({ ...DEFAULT_NATIVE_FALLBACK_CONFIG });
-		expect(loaded.config.compaction.autoCompaction).toEqual({
-			enabled: true,
-			continuation: "inline",
-			unsupportedFallback: "followUp",
-			reserveTokens: undefined,
-		});
+		expect(loaded.config.compaction).not.toHaveProperty("autoCompaction");
 		expect(loaded.config.compaction.responsesApis).toEqual(["openai-responses"]);
 		expect(loaded.config.webSearch).toEqual({ enabled: true, models: ["provider/model"] });
 		expect(loaded.config.imageGeneration).toEqual({ enabled: false });
@@ -324,7 +297,7 @@ describe("loadToolkitConfig", () => {
 			models: [],
 			extraTools: [],
 		});
-		expect(loaded.warnings.length).toBeGreaterThanOrEqual(21);
+		expect(loaded.warnings.length).toBeGreaterThanOrEqual(17);
 	});
 
 	test("unknown fields and malformed feature sections warn without changing defaults", () => {
@@ -396,4 +369,13 @@ describe("loadToolkitConfig", () => {
 			path.resolve(path.dirname(configPath), "artifacts"),
 		);
 	});
+});
+
+test("retired autoCompaction configuration is ignored without rewriting user settings", () => {
+	const content = JSON.stringify({ compaction: { autoCompaction: { enabled: true, continuation: "followUp", reserveTokens: 0 } } });
+	const configPath = writeTempConfig(content);
+	const loaded = loadToolkitConfig(configPath);
+	expect(loaded.config.compaction).not.toHaveProperty("autoCompaction");
+	expect(loaded.warnings).toEqual(["Ignoring compaction.autoCompaction: unknown field."]);
+	expect(fs.readFileSync(configPath, "utf8")).toBe(content);
 });

@@ -12,6 +12,8 @@ export type CompactionRequestExtras = {
 	reasoning?: Record<string, unknown>;
 	service_tier?: string;
 	prompt_cache_key?: string;
+	prompt_cache_retention?: "in_memory" | "24h";
+	prompt_cache_options?: Record<string, unknown>;
 	text?: Record<string, unknown>;
 };
 
@@ -75,6 +77,12 @@ export function rememberRequestContext(
 		if (typeof payload.prompt_cache_key === "string" && payload.prompt_cache_key.trim().length > 0) {
 			extras.prompt_cache_key = payload.prompt_cache_key;
 		}
+		if (payload.prompt_cache_retention === "in_memory" || payload.prompt_cache_retention === "24h") {
+			extras.prompt_cache_retention = payload.prompt_cache_retention;
+		}
+		if (isRecord(payload.prompt_cache_options)) {
+			extras.prompt_cache_options = structuredClone(payload.prompt_cache_options);
+		}
 		if (isRecord(payload.text)) {
 			extras.text = structuredClone(payload.text);
 		}
@@ -88,14 +96,39 @@ export function rememberRequestContext(
 	}
 }
 
-/** Return cached extras only for the exact provider/API/model/base URL/session identity. */
-export function getCompactionRequestExtras(identity: RequestContextIdentity): CompactionRequestExtras | undefined {
+/**
+ * Look up the exact live-request identity. When building a synthetic request,
+ * supply its producer to omit cache fields unsupported by that model/API.
+ * No TTL conversion or implicit cache policy is applied.
+ */
+export function getCompactionRequestExtras(
+	identity: RequestContextIdentity,
+	producer?: { api: string; compat?: unknown },
+): CompactionRequestExtras | undefined {
 	if (!cached || !sameIdentity(cached.identity, identity)) {
 		return undefined;
 	}
 
 	try {
-		return structuredClone(cached.extras);
+		const extras = structuredClone(cached.extras);
+		if (producer) {
+			const compat = isRecord(producer.compat) ? producer.compat : {};
+			if (producer.api !== "openai-responses") {
+				delete extras.prompt_cache_options;
+				delete extras.prompt_cache_retention;
+			} else {
+				if (compat.supportsExplicitPromptCacheMode === true) {
+					delete extras.prompt_cache_retention;
+				} else {
+					delete extras.prompt_cache_options;
+				}
+				if (compat.supportsLongCacheRetention === false) {
+					if (extras.prompt_cache_options?.ttl !== undefined) delete extras.prompt_cache_options;
+					if (extras.prompt_cache_retention === "24h") delete extras.prompt_cache_retention;
+				}
+			}
+		}
+		return extras;
 	} catch {
 		return undefined;
 	}

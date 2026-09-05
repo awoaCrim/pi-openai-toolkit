@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { writeDebugArtifact } from "./debug";
 import { buildResponsesRequestHeaders } from "./responses-headers";
 import type { NativeCompactionRuntime } from "./runtime";
@@ -23,7 +24,8 @@ export type RemoteV2ResponseEnvelope = Record<string, unknown> & {
 	id?: string;
 	created_at?: number | string;
 	status: "completed";
-	output: RemoteV2CompactionItem[];
+	/** Normalized output always includes the reconciled checkpoint. */
+	output: unknown[];
 	usage?: RemoteV2ResponseUsage;
 };
 
@@ -37,7 +39,11 @@ export type RemoteV2CompactionClientFailureReason =
 	| "missing-completed-event"
 	| "incomplete-response"
 	| "invalid-compaction-count"
-	| "malformed-compaction-item";
+	| "malformed-compaction-item"
+	| "conflicting-compaction-item"
+	| "invalid-compaction-metadata"
+	| "invalid-event-order"
+	| "duplicate-completed-event";
 
 export type RemoteV2CompactionClientSuccess = {
 	ok: true;
@@ -230,6 +236,330 @@ function summarizeEvents(events: readonly ParsedSseEvent[]): unknown[] {
 	});
 }
 
+type OptionalMetadata<T> =
+	| { valid: true; value?: T }
+	| { valid: false };
+
+type CompactionCheckpointCandidate = {
+	item: RemoteV2CompactionItem;
+	responseId?: string;
+	outputIndex?: number;
+	outputPosition?: number;
+};
+
+type CheckpointReconciliation =
+	| {
+			ok: true;
+			response: RemoteV2ResponseEnvelope;
+			compactedWindow: [RemoteV2CompactionItem];
+	  }
+	| {
+			ok: false;
+			reason:
+				| "error-event"
+				| "missing-completed-event"
+				| "incomplete-response"
+				| "invalid-compaction-count"
+				| "malformed-compaction-item"
+				| "conflicting-compaction-item"
+				| "invalid-compaction-metadata"
+				| "invalid-event-order"
+				| "duplicate-completed-event";
+			responseJson?: unknown;
+			errorMessage?: string;
+	  };
+
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+	return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function readOptionalNonEmptyString(value: Record<string, unknown>, key: string): OptionalMetadata<string> {
+	if (!hasOwn(value, key)) {
+		return { valid: true };
+	}
+	return isNonEmptyString(value[key]) ? { valid: true, value: value[key] } : { valid: false };
+}
+
+function readOptionalOutputIndex(value: Record<string, unknown>): OptionalMetadata<number> {
+	if (!hasOwn(value, "output_index")) {
+		return { valid: true };
+	}
+
+	const outputIndex = value.output_index;
+	return typeof outputIndex === "number" && Number.isSafeInteger(outputIndex) && outputIndex >= 0
+		? { valid: true, value: outputIndex }
+		: { valid: false };
+}
+
+function mergeCompactionItems(
+	itemDone: RemoteV2CompactionItem,
+	terminalOutput: RemoteV2CompactionItem,
+): RemoteV2CompactionItem | undefined {
+	for (const [key, value] of Object.entries(itemDone)) {
+		if (hasOwn(terminalOutput, key) && !isDeepStrictEqual(value, terminalOutput[key])) return undefined;
+	}
+	return structuredClone({ ...itemDone, ...terminalOutput });
+}
+
+function readResponseId(value: Record<string, unknown>): OptionalMetadata<string> {
+	const direct = readOptionalNonEmptyString(value, "response_id");
+	if (!direct.valid) {
+		return direct;
+	}
+
+	const nestedResponse: OptionalMetadata<string> = isRecord(value.response) ? readOptionalNonEmptyString(value.response, "id") : { valid: true };
+	if (!nestedResponse.valid) {
+		return nestedResponse;
+	}
+	if (direct.value !== undefined && nestedResponse.value !== undefined && direct.value !== nestedResponse.value) {
+		return { valid: false };
+	}
+	return { valid: true, value: direct.value ?? nestedResponse.value };
+}
+
+function readCheckpointCandidate(
+	item: Record<string, unknown>,
+	metadataSource: Record<string, unknown> | undefined,
+	outputPosition?: number,
+): { ok: true; candidate: CompactionCheckpointCandidate } | { ok: false; reason: "malformed-compaction-item" | "invalid-compaction-metadata" } {
+	if (!isRemoteV2CompactionItem(item)) {
+		return { ok: false, reason: "malformed-compaction-item" };
+	}
+
+	const itemId = readOptionalNonEmptyString(item, "id");
+	const itemResponseId = readResponseId(item);
+	const itemOutputIndex = readOptionalOutputIndex(item);
+	if (!itemId.valid || !itemResponseId.valid || !itemOutputIndex.valid) {
+		return { ok: false, reason: "invalid-compaction-metadata" };
+	}
+
+	const sourceResponseId: OptionalMetadata<string> = metadataSource ? readResponseId(metadataSource) : { valid: true };
+	const sourceOutputIndex: OptionalMetadata<number> = metadataSource ? readOptionalOutputIndex(metadataSource) : { valid: true };
+	if (!sourceResponseId.valid || !sourceOutputIndex.valid) {
+		return { ok: false, reason: "invalid-compaction-metadata" };
+	}
+	if (
+		itemResponseId.value !== undefined &&
+		sourceResponseId.value !== undefined &&
+		itemResponseId.value !== sourceResponseId.value
+	) {
+		return { ok: false, reason: "invalid-compaction-metadata" };
+	}
+	if (
+		itemOutputIndex.value !== undefined &&
+		sourceOutputIndex.value !== undefined &&
+		itemOutputIndex.value !== sourceOutputIndex.value
+	) {
+		return { ok: false, reason: "invalid-compaction-metadata" };
+	}
+
+	const outputIndex = sourceOutputIndex.value ?? itemOutputIndex.value;
+	if (outputPosition !== undefined && outputIndex !== undefined && outputIndex !== outputPosition) {
+		return { ok: false, reason: "invalid-compaction-metadata" };
+	}
+	return {
+		ok: true,
+		candidate: {
+			item: structuredClone(item),
+			responseId: sourceResponseId.value ?? itemResponseId.value,
+			outputIndex,
+			outputPosition,
+		},
+	};
+}
+
+function isPostTerminalEvent(event: ParsedSseEvent): boolean {
+	if (event.dataText === "[DONE]") {
+		return true;
+	}
+	return getEventType(event) === "keepalive";
+}
+
+function reconcileSseCheckpoint(events: readonly ParsedSseEvent[]): CheckpointReconciliation {
+	const errorEvent = events.find((event) => {
+		const type = getEventType(event);
+		return type === "error" || type === "response.failed" || type === "response.incomplete";
+	});
+	if (errorEvent) {
+		return {
+			ok: false,
+			reason: "error-event",
+			responseJson: errorEvent.data,
+			errorMessage: getErrorMessage(errorEvent.data),
+		};
+	}
+
+	const completedIndexes = events.flatMap((event, index) => (getEventType(event) === "response.completed" ? [index] : []));
+	if (completedIndexes.length === 0) {
+		return { ok: false, reason: "missing-completed-event" };
+	}
+	if (completedIndexes.length > 1) {
+		return { ok: false, reason: "duplicate-completed-event" };
+	}
+	const terminalIndex = completedIndexes[0]!;
+
+	for (let index = 0; index < events.length; index += 1) {
+		const event = events[index]!;
+		if (index < terminalIndex && event.dataText === "[DONE]") {
+			return { ok: false, reason: "invalid-event-order", responseJson: event.dataText };
+		}
+		if (index > terminalIndex && !isPostTerminalEvent(event)) {
+			return { ok: false, reason: "invalid-event-order", responseJson: event.data };
+		}
+	}
+
+	const completedEvent = events[terminalIndex]!;
+	const completedData = isRecord(completedEvent.data) ? completedEvent.data : undefined;
+	const completedResponse = completedData && isRecord(completedData.response) ? completedData.response : undefined;
+	if (!completedResponse) {
+		return { ok: false, reason: "incomplete-response" };
+	}
+
+	if (completedResponse.status !== "completed") {
+		return { ok: false, reason: "incomplete-response", responseJson: completedResponse };
+	}
+	const hasOutput = hasOwn(completedResponse, "output");
+	if (hasOutput && !Array.isArray(completedResponse.output)) {
+		return { ok: false, reason: "incomplete-response", responseJson: completedResponse };
+	}
+	const terminalOutput: unknown[] | undefined = Array.isArray(completedResponse.output) ? completedResponse.output : undefined;
+
+	const terminalResponseId = readOptionalNonEmptyString(completedResponse, "id");
+	const completedEventResponseId: OptionalMetadata<string> = completedData ? readResponseId(completedData) : { valid: true };
+	if (!terminalResponseId.valid || !completedEventResponseId.valid) {
+		return { ok: false, reason: "invalid-compaction-metadata", responseJson: completedResponse };
+	}
+	if (
+		terminalResponseId.value !== undefined &&
+		completedEventResponseId.value !== undefined &&
+		terminalResponseId.value !== completedEventResponseId.value
+	) {
+		return { ok: false, reason: "invalid-compaction-metadata", responseJson: completedResponse };
+	}
+	let responseId = terminalResponseId.value ?? completedEventResponseId.value;
+	for (const event of events.slice(0, terminalIndex)) {
+		if (getEventType(event) !== "response.created" || !isRecord(event.data)) continue;
+		const createdId = readResponseId(event.data);
+		if (!createdId.valid || (createdId.value !== undefined && responseId !== undefined && createdId.value !== responseId)) {
+			return { ok: false, reason: "invalid-compaction-metadata", responseJson: event.data };
+		}
+		responseId ??= createdId.value;
+	}
+
+	let itemDoneCandidate: CompactionCheckpointCandidate | undefined;
+	for (let index = 0; index < terminalIndex; index += 1) {
+		const event = events[index]!;
+		if (getEventType(event) !== "response.output_item.done") {
+			continue;
+		}
+		if (!isRecord(event.data) || !isRecord(event.data.item)) {
+			return { ok: false, reason: "malformed-compaction-item", responseJson: event.data };
+		}
+		if (event.data.item.type !== "compaction") {
+			continue;
+		}
+		if (itemDoneCandidate) {
+			return { ok: false, reason: "invalid-compaction-count", responseJson: event.data.item };
+		}
+		const candidate = readCheckpointCandidate(event.data.item, event.data);
+		if (!candidate.ok) {
+			return { ok: false, reason: candidate.reason, responseJson: event.data.item };
+		}
+		itemDoneCandidate = candidate.candidate;
+	}
+
+	let terminalCandidate: CompactionCheckpointCandidate | undefined;
+	let terminalPosition: number | undefined;
+	if (terminalOutput) {
+		const compactionPositions = terminalOutput.flatMap((item, index) =>
+			isRecord(item) && item.type === "compaction" ? [index] : [],
+		);
+		if (compactionPositions.length > 1) {
+			return { ok: false, reason: "invalid-compaction-count", responseJson: completedResponse };
+		}
+		if (compactionPositions.length === 1) {
+			terminalPosition = compactionPositions[0]!;
+			const outputItem = terminalOutput[terminalPosition];
+			if (!isRecord(outputItem)) {
+				return { ok: false, reason: "malformed-compaction-item", responseJson: outputItem };
+			}
+			const candidate = readCheckpointCandidate(outputItem, undefined, terminalPosition);
+			if (!candidate.ok) {
+				return { ok: false, reason: candidate.reason, responseJson: outputItem };
+			}
+			terminalCandidate = candidate.candidate;
+		}
+	}
+
+	if (!itemDoneCandidate && !terminalCandidate) {
+		return { ok: false, reason: "invalid-compaction-count", responseJson: completedResponse };
+	}
+
+	for (const candidate of [itemDoneCandidate, terminalCandidate]) {
+		if (
+			candidate?.responseId !== undefined &&
+			responseId !== undefined &&
+			candidate.responseId !== responseId
+		) {
+			return { ok: false, reason: "invalid-compaction-metadata", responseJson: candidate.item };
+		}
+	}
+	if (
+		itemDoneCandidate?.responseId !== undefined &&
+		terminalCandidate?.responseId !== undefined &&
+		itemDoneCandidate.responseId !== terminalCandidate.responseId
+	) {
+		return { ok: false, reason: "invalid-compaction-metadata", responseJson: terminalCandidate.item };
+	}
+	if (
+		itemDoneCandidate?.outputIndex !== undefined &&
+		terminalCandidate?.outputPosition !== undefined &&
+		itemDoneCandidate.outputIndex !== terminalCandidate.outputPosition
+	) {
+		return { ok: false, reason: "invalid-compaction-metadata", responseJson: terminalCandidate.item };
+	}
+	if (
+		itemDoneCandidate?.outputIndex !== undefined &&
+		terminalOutput !== undefined &&
+		terminalOutput.length > 0 &&
+		terminalCandidate === undefined &&
+		itemDoneCandidate.outputIndex > terminalOutput.length
+	) {
+		return { ok: false, reason: "invalid-compaction-metadata", responseJson: completedResponse };
+	}
+
+	let canonicalItem: RemoteV2CompactionItem;
+	if (itemDoneCandidate && terminalCandidate) {
+		const merged = mergeCompactionItems(itemDoneCandidate.item, terminalCandidate.item);
+		if (!merged) {
+			return { ok: false, reason: "conflicting-compaction-item", responseJson: terminalCandidate.item };
+		}
+		canonicalItem = merged;
+	} else {
+		canonicalItem = structuredClone((itemDoneCandidate ?? terminalCandidate)!.item);
+	}
+
+	const responseEnvelope = structuredClone(completedResponse) as RemoteV2ResponseEnvelope;
+	if (terminalOutput) {
+		const output = structuredClone(terminalOutput);
+		if (terminalPosition !== undefined) {
+			output[terminalPosition] = structuredClone(canonicalItem);
+		} else {
+			const insertionIndex = itemDoneCandidate?.outputIndex ?? output.length;
+			output.splice(insertionIndex, 0, structuredClone(canonicalItem));
+		}
+		responseEnvelope.output = output;
+	} else {
+		responseEnvelope.output = [structuredClone(canonicalItem)];
+	}
+
+	return {
+		ok: true,
+		response: responseEnvelope,
+		compactedWindow: [structuredClone(canonicalItem)],
+	};
+}
+
 export async function executeRemoteV2Compaction(
 	options: ExecuteRemoteV2CompactionOptions,
 ): Promise<RemoteV2CompactionClientResult> {
@@ -333,17 +663,14 @@ export async function executeRemoteV2Compaction(
 			return failure;
 		}
 
-		const errorEvent = events.find((event) => {
-			const type = getEventType(event);
-			return type === "error" || type === "response.failed" || type === "response.incomplete";
-		});
-		if (errorEvent) {
+		const reconciliation = reconcileSseCheckpoint(events);
+		if (!reconciliation.ok) {
 			const failure: RemoteV2CompactionClientFailure = {
 				ok: false,
-				reason: "error-event",
+				reason: reconciliation.reason,
 				status: response.status,
-				errorMessage: getErrorMessage(errorEvent.data),
-				responseJson: errorEvent.data,
+				errorMessage: reconciliation.errorMessage,
+				responseJson: reconciliation.responseJson,
 			};
 			writeCompactArtifact(
 				{
@@ -358,101 +685,15 @@ export async function executeRemoteV2Compaction(
 			return failure;
 		}
 
-		const completedEvent = events.find((event) => getEventType(event) === "response.completed");
-		const completedData = completedEvent && isRecord(completedEvent.data) ? completedEvent.data : undefined;
-		const completedResponse = completedData && isRecord(completedData.response) ? completedData.response : undefined;
-		if (!completedResponse) {
-			const failure: RemoteV2CompactionClientFailure = {
-				ok: false,
-				reason: "missing-completed-event",
-				status: response.status,
-			};
-			writeCompactArtifact(
-				{
-					protocol: "remote_compaction_v2",
-					request: { url: runtime.responsesUrl, headers, body: request },
-					response: { status: response.status, headers: responseHeaders, events: summarizeEvents(events) },
-					outcome: failure,
-				},
-				settings,
-				context,
-			);
-			return failure;
-		}
-
-		if (completedResponse.status !== "completed" || !Array.isArray(completedResponse.output)) {
-			const failure: RemoteV2CompactionClientFailure = {
-				ok: false,
-				reason: "incomplete-response",
-				status: response.status,
-				responseJson: completedResponse,
-			};
-			writeCompactArtifact(
-				{
-					protocol: "remote_compaction_v2",
-					request: { url: runtime.responsesUrl, headers, body: request },
-					response: { status: response.status, headers: responseHeaders, events: summarizeEvents(events) },
-					outcome: failure,
-				},
-				settings,
-				context,
-			);
-			return failure;
-		}
-
-		const compactionItems = completedResponse.output.filter(
-			(item): item is Record<string, unknown> => isRecord(item) && item.type === "compaction",
-		);
-		if (compactionItems.length !== 1) {
-			const failure: RemoteV2CompactionClientFailure = {
-				ok: false,
-				reason: "invalid-compaction-count",
-				status: response.status,
-				responseJson: completedResponse,
-			};
-			writeCompactArtifact(
-				{
-					protocol: "remote_compaction_v2",
-					request: { url: runtime.responsesUrl, headers, body: request },
-					response: { status: response.status, headers: responseHeaders, events: summarizeEvents(events) },
-					outcome: failure,
-				},
-				settings,
-				context,
-			);
-			return failure;
-		}
-
-		const compactionItem = compactionItems[0];
-		if (!isRemoteV2CompactionItem(compactionItem)) {
-			const failure: RemoteV2CompactionClientFailure = {
-				ok: false,
-				reason: "malformed-compaction-item",
-				status: response.status,
-				responseJson: compactionItem,
-			};
-			writeCompactArtifact(
-				{
-					protocol: "remote_compaction_v2",
-					request: { url: runtime.responsesUrl, headers, body: request },
-					response: { status: response.status, headers: responseHeaders, events: summarizeEvents(events) },
-					outcome: failure,
-				},
-				settings,
-				context,
-			);
-			return failure;
-		}
-
-		const responseEnvelope = completedResponse as RemoteV2ResponseEnvelope;
+		const responseEnvelope = reconciliation.response;
 		const success: RemoteV2CompactionClientSuccess = {
 			ok: true,
 			status: response.status,
-			compactedWindow: [structuredClone(compactionItem)],
+			compactedWindow: reconciliation.compactedWindow,
 			compactResponseId: isNonEmptyString(responseEnvelope.id) ? responseEnvelope.id.trim() : undefined,
 			createdAt: normalizeResponseTimestamp(responseEnvelope.created_at),
 			usage: isRecord(responseEnvelope.usage) ? (structuredClone(responseEnvelope.usage) as RemoteV2ResponseUsage) : undefined,
-			response: structuredClone(responseEnvelope),
+			response: responseEnvelope,
 		};
 		writeCompactArtifact(
 			{

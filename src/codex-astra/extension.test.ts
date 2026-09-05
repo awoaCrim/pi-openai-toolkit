@@ -94,10 +94,14 @@ describe("codex astra extension wiring", () => {
 			}),
 		).toBeUndefined();
 
-		const changed = requestPayload("max", [
-			{ role: "user", content: "a" },
-			{ role: "user", content: "b" },
-		]);
+		const changed = {
+			...requestPayload("max", [
+				{ role: "user", content: "a" },
+				{ role: "user", content: "b" },
+			]),
+			prompt_cache_options: { ttl: "30m" },
+		};
+		const before = structuredClone(changed);
 		const replaced = fire("before_provider_request", { type: "before_provider_request", payload: changed }) as any;
 
 		expect(replaced).toBeDefined();
@@ -106,6 +110,8 @@ describe("codex astra extension wiring", () => {
 		// Unknown fields survive the rewrite untouched.
 		expect(replaced.store).toBe(false);
 		expect(replaced.stream).toBe(true);
+		expect(replaced.prompt_cache_options).toEqual({ ttl: "30m" });
+		expect(changed).toEqual(before);
 	});
 
 	test("model outside the allowlist is never rewritten", () => {
