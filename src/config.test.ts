@@ -44,6 +44,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.warnings).toEqual([]);
 		expect(loaded.config.compaction.enabled).toBe(true);
 		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(false);
+		expect(loaded.config.compaction.contextManagement).toBe("off");
 		expect(loaded.config.compaction.remoteCompactModel).toBeUndefined();
 		expect(loaded.config.compaction.nativeFallback).toEqual({ ...DEFAULT_NATIVE_FALLBACK_CONFIG });
 		expect(loaded.config.compaction).not.toHaveProperty("autoCompaction");
@@ -71,6 +72,8 @@ describe("loadToolkitConfig", () => {
 			JSON.stringify({
 				compaction: {
 					enabled: true,
+					contextManagement: "remote",
+					codexGatewayModels: [" uwoacrimson/gpt-5.6-luna ", "uwoacrimson/gpt-5.6-sol", ""],
 					allowCompactionContinuityBreak: true,
 					remoteCompactModel: " uwoacrimson/gpt-5.6-luna ",
 					nativeFallback: {
@@ -120,6 +123,11 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.source).toBe(configPath);
 		expect(loaded.warnings).toEqual([]);
 		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(true);
+		expect(loaded.config.compaction.contextManagement).toBe("remote");
+		expect(loaded.config.compaction.codexGatewayModels).toEqual([
+			"uwoacrimson/gpt-5.6-luna",
+			"uwoacrimson/gpt-5.6-sol",
+		]);
 		expect(loaded.config.compaction.remoteCompactModel).toBe("uwoacrimson/gpt-5.6-luna");
 		expect(loaded.config.compaction.nativeFallback).toEqual({
 			enabled: true,
@@ -130,6 +138,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.responsesApis).toEqual(["openai-responses"]);
 		expect(loaded.config.compaction.debug).toBe(true);
 		expect(loaded.config.compaction.notifyOnLoad).toBe(true);
+		expect(loaded.config.compaction.contextReminderThresholdPercent).toBe(5);
 		expect(loaded.config.compaction.artifactRoot).toBe(path.join(os.homedir(), "artifacts/pot"));
 		expect(loaded.config.webSearch).toEqual({ enabled: false, models: ["provider/model"] });
 		expect(loaded.config.imageGeneration).toEqual({ enabled: false });
@@ -230,6 +239,37 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.warnings).toEqual([
 			"Ignoring autoMode.classifier: expected a JSON object.",
 			"Ignoring autoMode.circuitBreaker: expected a JSON object.",
+		]);
+	});
+
+	test("contextReminderThresholdPercent accepts 0-100 and ignores out-of-range", () => {
+		const configPath = writeTempConfig(
+			JSON.stringify({
+				compaction: { contextManagement: "remote", contextReminderThresholdPercent: 10 },
+			}),
+		);
+		const loaded = loadToolkitConfig(configPath);
+		expect(loaded.config.compaction.contextReminderThresholdPercent).toBe(10);
+		expect(loaded.warnings).toEqual([]);
+
+		const disabledPath = writeTempConfig(
+			JSON.stringify({
+				compaction: { contextManagement: "remote", contextReminderThresholdPercent: 0 },
+			}),
+		);
+		const disabled = loadToolkitConfig(disabledPath);
+		expect(disabled.config.compaction.contextReminderThresholdPercent).toBe(0);
+		expect(disabled.warnings).toEqual([]);
+
+		const invalidPath = writeTempConfig(
+			JSON.stringify({
+				compaction: { contextManagement: "remote", contextReminderThresholdPercent: 150 },
+			}),
+		);
+		const invalid = loadToolkitConfig(invalidPath);
+		expect(invalid.config.compaction.contextReminderThresholdPercent).toBe(5);
+		expect(invalid.warnings).toEqual([
+			"Ignoring compaction.contextReminderThresholdPercent: expected an integer between 0 and 100.",
 		]);
 	});
 
@@ -357,6 +397,25 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.webSearch.enabled).toBe(true);
 		expect(loaded.config.imageGeneration.enabled).toBe(false);
 		expect(loaded.config.autoMode.enabled).toBe(true);
+	});
+
+	test("contextManagement accepts only trimmed off/remote values and warns for local/tree/invalid values", () => {
+		const remotePath = writeTempConfig(JSON.stringify({ compaction: { contextManagement: " remote " } }));
+		expect(loadToolkitConfig(remotePath).config.compaction.contextManagement).toBe("remote");
+
+		const invalidPath = writeTempConfig(JSON.stringify({ compaction: { contextManagement: "local" } }));
+		const invalid = loadToolkitConfig(invalidPath);
+		expect(invalid.config.compaction.contextManagement).toBe("off");
+		expect(invalid.warnings).toEqual([
+			"Ignoring compaction.contextManagement: expected one of off, remote.",
+		]);
+	});
+
+	test("contextManagement does not rewrite the config file", () => {
+		const content = JSON.stringify({ compaction: { contextManagement: "tree" } });
+		const configPath = writeTempConfig(content);
+		loadToolkitConfig(configPath);
+		expect(fs.readFileSync(configPath, "utf8")).toBe(content);
 	});
 
 	test("relative artifactRoot resolves against the config directory", () => {

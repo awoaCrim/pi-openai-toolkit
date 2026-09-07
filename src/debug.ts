@@ -14,11 +14,11 @@ import {
 	type RedactOptions,
 } from "./types";
 
-const CRITICAL_KEY_RE = /(authorization|api[-_]?key|token|credential|oauth|auth|encrypted[_-]?content)/i;
-const SENSITIVE_KEY_RE = /(authorization|api[-_]?key|token|secret|password|cookie|set-cookie|signature|credential|oauth|auth|encrypted[_-]?content)/i;
+const CRITICAL_KEY_RE = /(authorization|api[-_]?key|token|credential|oauth|auth|account[-_]?id|encrypted[_-]?(content|output))/i;
+const SENSITIVE_KEY_RE = /(authorization|api[-_]?key|token|secret|password|cookie|set-cookie|signature|credential|oauth|auth|account[-_]?id|encrypted[_-]?(content|output))/i;
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._\-+/=]+/gi;
 const OPENAI_KEY_RE = /\bsk-[A-Za-z0-9\-_]+\b/g;
-const HEADER_TOKEN_RE = /\b(x-api-key|api-key|authorization)\b\s*[:=]\s*[^\s,;]+/gi;
+const HEADER_TOKEN_RE = /\b(x-api-key|api-key|authorization|chatgpt-account-id)\b\s*[:=]\s*[^\s,;]+/gi;
 const SENSITIVE_QUERY_RE = /([?&](?:api[-_]?key|access[-_]?token|token|secret|signature|credential|password)=)[^&#\s]*/gi;
 
 function ensureDir(dirPath: string) {

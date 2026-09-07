@@ -38,6 +38,8 @@ export type DebugArtifactKind =
 	| "compaction-event"
 	| "lifecycle";
 
+export type ContextManagementMode = "off" | "remote";
+
 /** Native-method fallback compaction: which model runs pi's compact() and how deeply. */
 export type NativeFallbackConfig = {
 	enabled: boolean;
@@ -54,6 +56,10 @@ export type NativeFallbackConfig = {
 
 export type CompactionConfig = {
 	enabled: boolean;
+	/** Optional Codex Remote Context management. Disabled by default for compatibility. */
+	contextManagement: ContextManagementMode;
+	/** Exact provider/model specs allowed to use the extension's CPA-backed Codex gateway. */
+	codexGatewayModels: string[];
 	/**
 	 * Allow a Responses session whose latest compaction was not created by this extension
 	 * to restart native compaction from Pi's current serialized session context.
@@ -66,8 +72,15 @@ export type CompactionConfig = {
 	remoteCompactModel?: string;
 	/** Native-method fallback compaction policy (non-Responses APIs, or when the compact endpoint fails). */
 	nativeFallback: NativeFallbackConfig;
-	/** Subset of RESPONSES_COMPACT_CAPABLE_APIS that should use remote compaction. */
+	/**
+	 * Subset of RESPONSES_COMPACT_CAPABLE_APIS that should use remote compaction.
+	 */
 	responsesApis: string[];
+	/**
+	 * Percentage of the context window that, when remaining tokens drop below it,
+	 * triggers a checkpoint/new_context reminder (0-100; 0 disables reminders).
+	 */
+	contextReminderThresholdPercent: number;
 	notifyOnLoad: boolean;
 	debug: boolean;
 	logProviderPayloads: boolean;
@@ -491,10 +504,13 @@ export const DEFAULT_NATIVE_FALLBACK_CONFIG: NativeFallbackConfig = {
 
 export const DEFAULT_COMPACTION_CONFIG: CompactionConfig = {
 	enabled: true,
+	contextManagement: "off",
+	codexGatewayModels: [],
 	allowCompactionContinuityBreak: false,
 	remoteCompactModel: undefined,
 	nativeFallback: { ...DEFAULT_NATIVE_FALLBACK_CONFIG },
 	responsesApis: [...RESPONSES_COMPACT_CAPABLE_APIS],
+	contextReminderThresholdPercent: 5,
 	notifyOnLoad: false,
 	debug: false,
 	logProviderPayloads: false,

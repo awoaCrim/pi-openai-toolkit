@@ -7,6 +7,15 @@ import type {
 	SessionBeforeCompactEvent,
 } from "@earendil-works/pi-coding-agent";
 import { loadToolkitConfig } from "./config";
+import {
+	codexContextProviderHeaders,
+	resolveCodexContextProvider,
+	isCodexGatewayModel,
+	isNativeCodexModel,
+} from "./context-management/codex-provider";
+import { routeContextNamespaceToolMessage } from "./context-management/namespace-tools";
+import { CodexContextWindowManager } from "./context-management/window-manager";
+import { registerContextManagementTools } from "./context-management/tools";
 import { writeDebugArtifact, writeReplayFailureArtifact } from "./debug";
 import { resolveLatestNativeCompactionEntry } from "./details-store";
 import { runNativeFallbackCompaction } from "./native-fallback";
@@ -38,7 +47,14 @@ type CompactionDependencies = {
 	loadConfig: typeof loadToolkitConfig;
 	remoteCompact: typeof executeRemoteV2Compaction;
 	nativeFallback: typeof runNativeFallbackCompaction;
+	contextWindows: CodexContextWindowManager;
 };
+
+type RemoteContextActive = (
+	ctx: ExtensionContext,
+	config: CompactionConfig,
+	model?: ExtensionContext["model"],
+) => Promise<boolean>;
 
 type ResponsesCompactOutcome =
 	| { outcome: "success"; compaction: CompactionResult<NativeCompactionDetails> }
@@ -84,6 +100,29 @@ function getSessionId(ctx: ExtensionContext): string | undefined {
 function notifyWarning(ctx: ExtensionContext, message: string): void {
 	if (ctx.hasUI) {
 		ctx.ui.notify(`${COMPACTION_EXTENSION_ID}: ${message}`, "warning");
+	}
+}
+
+async function isRemoteContextActive(
+	ctx: ExtensionContext,
+	config: CompactionConfig,
+	model: ExtensionContext["model"] = ctx.model,
+): Promise<boolean> {
+	if (!config.enabled || config.contextManagement !== "remote") return false;
+	const resolution = await resolveCodexContextProvider(ctx, model, config.codexGatewayModels);
+	return resolution.ok;
+}
+
+function isCodexContextModel(
+	model: ExtensionContext["model"] | undefined,
+	config: CompactionConfig,
+): boolean {
+	return isNativeCodexModel(model) || isCodexGatewayModel(model, config.codexGatewayModels);
+}
+
+function notifyRemoteContextFailure(ctx: ExtensionContext, reason: string): void {
+	if (ctx.hasUI) {
+		ctx.ui.notify(`${COMPACTION_EXTENSION_ID}: Remote Context management inactive (${reason})`, "warning");
 	}
 }
 
@@ -299,6 +338,7 @@ async function handleSessionBeforeCompact(
 	event: SessionBeforeCompactEvent,
 	ctx: ExtensionContext,
 	dependencies: CompactionDependencies,
+	remoteContextActive: RemoteContextActive,
 ) {
 	const { config: toolkitConfig } = dependencies.loadConfig();
 	const config = toolkitConfig.compaction;
@@ -325,6 +365,25 @@ async function handleSessionBeforeCompact(
 
 	if (event.signal.aborted) {
 		return { cancel: true };
+	}
+
+	// Remote Context management owns this eligible Codex session. It persists a
+	// no-summary boundary and deliberately never calls remote_compaction_v2.
+	if (config.contextManagement === "remote" && isCodexContextModel(ctx.model, config)) {
+		if (await remoteContextActive(ctx, config)) {
+			try {
+				dependencies.contextWindows.synchronize(ctx);
+				return dependencies.contextWindows.prepareCompaction(event);
+			} catch {
+				notifyRemoteContextFailure(ctx, "malformed-window-state");
+				return { cancel: true };
+			}
+		}
+		// A configured native Codex Remote session must never re-enter this
+		// extension's Remote V2 compaction chain. Let Pi's normal compaction
+		// policy decide what to do after the inactive reason is surfaced.
+		notifyRemoteContextFailure(ctx, "native-codex-context-unavailable");
+		return undefined;
 	}
 
 	// Branch 1: Responses-family APIs use remote_compaction_v2 on the normal Responses stream.
@@ -426,11 +485,67 @@ async function handleSessionBeforeCompact(
 	return undefined;
 }
 
-async function handleContext(event: ContextEvent, ctx: ExtensionContext, loadConfig: typeof loadToolkitConfig) {
+async function handleContext(
+	event: ContextEvent,
+	ctx: ExtensionContext,
+	pi: ExtensionAPI,
+	loadConfig: typeof loadToolkitConfig,
+	contextWindows: CodexContextWindowManager,
+	remoteContextActive: RemoteContextActive,
+) {
 	const { config: { compaction: config } } = loadConfig();
-	if (!config.enabled) return undefined;
-	// Resolve the effective authenticated endpoint before dropping any history.
-	// A checkpoint for a different endpoint must keep Pi's original context.
+	if (!config.enabled) {
+		const visibleMessages = contextWindows.project(event.messages, "off");
+		return visibleMessages.length === event.messages.length && visibleMessages.every((message, index) => message === event.messages[index])
+			? undefined
+			: { messages: visibleMessages };
+	}
+
+	if (config.contextManagement === "remote") {
+		try {
+			contextWindows.synchronize(ctx);
+		} catch {
+			notifyRemoteContextFailure(ctx, "malformed-window-state");
+			ctx.abort();
+			return undefined;
+		}
+
+		const remoteActive = await remoteContextActive(ctx, config);
+		if (remoteActive) {
+			try {
+				contextWindows.recordBudget(
+					pi,
+					ctx,
+					true,
+					config.contextReminderThresholdPercent,
+				);
+				const projected = contextWindows.project(event.messages, "remote");
+				return projected.length === event.messages.length && projected.every((message, index) => message === event.messages[index])
+					? undefined
+					: { messages: projected };
+			} catch (error) {
+				notifyRemoteContextFailure(ctx, "malformed-window-state");
+				ctx.abort();
+				return undefined;
+			}
+		}
+
+		// An eligible Codex Remote session is never allowed to fall through to the
+		// older compaction-replay path. Keep its internal markers hidden, but let
+		// Pi's normal request construction handle the inactive session.
+		if (isCodexContextModel(ctx.model, config)) {
+			const visibleMessages = contextWindows.project(event.messages, "off");
+			return visibleMessages.length === event.messages.length && visibleMessages.every((message, index) => message === event.messages[index])
+				? undefined
+				: { messages: visibleMessages };
+		}
+	}
+
+	// Inactive/ineligible Remote mode must not expose internal window markers to a
+	// gateway or another provider. The existing compaction replay path remains the
+	// owner for this safe fallback.
+	const visibleMessages = contextWindows.project(event.messages, "off");
+	const replayEvent = visibleMessages === event.messages ? event : { ...event, messages: visibleMessages };
 	const resolution = await resolveNativeCompactionEnvironment(ctx, {
 		enabled: config.enabled,
 		responsesApis: config.responsesApis,
@@ -439,24 +554,50 @@ async function handleContext(event: ContextEvent, ctx: ExtensionContext, loadCon
 	const branchEntries = ctx.sessionManager.getBranch();
 	const latest = resolveLatestNativeCompactionEntry(branchEntries, { baseUrl: resolution.runtime.baseUrl });
 	if (!latest.ok) return undefined;
-	const result = removeNativeCompactionRetainedMessages({ messages: event.messages, branchEntries, compactionEntry: latest.entry });
+	const result = removeNativeCompactionRetainedMessages({ messages: replayEvent.messages, branchEntries, compactionEntry: latest.entry });
 	if (!result.ok) {
 		writeReplayFailureArtifact({ reason: result.reason, compactionEntryId: latest.entry.id }, config, ctx);
 		if (ctx.hasUI) ctx.ui.notify(`${COMPACTION_EXTENSION_ID}: replay failed (${result.reason}); request aborted`, "error");
 		ctx.abort();
 		return undefined;
 	}
-	return result.messages === event.messages ? undefined : { messages: result.messages };
+	return result.messages === replayEvent.messages ? undefined : { messages: result.messages };
 }
 
 async function handleBeforeProviderRequest(
 	event: BeforeProviderRequestEvent,
 	ctx: ExtensionContext,
 	loadConfig: typeof loadToolkitConfig,
+	contextWindows: CodexContextWindowManager,
+	remoteContextActive: RemoteContextActive,
 ) {
 	const { config: toolkitConfig } = loadConfig();
 	const config = toolkitConfig.compaction;
 	if (!config.enabled) {
+		return undefined;
+	}
+
+	if (config.contextManagement === "remote") {
+		try {
+			contextWindows.synchronize(ctx);
+		} catch {
+			notifyRemoteContextFailure(ctx, "malformed-window-state");
+			ctx.abort();
+			return undefined;
+		}
+	}
+	if (config.contextManagement === "remote" && await remoteContextActive(ctx, config)) {
+		try {
+			return contextWindows.rewritePayload(event.payload, ctx);
+		} catch {
+			notifyRemoteContextFailure(ctx, "malformed-request-state");
+			ctx.abort();
+			return undefined;
+		}
+	}
+	if (config.contextManagement === "remote" && isCodexContextModel(ctx.model, config)) {
+		// Keep Codex Remote mutually exclusive with the legacy replay
+		// pipeline when authentication or tool ownership is unavailable.
 		return undefined;
 	}
 
@@ -613,16 +754,55 @@ export default function registerCompactionExtension(
 	pi: ExtensionAPI,
 	overrides: Partial<CompactionDependencies> = {},
 ) {
+	const loadConfig = overrides.loadConfig ?? loadToolkitConfig;
+	const contextWindows = overrides.contextWindows ?? new CodexContextWindowManager(
+		undefined,
+		() => loadConfig().config.compaction.codexGatewayModels,
+	);
 	const dependencies: CompactionDependencies = {
-		loadConfig: loadToolkitConfig,
+		loadConfig,
 		remoteCompact: executeRemoteV2Compaction,
 		nativeFallback: runNativeFallbackCompaction,
+		contextWindows,
 		...overrides,
 	};
-	pi.on("session_start", (_event, ctx) => {
+	let tools!: ReturnType<typeof registerContextManagementTools>;
+	tools = registerContextManagementTools(
+		pi,
+		contextWindows,
+		async (ctx) => {
+			const config = dependencies.loadConfig().config.compaction;
+			return tools.isRegistered && await isRemoteContextActive(ctx, config);
+		},
+		() => dependencies.loadConfig().config.compaction.codexGatewayModels,
+	);
+	const remoteContextActive: RemoteContextActive = async (ctx, config, model = ctx.model) =>
+		tools.isRegistered && await isRemoteContextActive(ctx, config, model);
+	const syncTools = async (ctx: ExtensionContext, model = ctx.model): Promise<boolean> => {
+		const config = dependencies.loadConfig().config.compaction;
+		const active = await isRemoteContextActive(ctx, config, model);
+		return tools.sync(active);
+	};
+	pi.on("session_start", async (_event, ctx) => {
+		const active = await syncTools(ctx);
 		const { config: toolkitConfig, source, warnings } = dependencies.loadConfig();
 		const config = toolkitConfig.compaction;
 		if (!config.enabled) return;
+
+		if (config.contextManagement === "remote") {
+			if (active) {
+				try {
+					contextWindows.ensureInitialized(pi, ctx, true);
+				} catch {
+					notifyRemoteContextFailure(ctx, "malformed-window-state");
+				}
+			} else if (!tools.isRegistered) {
+				notifyRemoteContextFailure(ctx, "tool-name-conflict");
+			} else {
+				const remoteResolution = await resolveCodexContextProvider(ctx, ctx.model, config.codexGatewayModels);
+				notifyRemoteContextFailure(ctx, remoteResolution.ok ? "codex-context-unavailable" : remoteResolution.reason);
+			}
+		}
 
 		if (warnings.length > 0 && ctx.hasUI && config.debug) {
 			ctx.ui.notify(`${COMPACTION_EXTENSION_ID}: ${warnings[0]}`, "warning");
@@ -650,7 +830,57 @@ export default function registerCompactionExtension(
 		}
 	});
 
-	pi.on("context", (event, ctx) => handleContext(event, ctx, dependencies.loadConfig));
-	pi.on("session_before_compact", (event, ctx) => handleSessionBeforeCompact(event, ctx, dependencies));
-	pi.on("before_provider_request", (event, ctx) => handleBeforeProviderRequest(event, ctx, dependencies.loadConfig));
+	pi.on("context", (event, ctx) => handleContext(event, ctx, pi, dependencies.loadConfig, contextWindows, remoteContextActive));
+	pi.on("session_before_compact", (event, ctx) => handleSessionBeforeCompact(event, ctx, dependencies, remoteContextActive));
+	pi.on("session_compact", (event, _ctx) => contextWindows.recordCompaction(event.compactionEntry.details));
+	pi.on("session_shutdown", () => {
+		contextWindows.reset();
+		tools.reset();
+	});
+	pi.on("model_select", async (event, ctx) => {
+		await syncTools(ctx, event.model);
+	});
+	pi.on("before_agent_start", async (_event, ctx) => {
+		await syncTools(ctx);
+	});
+	pi.on("before_provider_request", (event, ctx) => handleBeforeProviderRequest(event, ctx, dependencies.loadConfig, contextWindows, remoteContextActive));
+	pi.on("before_provider_headers", async (event, ctx) => {
+		const config = dependencies.loadConfig().config.compaction;
+		if (config.contextManagement !== "remote" || !isCodexContextModel(ctx.model, config)) return;
+		if (!(await remoteContextActive(ctx, config))) return;
+		const provider = await resolveCodexContextProvider(ctx, ctx.model, config.codexGatewayModels);
+		if (provider.ok && provider.provider.kind === "codex-gateway") {
+			const sessionId = getSessionId(ctx);
+			const gatewayHeaders = codexContextProviderHeaders(provider.provider, {
+				sessionId,
+				clientRequestId: sessionId,
+			});
+			for (const name of [
+				"authorization",
+				"originator",
+				"user-agent",
+				"version",
+				"session-id",
+				"x-client-request-id",
+				"x-codex-affinity-scope",
+				"x-codex-model",
+			]) {
+				for (const existing of Object.keys(event.headers)) {
+					if (existing.toLowerCase() === name) delete event.headers[existing];
+				}
+				const value = gatewayHeaders.get(name);
+				if (value) event.headers[name] = value;
+			}
+			for (const existing of Object.keys(event.headers)) {
+				if (["cookie", "chatgpt-account-id", "x-api-key"].includes(existing.toLowerCase())) delete event.headers[existing];
+			}
+		}
+		contextWindows.rewriteHeaders(event.headers, ctx);
+	});
+	pi.on("message_end", (event, ctx) => {
+		const config = dependencies.loadConfig().config.compaction;
+		if (config.contextManagement !== "remote" || !isCodexContextModel(ctx.model, config) || !tools.isRegistered) return undefined;
+		const message = routeContextNamespaceToolMessage(event.message);
+		return message === event.message ? undefined : { message };
+	});
 }

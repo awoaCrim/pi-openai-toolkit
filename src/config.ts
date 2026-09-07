@@ -30,6 +30,7 @@ import {
 	type AutoModeGate,
 	type CodexAstraConfig,
 	type CompactionConfig,
+	type ContextManagementMode,
 	type ImageGenerationConfig,
 	type LoadedToolkitConfig,
 	type NativeFallbackConfig,
@@ -43,10 +44,13 @@ export const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 const TOP_LEVEL_FIELDS = new Set(["compaction", "webSearch", "imageGeneration", "autoMode", "codexAstra"]);
 const COMPACTION_FIELDS = new Set([
 	"enabled",
+	"contextManagement",
+	"codexGatewayModels",
 	"allowCompactionContinuityBreak",
 	"remoteCompactModel",
 	"nativeFallback",
 	"responsesApis",
+	"contextReminderThresholdPercent",
 	"notifyOnLoad",
 	"debug",
 	"logProviderPayloads",
@@ -128,6 +132,20 @@ function toBoolean(value: unknown, fieldPath: string, warnings: string[]): boole
 	if (value === undefined) return undefined;
 	if (typeof value === "boolean") return value;
 	warnings.push(`Ignoring ${fieldPath}: expected a boolean.`);
+	return undefined;
+}
+
+function toContextManagementMode(
+	value: unknown,
+	fieldPath: string,
+	warnings: string[],
+): ContextManagementMode | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value === "string") {
+		const normalized = value.trim();
+		if (normalized === "off" || normalized === "remote") return normalized;
+	}
+	warnings.push(`Ignoring ${fieldPath}: expected one of off, remote.`);
 	return undefined;
 }
 
@@ -278,6 +296,17 @@ function applyCompactionConfig(
 	warnUnknownFields(raw, COMPACTION_FIELDS, "compaction", warnings);
 
 	resolved.enabled = toBoolean(raw.enabled, "compaction.enabled", warnings) ?? resolved.enabled;
+	resolved.contextManagement =
+		toContextManagementMode(raw.contextManagement, "compaction.contextManagement", warnings) ??
+		resolved.contextManagement;
+	const codexGatewayModels = toStringList(
+		raw.codexGatewayModels,
+		"compaction.codexGatewayModels",
+		warnings,
+	);
+	if (codexGatewayModels !== undefined) {
+		resolved.codexGatewayModels = codexGatewayModels;
+	}
 	resolved.allowCompactionContinuityBreak =
 		toBoolean(
 			raw.allowCompactionContinuityBreak,
@@ -286,6 +315,16 @@ function applyCompactionConfig(
 		) ?? resolved.allowCompactionContinuityBreak;
 	resolved.notifyOnLoad =
 		toBoolean(raw.notifyOnLoad, "compaction.notifyOnLoad", warnings) ?? resolved.notifyOnLoad;
+	const reminderPercent = toBoundedInteger(
+		raw.contextReminderThresholdPercent,
+		"compaction.contextReminderThresholdPercent",
+		warnings,
+		0,
+		100,
+	);
+	if (reminderPercent !== undefined) {
+		resolved.contextReminderThresholdPercent = reminderPercent;
+	}
 	resolved.debug = toBoolean(raw.debug, "compaction.debug", warnings) ?? resolved.debug;
 	resolved.logProviderPayloads =
 		toBoolean(raw.logProviderPayloads, "compaction.logProviderPayloads", warnings) ??

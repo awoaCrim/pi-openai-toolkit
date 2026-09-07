@@ -332,9 +332,11 @@ function createContext(args: {
 }
 
 async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
+	sessionStart: HookHandler;
 	contextHook: HookHandler;
 	sessionBeforeCompact: HookHandler;
 	beforeProviderRequest: HookHandler;
+	beforeProviderHeaders: HookHandler;
 	compactCalls: Array<Record<string, unknown>>;
 	fallbackCalls: Array<Record<string, unknown>>;
 	abortCalls: { count: number };
@@ -342,12 +344,22 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 	const compactCalls: Array<Record<string, unknown>> = [];
 	const fallbackCalls: Array<Record<string, unknown>> = [];
 	const abortCalls = { count: 0 };
+	const registeredTools: Array<Record<string, unknown>> = [];
+	let activeTools: string[] = [];
 
 	const handlers = new Map<string, HookHandler>();
 	const { default: extension } = await import("./extension-runtime");
 	extension({
 		on: (eventName: string, handler: HookHandler) => {
 			handlers.set(eventName, handler);
+		},
+		registerTool: (tool: Record<string, unknown>) => {
+			registeredTools.push(tool);
+		},
+		getAllTools: () => registeredTools,
+		getActiveTools: () => [...activeTools],
+		setActiveTools: (names: string[]) => {
+			activeTools = [...names];
 		},
 	} as never, {
 		loadConfig: () => ({
@@ -382,19 +394,34 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 		},
 	});
 	// Pi owns scheduling. The compaction extension only supplies/replays results.
-	expect([...handlers.keys()]).toEqual(["session_start", "context", "session_before_compact", "before_provider_request"]);
+	expect([...handlers.keys()]).toEqual([
+		"session_start",
+		"context",
+		"session_before_compact",
+		"session_compact",
+		"session_shutdown",
+		"model_select",
+		"before_agent_start",
+		"before_provider_request",
+		"before_provider_headers",
+		"message_end",
+	]);
 
+	const sessionStart = handlers.get("session_start");
 	const contextHook = handlers.get("context");
 	const sessionBeforeCompact = handlers.get("session_before_compact");
 	const beforeProviderRequest = handlers.get("before_provider_request");
-	if (!contextHook || !sessionBeforeCompact || !beforeProviderRequest) {
+	const beforeProviderHeaders = handlers.get("before_provider_headers");
+	if (!sessionStart || !contextHook || !sessionBeforeCompact || !beforeProviderRequest || !beforeProviderHeaders) {
 		throw new Error("Expected pi-openai-toolkit compaction hooks to register");
 	}
 
 	return {
+		sessionStart,
 		contextHook,
 		sessionBeforeCompact,
 		beforeProviderRequest,
+		beforeProviderHeaders,
 		compactCalls,
 		fallbackCalls,
 		abortCalls,
@@ -405,6 +432,43 @@ afterEach(() => {
 	timestampCounter = 0;
 	clearRequestContextCache();
 	fs.rmSync(testArtifactRoot, { recursive: true, force: true });
+});
+
+test("gateway Remote Context headers preserve session affinity and strip inherited credentials", async () => {
+	const { sessionStart, beforeProviderHeaders } = await loadHookHarness({
+		config: {
+			contextManagement: "remote",
+			codexGatewayModels: ["uwoacrimson/gpt-5.6-luna"],
+		},
+	});
+	const gatewayModel: TestModel = {
+		...defaultModel,
+		provider: "uwoacrimson",
+		api: "openai-responses",
+		id: "gpt-5.6-luna",
+		baseUrl: "https://newapi.example/v1",
+	};
+	const ctx = createContext({ model: gatewayModel });
+	await sessionStart({ type: "session_start" }, ctx);
+
+	const headers: Record<string, string | null> = {
+		authorization: "Bearer stale",
+		cookie: "stale",
+		"chatgpt-account-id": "stale",
+		"x-api-key": "stale",
+		"session-id": "stale",
+		"x-client-request-id": "stale",
+	};
+	await beforeProviderHeaders({ type: "before_provider_headers", headers }, ctx);
+
+	expect(headers.authorization).toBe("Bearer sk-test-gpt-5.6-luna");
+	expect(headers["session-id"]).toBe("session-validation");
+	expect(headers["x-client-request-id"]).toBe("session-validation");
+	expect(headers["x-codex-affinity-scope"]).toBe("codex-session-v1");
+	expect(headers["x-codex-model"]).toBe("gpt-5.6-luna");
+	expect(headers.cookie).toBeUndefined();
+	expect(headers["chatgpt-account-id"]).toBeUndefined();
+	expect(headers["x-api-key"]).toBeUndefined();
 });
 
 test("manual /compact preserves tool/result ordering + assistant phases and persists the native window", async () => {
