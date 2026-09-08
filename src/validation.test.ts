@@ -438,14 +438,13 @@ test("gateway Remote Context headers preserve session affinity and strip inherit
 	const { sessionStart, beforeProviderHeaders } = await loadHookHarness({
 		config: {
 			contextManagement: "remote",
-			codexGatewayModels: ["uwoacrimson/gpt-5.6-luna"],
 		},
 	});
 	const gatewayModel: TestModel = {
 		...defaultModel,
 		provider: "uwoacrimson",
 		api: "openai-responses",
-		id: "gpt-5.6-luna",
+		id: "gpt-6-astra",
 		baseUrl: "https://newapi.example/v1",
 	};
 	const ctx = createContext({ model: gatewayModel });
@@ -461,11 +460,11 @@ test("gateway Remote Context headers preserve session affinity and strip inherit
 	};
 	await beforeProviderHeaders({ type: "before_provider_headers", headers }, ctx);
 
-	expect(headers.authorization).toBe("Bearer sk-test-gpt-5.6-luna");
+	expect(headers.authorization).toBe("Bearer sk-test-gpt-6-astra");
 	expect(headers["session-id"]).toBe("session-validation");
 	expect(headers["x-client-request-id"]).toBe("session-validation");
 	expect(headers["x-codex-affinity-scope"]).toBe("codex-session-v1");
-	expect(headers["x-codex-model"]).toBe("gpt-5.6-luna");
+	expect(headers["x-codex-model"]).toBe("gpt-6-astra");
 	expect(headers.cookie).toBeUndefined();
 	expect(headers["chatgpt-account-id"]).toBeUndefined();
 	expect(headers["x-api-key"]).toBeUndefined();

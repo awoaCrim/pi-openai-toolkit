@@ -1,11 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import {
-	DEFAULT_CODEX_ASTRA_CONFIG,
-	DEFAULT_COMPACTION_CONFIG,
-	DEFAULT_IMAGE_GENERATION_CONFIG,
-	DEFAULT_WEB_SEARCH_CONFIG,
-	type CodexAstraConfig,
-} from "../types";
 import { registerCodexAstraExtension } from "./extension";
 
 type Handler = (event: any, ctx: any) => unknown;
@@ -21,12 +14,7 @@ function codexModel(overrides: Record<string, unknown> = {}) {
 	};
 }
 
-function createHarness(options: { codexAstra?: Partial<CodexAstraConfig>; model?: unknown; sessionId?: string } = {}) {
-	const codexAstra: CodexAstraConfig = {
-		...DEFAULT_CODEX_ASTRA_CONFIG,
-		models: [...DEFAULT_CODEX_ASTRA_CONFIG.models],
-		...options.codexAstra,
-	};
+function createHarness(options: { model?: unknown; sessionId?: string } = {}) {
 	const handlers = new Map<string, Handler[]>();
 	const pi = {
 		on: (event: string, handler: Handler) => {
@@ -43,28 +31,7 @@ function createHarness(options: { codexAstra?: Partial<CodexAstraConfig>; model?
 		},
 	};
 
-	registerCodexAstraExtension(pi, () => ({
-		config: {
-			compaction: DEFAULT_COMPACTION_CONFIG,
-			webSearch: DEFAULT_WEB_SEARCH_CONFIG,
-			imageGeneration: DEFAULT_IMAGE_GENERATION_CONFIG,
-			// autoMode fields are irrelevant here but the type requires them.
-			autoMode: {
-				enabled: false,
-				models: [],
-				gate: "side-effect",
-				extraTools: [],
-				timeoutMs: 30_000,
-				transcript: false,
-				evidenceTools: false,
-				maxEvidenceRounds: 0,
-				classifier: { enabled: false, timeoutMs: 15_000, maxLag: 2 },
-				circuitBreaker: { consecutiveDenials: 0, recentDenials: 0, windowSize: 50 },
-			},
-			codexAstra,
-		},
-		warnings: [],
-	}));
+	registerCodexAstraExtension(pi);
 
 	const fire = (event: string, e: any, c: any = ctx) =>
 		(handlers.get(event) ?? []).reduce<unknown>((payload, handler) => handler(e, c) ?? payload, undefined);
@@ -77,14 +44,33 @@ function requestPayload(effort: string, input: unknown[] = [{ role: "user", cont
 }
 
 describe("codex astra extension wiring", () => {
-	test("disabled by default: payload passes through untouched", () => {
+	test("astra models are activated silently by model id, other models pass through", () => {
 		const { fire } = createHarness();
-		const payload = requestPayload("medium");
-		expect(fire("before_provider_request", { type: "before_provider_request", payload })).toBeUndefined();
+		// Baseline request on the astra model: no rewrite needed yet.
+		expect(
+			fire("before_provider_request", {
+				type: "before_provider_request",
+				payload: requestPayload("medium", [{ role: "user", content: "hi" }]),
+			}),
+		).toBeUndefined();
+		// A non-astra context model is never touched even with astra-shaped payloads.
+		const sol = createHarness({ model: codexModel({ id: "gpt-5.6-sol" }) });
+		expect(
+			sol.fire("before_provider_request", {
+				type: "before_provider_request",
+				payload: { ...requestPayload("high"), model: "gpt-5.6-sol" },
+			}),
+		).toBeUndefined();
+		// A baseline exists now, so a changed effort on the astra model rewrites.
+		const rewrote = fire("before_provider_request", {
+			type: "before_provider_request",
+			payload: requestPayload("max", [{ role: "user", content: "hi" }]),
+		});
+		expect(rewrote).toBeDefined();
 	});
 
-	test("an allowlisted model pins the effort and gains configuration_update items on change", () => {
-		const { fire } = createHarness({ codexAstra: { enabled: true, models: ["openai-codex/gpt-6-astra"] } });
+	test("an astra model pins the effort and gains configuration_update items on change", () => {
+		const { fire } = createHarness();
 
 		// First request baselines.
 		expect(
@@ -114,24 +100,17 @@ describe("codex astra extension wiring", () => {
 		expect(changed).toEqual(before);
 	});
 
-	test("model outside the allowlist is never rewritten", () => {
-		const { fire } = createHarness({ codexAstra: { enabled: true, models: ["openai-codex/gpt-6-astra"] } });
-		const payload = { ...requestPayload("high"), model: "gpt-5.6-sol" };
-		expect(fire("before_provider_request", { type: "before_provider_request", payload })).toBeUndefined();
-	});
-
-	test("payload for another model id is skipped even on an allowlisted context model", () => {
-		const { fire } = createHarness({ codexAstra: { enabled: true, models: ["openai-codex/gpt-6-astra"] } });
+	test("payload for another model id is skipped even on an astra context model", () => {
+		const { fire } = createHarness();
 		// A synthetic payload naming a different model must not consume the
-		// allowlisted session model's baseline.
+		// astra session model's baseline.
 		const foreign = { ...requestPayload("medium"), model: "gpt-5.1" };
 		expect(fire("before_provider_request", { type: "before_provider_request", payload: foreign })).toBeUndefined();
 	});
 
-	test("allowlisted openai-responses gateway models are rewritten too", () => {
+	test("openai-responses gateway astra models are rewritten too", () => {
 		const { fire } = createHarness({
 			model: codexModel({ provider: "uwoacrimson", api: "openai-responses", id: "gpt-6-astra", baseUrl: "https://newapi.example/v1" }),
-			codexAstra: { enabled: true, models: ["uwoacrimson/gpt-6-astra"] },
 		});
 		expect(
 			fire("before_provider_request", {
@@ -156,7 +135,6 @@ describe("codex astra extension wiring", () => {
 	test("non-Responses APIs are never rewritten", () => {
 		const { fire } = createHarness({
 			model: codexModel({ provider: "uwoacrimson", api: "openai-completions", id: "gpt-6-astra", baseUrl: "https://newapi.example/v1" }),
-			codexAstra: { enabled: true, models: ["uwoacrimson/gpt-6-astra"] },
 		});
 		expect(
 			fire("before_provider_request", { type: "before_provider_request", payload: requestPayload("high") }),
@@ -164,7 +142,7 @@ describe("codex astra extension wiring", () => {
 	});
 
 	test("compaction-shaped payloads never receive configuration_update items", () => {
-		const { fire } = createHarness({ codexAstra: { enabled: true, models: ["openai-codex/gpt-6-astra"] } });
+		const { fire } = createHarness();
 
 		fire("before_provider_request", {
 			type: "before_provider_request",
@@ -178,7 +156,7 @@ describe("codex astra extension wiring", () => {
 	});
 
 	test("payloads without a wire effort shape (titles, embeddings) are skipped", () => {
-		const { fire } = createHarness({ codexAstra: { enabled: true, models: ["openai-codex/gpt-6-astra"] } });
+		const { fire } = createHarness();
 		expect(
 			fire("before_provider_request", {
 				type: "before_provider_request",
@@ -194,7 +172,7 @@ describe("codex astra extension wiring", () => {
 	});
 
 	test("session_start drops baselines so a resumed session re-pins cleanly", () => {
-		const { fire } = createHarness({ codexAstra: { enabled: true, models: ["openai-codex/gpt-6-astra"] } });
+		const { fire } = createHarness();
 
 		fire("before_provider_request", {
 			type: "before_provider_request",
@@ -209,23 +187,22 @@ describe("codex astra extension wiring", () => {
 	});
 
 	test("headers hook adds the version gate to codex requests only", () => {
-		const { fire } = createHarness({ codexAstra: { enabled: true, models: ["openai-codex/gpt-6-astra"] } });
+		const { fire } = createHarness();
 
 		const headers: Record<string, string | null> = { authorization: "Bearer x" };
 		fire("before_provider_headers", { type: "before_provider_headers", headers });
 		expect(headers.version).toBe("0.153.0");
 		expect(headers.authorization).toBe("Bearer x");
 
-		const otherCtx = { ...createHarness({ model: null }).ctx, model: codexModel({ provider: "uwoacrimson", api: "openai-completions" }) };
 		const otherHeaders: Record<string, string | null> = {};
 		// Re-fire through a handler set built for completions models.
-		const h2 = createHarness({ model: otherCtx.model, codexAstra: { enabled: true, models: ["uwoacrimson/gpt-6-astra"] } });
+		const h2 = createHarness({ model: codexModel({ provider: "uwoacrimson", api: "openai-completions" }) });
 		h2.fire("before_provider_headers", { type: "before_provider_headers", headers: otherHeaders });
 		expect(otherHeaders.version).toBeUndefined();
 	});
 
-	test("a config or planner blowup cannot break the request path", () => {
-		const { fire } = createHarness({ codexAstra: { enabled: true, models: ["openai-codex/gpt-6-astra"] } });
+	test("a planner blowup cannot break the request path", () => {
+		const { fire } = createHarness();
 		// Payload shape that would throw mid-plan (non-object item after the guard's
 		// filter, e.g. nested null) must return undefined instead of throwing.
 		expect(

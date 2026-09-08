@@ -1,6 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { loadToolkitConfig } from "../config";
-import { isExactModelAllowed } from "../model-scope";
+import { ASTRA_MODEL_ID } from "../types";
 import { CODEX_CLIENT_VERSION } from "../responses-headers";
 import {
 	getEffortControlState,
@@ -53,10 +52,7 @@ function getSessionId(ctx: { sessionManager: { getSessionId(): string } }): stri
 	}
 }
 
-export function registerCodexAstraExtension(
-	pi: ExtensionAPI,
-	loadConfig: typeof loadToolkitConfig = loadToolkitConfig,
-): void {
+export function registerCodexAstraExtension(pi: ExtensionAPI): void {
 	const states = new Map<string, EffortControlState>();
 
 	// Switching or forking a session rebuilds the runtime and re-fires
@@ -67,18 +63,16 @@ export function registerCodexAstraExtension(
 
 	pi.on("before_provider_request", (event, ctx) => {
 		try {
-			const { config } = loadConfig();
-			const astra = config.codexAstra;
-			if (!astra.enabled || astra.models.length === 0) return undefined;
-
+			// Silent activation by design: the Astra compatibility layer exists only
+			// to keep `gpt-6-astra` working through the Codex backend gate, so it
+			// keys off the bare model id instead of an operator allowlist.
 			const model = ctx.model;
 			// Both Responses wire families carry the same reasoning.effort prefix
-			// problem, and upstream OMP plans on both providers; which models
-			// accept the item is decided by the allowlist, not by API family.
+			// problem, and upstream OMP plans on both providers.
 			if (!model || (model.api !== "openai-codex-responses" && model.api !== "openai-responses")) {
 				return undefined;
 			}
-			if (!isExactModelAllowed(model, astra.models)) return undefined;
+			if (model.id !== ASTRA_MODEL_ID) return undefined;
 
 			const payload = parseAstraPayload(event.payload);
 			// The payload must belong to the model the eligibility check just

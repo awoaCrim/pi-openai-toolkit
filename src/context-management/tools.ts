@@ -85,10 +85,7 @@ export function createContextManagementTools(
 	pi: ExtensionAPI,
 	manager: CodexContextWindowManager,
 	isActive: (ctx: ExtensionContext) => Promise<boolean> | boolean,
-	gatewayAllowlist: readonly string[] | (() => readonly string[]) = [],
 ): ContextManagementTools {
-	const getGatewayAllowlist = (): readonly string[] =>
-		typeof gatewayAllowlist === "function" ? gatewayAllowlist() : gatewayAllowlist;
 	const assertActive = async (ctx: ExtensionContext): Promise<void> => {
 		if (!(await isActive(ctx))) throw new Error("remote-context-inactive");
 	};
@@ -145,7 +142,7 @@ export function createContextManagementTools(
 		],
 		execute: async (_id, params, _signal, _update, ctx) => {
 			await assertActive(ctx);
-			return executeHistoryNotesTool("history", params.action, params as Record<string, unknown>, ctx, _signal, getGatewayAllowlist());
+			return executeHistoryNotesTool("history", params.action, params as Record<string, unknown>, ctx, _signal);
 		},
 	};
 	const notes: ToolDefinition<typeof NOTES_PARAMETERS, CodexHistoryNotesDetails> = {
@@ -164,7 +161,7 @@ export function createContextManagementTools(
 		executionMode: "sequential",
 		execute: async (_id, params, _signal, _update, ctx) => {
 			await assertActive(ctx);
-			return executeHistoryNotesTool("notes", params.action, params as Record<string, unknown>, ctx, _signal, getGatewayAllowlist());
+			return executeHistoryNotesTool("notes", params.action, params as Record<string, unknown>, ctx, _signal);
 		},
 	};
 	return { newContext, getContextRemaining, history, notes };
@@ -296,10 +293,9 @@ export function registerContextManagementTools(
 	pi: ExtensionAPI,
 	manager: CodexContextWindowManager,
 	isActive: (ctx: ExtensionContext) => Promise<boolean> | boolean,
-	gatewayAllowlist: readonly string[] | (() => readonly string[]) = [],
 ): ContextManagementToolController {
 	const controller = new ContextManagementToolController(pi);
-	controller.register(createContextManagementTools(pi, manager, isActive, gatewayAllowlist));
+	controller.register(createContextManagementTools(pi, manager, isActive));
 	return controller;
 }
 

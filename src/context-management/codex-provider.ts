@@ -8,6 +8,7 @@ import {
 	type CodexContextProvider,
 	type CodexContextProviderResolution,
 } from "./types";
+import { ASTRA_MODEL_ID } from "../types";
 
 const CODEX_PROVIDER = "openai-codex";
 const CODEX_API = "openai-codex-responses";
@@ -31,11 +32,12 @@ export function isNativeCodexModel(
 
 export function isCodexGatewayModel(
 	model: ExtensionContext["model"] | undefined,
-	allowlist: readonly string[] = [],
 ): boolean {
+	// Only the Astra SKU has a verified Codex-compatible gateway relay path
+	// (NEWapi + CLIProxyAPI passthrough); other gateway models stay on remote
+	// compaction v2. Matching is on the bare model id, by design.
 	if (!model || model.provider !== GATEWAY_PROVIDER || model.api !== GATEWAY_API) return false;
-	const spec = `${model.provider}/${model.id}`;
-	return allowlist.some((entry) => entry.trim() === spec);
+	return model.id === ASTRA_MODEL_ID;
 }
 
 export function normalizeCodexBackendBaseUrl(baseUrl: string | undefined | null): string | undefined {
@@ -170,7 +172,6 @@ export function codexContextProviderHeaders(
 export async function resolveCodexContextProvider(
 	ctx: ExtensionContext,
 	modelOverride: ExtensionContext["model"] = ctx.model,
-	gatewayAllowlist: readonly string[] = [],
 ): Promise<CodexContextProviderResolution> {
 	const model = modelOverride;
 	const descriptor = {
@@ -182,7 +183,7 @@ export async function resolveCodexContextProvider(
 	if (!model) return { ok: false, reason: "unsupported-model" };
 
 	const isNative = isNativeCodexModel(model);
-	const isGateway = isCodexGatewayModel(model, gatewayAllowlist);
+	const isGateway = isCodexGatewayModel(model);
 	if (!isNative && !isGateway) {
 		return {
 			ok: false,

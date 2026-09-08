@@ -64,10 +64,11 @@ test("rejects a gateway or other provider even when Codex OAuth is available", a
 	expect(api).toMatchObject({ ok: false, reason: "unsupported-model" });
 });
 
-test("resolves an explicitly allowlisted gateway without native Codex account derivation", async () => {
+test("resolves the built-in Astra gateway without native Codex account derivation", async () => {
 	const gatewayModel = model({
 		provider: "uwoacrimson",
 		api: "openai-responses",
+		id: "gpt-6-astra",
 		baseUrl: "https://newapi.example/v1",
 	});
 	const result = await resolveCodexContextProvider(
@@ -77,16 +78,21 @@ test("resolves an explicitly allowlisted gateway without native Codex account de
 			headers: { "ChatGPT-Account-ID": "must-not-forward", Cookie: "must-not-forward" },
 		}),
 		gatewayModel,
-		["uwoacrimson/gpt-5.5"],
 	);
 	expect(result.ok).toBe(true);
 	if (result.ok) {
 		expect(result.provider.kind).toBe("codex-gateway");
 		expect(result.provider.baseUrl).toBe("https://newapi.example/v1");
 		expect(result.provider.apiKey).toBe("newapi-key");
+		expect(result.provider.model).toBe("gpt-6-astra");
 		expect(result.provider.headers).not.toHaveProperty("Cookie");
 		expect(result.provider.headers).not.toHaveProperty("ChatGPT-Account-ID");
 	}
+
+	// Other gateway SKUs stay on the remote-compaction-v2 path: no window protocol.
+	const nonAstra = model({ provider: "uwoacrimson", api: "openai-responses", baseUrl: "https://newapi.example/v1" });
+	const rejected = await resolveCodexContextProvider(context(nonAstra, { ok: true, apiKey: "newapi-key" }), nonAstra);
+	expect(rejected).toMatchObject({ ok: false, reason: "unsupported-model" });
 });
 
 test("preserves the bare gateway model and affinity headers", () => {

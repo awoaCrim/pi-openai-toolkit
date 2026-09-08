@@ -13,6 +13,12 @@ export const REDACTED_VALUE = "[REDACTED]";
  * `compaction.responsesApis` in config.json may only narrow this set.
  */
 export const RESPONSES_COMPACT_CAPABLE_APIS = ["openai-responses", "openai-codex-responses"] as const;
+/**
+ * The Codex model whose gateways are verified to speak the alpha window and
+ * Astra compatibility protocols. Remote Context and the Astra layer match on
+ * this bare model id; no operator allowlist is consulted.
+ */
+export const ASTRA_MODEL_ID = "gpt-6-astra";
 export const LEGACY_NATIVE_COMPACTION_STRATEGY = "openai-native-compact-v1";
 export const REMOTE_V2_COMPACTION_STRATEGY = "openai-remote-compaction-v2";
 export const NATIVE_COMPACTION_STRATEGY = REMOTE_V2_COMPACTION_STRATEGY;
@@ -58,8 +64,6 @@ export type CompactionConfig = {
 	enabled: boolean;
 	/** Optional Codex Remote Context management. Disabled by default for compatibility. */
 	contextManagement: ContextManagementMode;
-	/** Exact provider/model specs allowed to use the extension's CPA-backed Codex gateway. */
-	codexGatewayModels: string[];
 	/**
 	 * Allow a Responses session whose latest compaction was not created by this extension
 	 * to restart native compaction from Pi's current serialized session context.
@@ -97,12 +101,6 @@ export type WebSearchConfig = {
 
 export type ImageGenerationConfig = {
 	enabled: boolean;
-};
-
-export type CodexAstraConfig = {
-	enabled: boolean;
-	/** Exact provider/model keys that receive the stable-effort `configuration_update` rewrite. */
-	models: string[];
 };
 
 /** `side-effect` reviews bash/write/edit plus extras; `all` reviews every tool call. */
@@ -170,7 +168,6 @@ export type ToolkitConfig = {
 	webSearch: WebSearchConfig;
 	imageGeneration: ImageGenerationConfig;
 	autoMode: AutoModeConfig;
-	codexAstra: CodexAstraConfig;
 };
 
 export type LoadedToolkitConfig = {
@@ -505,7 +502,6 @@ export const DEFAULT_NATIVE_FALLBACK_CONFIG: NativeFallbackConfig = {
 export const DEFAULT_COMPACTION_CONFIG: CompactionConfig = {
 	enabled: true,
 	contextManagement: "off",
-	codexGatewayModels: [],
 	allowCompactionContinuityBreak: false,
 	remoteCompactModel: undefined,
 	nativeFallback: { ...DEFAULT_NATIVE_FALLBACK_CONFIG },
@@ -526,11 +522,6 @@ export const DEFAULT_WEB_SEARCH_CONFIG: WebSearchConfig = {
 
 export const DEFAULT_IMAGE_GENERATION_CONFIG: ImageGenerationConfig = {
 	enabled: false,
-};
-
-export const DEFAULT_CODEX_ASTRA_CONFIG: CodexAstraConfig = {
-	enabled: false,
-	models: [],
 };
 
 export const DEFAULT_AUTO_MODE_CONFIG: AutoModeConfig = {
@@ -561,5 +552,4 @@ export const DEFAULT_TOOLKIT_CONFIG: ToolkitConfig = {
 	webSearch: DEFAULT_WEB_SEARCH_CONFIG,
 	imageGeneration: DEFAULT_IMAGE_GENERATION_CONFIG,
 	autoMode: DEFAULT_AUTO_MODE_CONFIG,
-	codexAstra: DEFAULT_CODEX_ASTRA_CONFIG,
 };

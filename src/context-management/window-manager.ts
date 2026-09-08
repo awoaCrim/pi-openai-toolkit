@@ -58,15 +58,9 @@ export class CodexContextWindowManager {
 	private rolloverPending = false;
 	private trimPendingWindowId: string | undefined;
 	private readonly loadThreadHint: ThreadHintLoader;
-	private readonly getGatewayAllowlist: () => readonly string[];
 
-	constructor(
-		loadThreadHint?: ThreadHintLoader,
-		gatewayAllowlist: readonly string[] | (() => readonly string[]) = [],
-	) {
-		this.getGatewayAllowlist = typeof gatewayAllowlist === "function" ? gatewayAllowlist : () => gatewayAllowlist;
-		this.loadThreadHint = loadThreadHint ?? ((ctx, signal) =>
-			loadHistoryNotesThreadHint(ctx, signal, this.getGatewayAllowlist()));
+	constructor(loadThreadHint?: ThreadHintLoader) {
+		this.loadThreadHint = loadThreadHint ?? ((ctx, signal) => loadHistoryNotesThreadHint(ctx, signal));
 	}
 
 	reset(): void {

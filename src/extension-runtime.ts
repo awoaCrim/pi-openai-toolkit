@@ -109,7 +109,7 @@ async function isRemoteContextActive(
 	model: ExtensionContext["model"] = ctx.model,
 ): Promise<boolean> {
 	if (!config.enabled || config.contextManagement !== "remote") return false;
-	const resolution = await resolveCodexContextProvider(ctx, model, config.codexGatewayModels);
+	const resolution = await resolveCodexContextProvider(ctx, model);
 	return resolution.ok;
 }
 
@@ -117,7 +117,8 @@ function isCodexContextModel(
 	model: ExtensionContext["model"] | undefined,
 	config: CompactionConfig,
 ): boolean {
-	return isNativeCodexModel(model) || isCodexGatewayModel(model, config.codexGatewayModels);
+	return config.contextManagement === "remote"
+		&& (isNativeCodexModel(model) || isCodexGatewayModel(model));
 }
 
 function notifyRemoteContextFailure(ctx: ExtensionContext, reason: string): void {
@@ -369,7 +370,7 @@ async function handleSessionBeforeCompact(
 
 	// Remote Context management owns this eligible Codex session. It persists a
 	// no-summary boundary and deliberately never calls remote_compaction_v2.
-	if (config.contextManagement === "remote" && isCodexContextModel(ctx.model, config)) {
+	if (isCodexContextModel(ctx.model, config)) {
 		if (await remoteContextActive(ctx, config)) {
 			try {
 				dependencies.contextWindows.synchronize(ctx);
@@ -598,7 +599,7 @@ async function handleBeforeProviderRequest(
 			return undefined;
 		}
 	}
-	if (config.contextManagement === "remote" && isCodexContextModel(ctx.model, config)) {
+	if (isCodexContextModel(ctx.model, config)) {
 		// Keep Codex Remote mutually exclusive with the legacy replay
 		// pipeline when authentication or tool ownership is unavailable.
 		return undefined;
@@ -758,10 +759,7 @@ export default function registerCompactionExtension(
 	overrides: Partial<CompactionDependencies> = {},
 ) {
 	const loadConfig = overrides.loadConfig ?? loadToolkitConfig;
-	const contextWindows = overrides.contextWindows ?? new CodexContextWindowManager(
-		undefined,
-		() => loadConfig().config.compaction.codexGatewayModels,
-	);
+	const contextWindows = overrides.contextWindows ?? new CodexContextWindowManager();
 	const dependencies: CompactionDependencies = {
 		loadConfig,
 		remoteCompact: executeRemoteV2Compaction,
@@ -777,7 +775,6 @@ export default function registerCompactionExtension(
 			const config = dependencies.loadConfig().config.compaction;
 			return tools.isRegistered && await isRemoteContextActive(ctx, config);
 		},
-		() => dependencies.loadConfig().config.compaction.codexGatewayModels,
 	);
 	const remoteContextActive: RemoteContextActive = async (ctx, config, model = ctx.model) =>
 		tools.isRegistered && await isRemoteContextActive(ctx, config, model);
@@ -804,7 +801,7 @@ export default function registerCompactionExtension(
 				activationReason = "tool-name-conflict";
 				notifyRemoteContextFailure(ctx, activationReason);
 			} else {
-				const remoteResolution = await resolveCodexContextProvider(ctx, ctx.model, config.codexGatewayModels);
+				const remoteResolution = await resolveCodexContextProvider(ctx, ctx.model);
 				activationReason = remoteResolution.ok ? "codex-context-unavailable" : remoteResolution.reason;
 				notifyRemoteContextFailure(ctx, activationReason);
 			}
@@ -858,9 +855,9 @@ export default function registerCompactionExtension(
 	pi.on("before_provider_request", (event, ctx) => handleBeforeProviderRequest(event, ctx, dependencies.loadConfig, contextWindows, remoteContextActive));
 	pi.on("before_provider_headers", async (event, ctx) => {
 		const config = dependencies.loadConfig().config.compaction;
-		if (config.contextManagement !== "remote" || !isCodexContextModel(ctx.model, config)) return;
+		if (!isCodexContextModel(ctx.model, config)) return;
 		if (!(await remoteContextActive(ctx, config))) return;
-		const provider = await resolveCodexContextProvider(ctx, ctx.model, config.codexGatewayModels);
+		const provider = await resolveCodexContextProvider(ctx, ctx.model);
 		if (provider.ok && provider.provider.kind === "codex-gateway") {
 			const sessionId = getSessionId(ctx);
 			const gatewayHeaders = codexContextProviderHeaders(provider.provider, {
@@ -891,7 +888,7 @@ export default function registerCompactionExtension(
 	});
 	pi.on("message_end", (event, ctx) => {
 		const config = dependencies.loadConfig().config.compaction;
-		if (config.contextManagement !== "remote" || !isCodexContextModel(ctx.model, config) || !tools.isRegistered) return undefined;
+		if (!isCodexContextModel(ctx.model, config) || !tools.isRegistered) return undefined;
 		const message = routeContextNamespaceToolMessage(event.message);
 		return message === event.message ? undefined : { message };
 	});
