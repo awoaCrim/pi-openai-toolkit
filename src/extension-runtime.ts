@@ -380,10 +380,13 @@ async function handleSessionBeforeCompact(
 			}
 		}
 		// A configured native Codex Remote session must never re-enter this
-		// extension's Remote V2 compaction chain. Let Pi's normal compaction
-		// policy decide what to do after the inactive reason is surfaced.
+		// extension's Remote V2 compaction chain, and Pi's native compaction is
+		// deliberately disabled for Remote-managed models: cancelling here keeps
+		// the boundary the only rollover mechanism. The inactive reason is
+		// surfaced so the user can fix activation instead of losing context to a
+		// silent native summary.
 		notifyRemoteContextFailure(ctx, "native-codex-context-unavailable");
-		return undefined;
+		return { cancel: true };
 	}
 
 	// Branch 1: Responses-family APIs use remote_compaction_v2 on the normal Responses stream.
@@ -789,6 +792,7 @@ export default function registerCompactionExtension(
 		const config = toolkitConfig.compaction;
 		if (!config.enabled) return;
 
+		let activationReason: string | undefined;
 		if (config.contextManagement === "remote") {
 			if (active) {
 				try {
@@ -797,10 +801,12 @@ export default function registerCompactionExtension(
 					notifyRemoteContextFailure(ctx, "malformed-window-state");
 				}
 			} else if (!tools.isRegistered) {
-				notifyRemoteContextFailure(ctx, "tool-name-conflict");
+				activationReason = "tool-name-conflict";
+				notifyRemoteContextFailure(ctx, activationReason);
 			} else {
 				const remoteResolution = await resolveCodexContextProvider(ctx, ctx.model, config.codexGatewayModels);
-				notifyRemoteContextFailure(ctx, remoteResolution.ok ? "codex-context-unavailable" : remoteResolution.reason);
+				activationReason = remoteResolution.ok ? "codex-context-unavailable" : remoteResolution.reason;
+				notifyRemoteContextFailure(ctx, activationReason);
 			}
 		}
 
@@ -815,6 +821,12 @@ export default function registerCompactionExtension(
 				config,
 				configSource: source,
 				warnings,
+				activation: {
+					active,
+					contextManagement: config.contextManagement,
+					model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+					...(activationReason ? { reason: activationReason } : {}),
+				},
 			},
 			config,
 			ctx,

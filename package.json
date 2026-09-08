@@ -1,12 +1,12 @@
 {
   "name": "pi-openai-toolkit",
-  "version": "0.12.0",
+  "version": "0.13.1",
   "private": false,
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
   },
-  "description": "OpenAI-focused Pi toolkit providing remote Responses compaction, native Web Search, native image generation, and model-reviewed auto mode.",
+  "description": "OpenAI toolkit for Pi: Codex Remote Context windows, remote compaction v2, hosted Web Search, image gen, auto mode.",
   "author": "awoaCrim and contributors",
   "license": "MIT",
   "repository": {
@@ -97,7 +97,7 @@
     "src/web-search/prompt.ts",
     "src/web-search/types.ts",
     "README.md",
-    "README_zh.md",
+    "README.zh.md",
     "LICENSE",
     "NOTICE",
     "tsconfig.check.json"
