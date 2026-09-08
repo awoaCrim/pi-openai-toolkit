@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { CodexContextWindowManager } from "./window-manager";
+import { CodexContextWindowManager, findNotesCheckpointSinceBoundary } from "./window-manager";
 import { CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, CONTEXT_WINDOW_COMPACTION_SUMMARY } from "./messages";
 
 function fakeContext(branch: readonly unknown[] = []): never {
@@ -185,4 +185,64 @@ test("creates a no-summary compaction boundary", () => {
 	} as never;
 	const result = manager.prepareCompaction(event);
 	expect(result).toMatchObject({ compaction: { summary: CONTEXT_WINDOW_COMPACTION_SUMMARY } });
+});
+
+function notesCall(id: string, action: string) {
+	return {
+		type: "message", id: `entry-${id}`, parentId: null, timestamp: "2026-09-07T00:00:01.000Z",
+		message: { role: "assistant", content: [{ type: "toolCall", id, name: "notes", arguments: { action } }] },
+	} as never;
+}
+function notesResult(id: string, ok: boolean) {
+	return {
+		type: "message", id: `entry-res-${id}`, parentId: null, timestamp: "2026-09-07T00:00:02.000Z",
+		message: {
+			role: "toolResult", toolCallId: id, toolName: "notes", isError: !ok,
+			content: [{ type: "text", text: ok ? "done" : "boom" }],
+			...(ok ? { details: { codexHistoryNotes: { output: "done" } } } : {}),
+		},
+	} as never;
+}
+function windowMarker(windowId: string) {
+	return {
+		type: "custom_message", id: `entry-m-${windowId}`, parentId: null, timestamp: "2026-09-07T00:00:00.000Z",
+		customType: CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, content: "window", display: true,
+		details: { protocol: 1, id: `m-${windowId}`, sessionId: "session-1", contextManagement: { protocol: 1, kind: "window", firstWindowId: windowId, currentWindowId: windowId, windowNumber: 0 } },
+	} as never;
+}
+
+test("notes checkpoint scan requires a success after the latest boundary", () => {
+	expect(findNotesCheckpointSinceBoundary([windowMarker("w1"), notesCall("tc-a", "append_to_file"), notesResult("tc-a", true)], "session-1")).toBe(true);
+	expect(findNotesCheckpointSinceBoundary([windowMarker("w1")], "session-1")).toBe(false);
+	expect(findNotesCheckpointSinceBoundary([
+		notesCall("tc-old", "write_file"), notesResult("tc-old", true), windowMarker("w1"),
+	], "session-1")).toBe(false);
+	expect(findNotesCheckpointSinceBoundary([
+		windowMarker("w1"), notesCall("tc-b", "append_to_file"), notesResult("tc-b", false),
+	], "session-1")).toBe(false);
+	expect(findNotesCheckpointSinceBoundary([
+		windowMarker("w1"), notesCall("tc-c", "read_file"), notesResult("tc-c", true),
+	], "session-1")).toBe(false);
+});
+
+test("notes checkpoint scan tracks the latest boundary across rollovers", () => {
+	const entries = [
+		windowMarker("w1"),
+		notesCall("tc-a", "append_to_file"), notesResult("tc-a", true),
+		windowMarker("w2"),
+	] as never[];
+	// The old window's checkpoint must not authorize the new window's rollover.
+	expect(findNotesCheckpointSinceBoundary(entries, "session-1")).toBe(false);
+});
+
+test("manager exposes the checkpoint gate for the current session branch", () => {
+	const manager = new CodexContextWindowManager(async () => undefined);
+	const entries = [
+		windowMarker("w1"), notesCall("tc-a", "append_to_file"), notesResult("tc-a", true),
+	] as never[];
+	manager.restore(entries, "session-1");
+	const ctx = {
+		sessionManager: { getBranch: () => entries, getSessionId: () => "session-1" },
+	} as never;
+	expect(manager.hasNotesCheckpointSinceBoundary(ctx)).toBe(true);
 });

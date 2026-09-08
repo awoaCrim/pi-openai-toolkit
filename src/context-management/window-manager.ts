@@ -226,6 +226,13 @@ export class CodexContextWindowManager {
 		return this.budget.remaining(ctx, this.identity, contextTokens);
 	}
 
+	/** True when a notes checkpoint succeeded in the current window (after the latest boundary). */
+	hasNotesCheckpointSinceBoundary(
+		ctx: Pick<ExtensionContext, "sessionManager">,
+	): boolean {
+		return findNotesCheckpointSinceBoundary(ctx.sessionManager.getBranch(), this.sessionId);
+	}
+
 	prepareCompaction(
 		event: SessionBeforeCompactEvent,
 	): { cancel: true } | { compaction: CompactionResult<ContextWindowCompactionDetails> } {
@@ -299,6 +306,63 @@ function identityFromDetails(details: CodexContextManagementMessageDetails): Con
 		...(context.previousWindowId ? { previousWindowId: context.previousWindowId } : {}),
 		windowNumber: context.windowNumber,
 	};
+}
+
+const NOTES_CHECKPOINT_ACTIONS: ReadonlySet<string> = new Set(["append_to_file", "write_file"]);
+
+/**
+ * Whether the branch contains a successful notes append/write result after the
+ * latest window boundary. Reads and failed writes never count as checkpoints.
+ */
+export function findNotesCheckpointSinceBoundary(
+	entries: readonly SessionEntry[],
+	sessionId?: string,
+): boolean {
+	let boundaryIndex = -1;
+	for (let index = entries.length - 1; index >= 0; index -= 1) {
+		const entry = entries[index]!;
+		if (entry.type !== "custom_message" || entry.customType !== CODEX_CONTEXT_WINDOW_MESSAGE_TYPE) continue;
+		if (!couldBelongToSession(entry.details, sessionId)) continue;
+		if (!isCodexContextManagementMessageDetails(entry.details)) {
+			throw new Error("Malformed persisted Codex context-window message");
+		}
+		if (!matchesSession(entry.details.sessionId, sessionId)) continue;
+		if (entry.details.contextManagement.kind === "window") {
+			boundaryIndex = index;
+			break;
+		}
+	}
+	if (boundaryIndex < 0) return false;
+	const checkpointCalls = new Set<string>();
+	for (let index = boundaryIndex + 1; index < entries.length; index += 1) {
+		const entry = entries[index]!;
+		if (entry.type !== "message") continue;
+		const message = entry.message;
+		if (message.role === "assistant") {
+			const parts = Array.isArray(message.content) ? message.content : [];
+			for (const part of parts) {
+				if (!isRecord(part) || part.type !== "toolCall") continue;
+				// Match by call id only; the provider-side namespace rewrite never
+				// affects the names persisted in the Pi session branch.
+				if (part.name !== "notes") continue;
+				const args = isRecord(part.arguments) ? part.arguments : undefined;
+				const action = typeof args?.action === "string" ? args.action : "";
+				if (typeof part.id === "string" && NOTES_CHECKPOINT_ACTIONS.has(action)) {
+					checkpointCalls.add(part.id);
+				}
+			}
+			continue;
+		}
+		if (message.role === "toolResult" && checkpointCalls.has(message.toolCallId)) {
+			if (message.isError) {
+				checkpointCalls.delete(message.toolCallId);
+				continue;
+			}
+			const details = message.details;
+			if (isRecord(details) && isRecord(details.codexHistoryNotes)) return true;
+		}
+	}
+	return false;
 }
 
 export function findLatestWindowBoundaryEntry(

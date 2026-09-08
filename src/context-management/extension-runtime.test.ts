@@ -96,8 +96,41 @@ test("a context-tool name conflict disables the Remote runtime instead of rewrit
 		branchEntries: [],
 		preparation: { firstKeptEntryId: "keep", tokensBefore: 10, messagesToSummarize: [], turnPrefixMessages: [] },
 	} as never, makeContext());
-	expect(result).toBeUndefined();
+	// Remote is configured for this Codex model: Pi's native compaction stays
+	// disabled even while the runtime is inactive, so nothing silently summarizes.
+	expect(result).toEqual({ cancel: true });
 	expect(compactCalls).toBe(0);
+});
+
+test("remote config on a non-Codex model leaves Pi native compaction untouched", async () => {
+	const handlers = new Map<string, (event: never, ctx: never) => unknown>();
+	const pi = {
+		on: (name: string, handler: (event: never, ctx: never) => unknown) => handlers.set(name, handler),
+		registerTool: () => undefined,
+		getAllTools: () => [],
+		getActiveTools: () => [],
+		setActiveTools: () => undefined,
+	} as unknown as ExtensionAPI;
+	extension(pi, {
+		loadConfig: () => ({
+			config: {
+				...DEFAULT_TOOLKIT_CONFIG,
+				compaction: { ...DEFAULT_COMPACTION_CONFIG, contextManagement: "remote", artifactRoot: "/tmp" },
+			},
+			warnings: [],
+		}),
+		remoteCompact: async () => { throw new Error("must not run"); },
+	} as never);
+
+	const anthropicModel = { provider: "anthropic", api: "anthropic-messages", id: "claude-x", baseUrl: "https://api.anthropic.com", contextWindow: 100_000 };
+	await handlers.get("session_start")?.({} as never, makeContext([], anthropicModel));
+	const result = await handlers.get("session_before_compact")?.({
+		signal: new AbortController().signal,
+		reason: "threshold",
+		branchEntries: [],
+		preparation: { firstKeptEntryId: "keep", tokensBefore: 10, messagesToSummarize: [], turnPrefixMessages: [] },
+	} as never, makeContext([], anthropicModel));
+	expect(result).toBeUndefined();
 });
 
 test("native Remote mode does not re-enter remote v2 when OAuth resolution fails", async () => {
@@ -131,7 +164,9 @@ test("native Remote mode does not re-enter remote v2 when OAuth resolution fails
 		branchEntries: [],
 		preparation: { firstKeptEntryId: "keep", tokensBefore: 10, messagesToSummarize: [], turnPrefixMessages: [] },
 	} as never, context);
-	expect(result).toBeUndefined();
+	// Inactive Remote-configured Codex sessions cancel native compaction
+	// instead of falling through to a Pi summary.
+	expect(result).toEqual({ cancel: true });
 	expect(compactCalls).toBe(0);
 });
 
