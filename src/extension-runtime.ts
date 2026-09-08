@@ -781,7 +781,11 @@ export default function registerCompactionExtension(
 	const syncTools = async (ctx: ExtensionContext, model = ctx.model): Promise<boolean> => {
 		const config = dependencies.loadConfig().config.compaction;
 		const active = await isRemoteContextActive(ctx, config, model);
-		return tools.sync(active);
+		// sync() reports whether the tool-set update succeeded; an inactive model
+		// syncs fine and returns true. The activation decision must use `active`
+		// itself, or non-covered models would receive a window boundary.
+		const synced = tools.sync(active);
+		return active && synced;
 	};
 	pi.on("session_start", async (_event, ctx) => {
 		const active = await syncTools(ctx);
@@ -790,7 +794,9 @@ export default function registerCompactionExtension(
 		if (!config.enabled) return;
 
 		let activationReason: string | undefined;
-		if (config.contextManagement === "remote") {
+		// Only models the built-in Remote Context coverage targets may activate or
+		// warn; everything else silently runs Pi's normal compaction path.
+		if (config.contextManagement === "remote" && isCodexContextModel(ctx.model, config)) {
 			if (active) {
 				try {
 					contextWindows.ensureInitialized(pi, ctx, true);

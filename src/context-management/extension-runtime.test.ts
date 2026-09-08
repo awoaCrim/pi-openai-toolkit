@@ -338,3 +338,43 @@ test("history and notes tools carry usage guidance in promptGuidelines", async (
 	expect(notesTool?.promptGuidelines?.length).toBeGreaterThan(0);
 	expect(notesTool?.promptGuidelines?.join(" ")).toContain("new_context");
 });
+
+test("a non-covered gateway model never writes a window boundary or warns on session_start", async () => {
+	const handlers = new Map<string, (event: never, ctx: never) => unknown>();
+	const sentMessages: Array<{ customType?: string }> = [];
+	const notices: string[] = [];
+	let active: string[] = ["read"];
+	const pi = {
+		on: (name: string, handler: (event: never, ctx: never) => unknown) => handlers.set(name, handler),
+		registerTool: () => undefined,
+		getAllTools: () => [],
+		getActiveTools: () => active,
+		setActiveTools: (names: string[]) => { active = names; },
+		sendMessage: (message: { customType?: string }) => { sentMessages.push(message); },
+	} as unknown as ExtensionAPI;
+	extension(pi, {
+		loadConfig: () => ({
+			config: {
+				...DEFAULT_TOOLKIT_CONFIG,
+				compaction: { ...DEFAULT_COMPACTION_CONFIG, contextManagement: "remote", artifactRoot: "/tmp" },
+			},
+			warnings: [],
+		}),
+	} as never);
+
+	// Gateway but not Astra: outside the built-in Remote Context coverage.
+	const solModel = { provider: "uwoacrimson", api: "openai-responses", id: "gpt-5.6-sol", baseUrl: "https://newapi.example/v1", contextWindow: 272_000 };
+	const ctx = {
+		...makeContext([], solModel),
+		hasUI: true,
+		ui: { notify: (_id: string, message: string) => notices.push(message) },
+	} as never;
+	await handlers.get("session_start")?.({} as never, ctx);
+
+	// Regression: tools.sync(false) also returns true; activation must key off
+	// the resolved model, not the sync success flag, or every gateway model
+	// receives a codex-context-window boundary message.
+	expect(sentMessages.filter((message) => message.customType === "codex-context-window")).toEqual([]);
+	expect(active).toEqual(["read"]);
+	expect(notices).toEqual([]);
+});
