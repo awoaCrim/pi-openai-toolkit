@@ -37,9 +37,11 @@ test("model selection evaluates the selected model rather than stale ctx.model",
 	let active = ["read"];
 	let loading = true;
 	const registeredTools: Array<{ name: string; description: string; parameters: unknown; promptGuidelines?: string[] }> = [];
+	const sentMessages: Array<{ customType?: string }> = [];
 	const pi = {
 		on: (name: string, handler: (event: never, ctx: never) => unknown) => handlers.set(name, handler),
 		registerTool: (tool: { name: string; description: string; parameters: unknown; promptGuidelines?: string[] }) => registeredTools.push(tool),
+		sendMessage: (message: { customType?: string }) => { sentMessages.push(message); return true; },
 		getAllTools: () => {
 			if (loading) throw new Error("action method called during extension loading");
 			return registeredTools;
@@ -377,4 +379,61 @@ test("a non-covered gateway model never writes a window boundary or warns on ses
 	expect(sentMessages.filter((message) => message.customType === "codex-context-window")).toEqual([]);
 	expect(active).toEqual(["read"]);
 	expect(notices).toEqual([]);
+});
+
+test("switching into a covered model mid-session initializes the window lifecycle", async () => {
+	const handlers = new Map<string, (event: never, ctx: never) => unknown>();
+	let active: string[] = ["read"];
+	const registeredTools: Array<{ name: string; description: string; parameters: unknown; promptGuidelines?: string[] }> = [];
+	const branch: Array<{ type: string; customType?: string; id: string; details: unknown }> = [];
+	let markerCount = 0;
+	const pi = {
+		on: (name: string, handler: (event: never, ctx: never) => unknown) => handlers.set(name, handler),
+		registerTool: (tool: { name: string; description: string; parameters: unknown; promptGuidelines?: string[] }) => registeredTools.push(tool),
+		getAllTools: () => registeredTools,
+		getActiveTools: () => active,
+		setActiveTools: (names: string[]) => { active = names; },
+		sendMessage: (message: { customType?: string; details?: unknown }) => {
+			if (message.customType === "codex-context-window") {
+				markerCount += 1;
+				branch.push({ type: "custom_message", customType: message.customType, id: `marker-${markerCount}`, details: message.details });
+			}
+			return true;
+		},
+	} as unknown as ExtensionAPI;
+	extension(pi, {
+		loadConfig: () => ({
+			config: {
+				...DEFAULT_TOOLKIT_CONFIG,
+				compaction: { ...DEFAULT_COMPACTION_CONFIG, contextManagement: "remote", artifactRoot: "/tmp" },
+			},
+			warnings: [],
+		}),
+	} as never);
+
+	const statefulContext = (currentModel: unknown) => ({
+		...makeContext(branch, currentModel),
+		sessionManager: {
+			getBranch: () => branch,
+			getSessionId: () => "session-1",
+		},
+	}) as never;
+
+	const solModel = { provider: "uwoacrimson", api: "openai-responses", id: "gpt-5.6-sol", baseUrl: "https://newapi.example/v1", contextWindow: 272_000 };
+	await handlers.get("session_start")?.({} as never, statefulContext(solModel));
+	expect(branch).toEqual([]);
+
+	// sol -> covered model: the switch must open the window so later requests
+	// carry window metadata and the backend ingests from this point on.
+	await handlers.get("model_select")?.({ model, previousModel: solModel, source: "set" } as never, statefulContext(solModel));
+	expect(markerCount).toBe(1);
+
+	// Idempotence: re-selecting a covered model with an existing window adds none.
+	await handlers.get("model_select")?.({ model, previousModel: model, source: "set" } as never, statefulContext(model));
+	expect(markerCount).toBe(1);
+
+	// Switching away to a non-covered model adds no boundary of its own.
+	await handlers.get("model_select")?.({ model: solModel, previousModel: model, source: "set" } as never, statefulContext(model));
+	expect(markerCount).toBe(1);
+	expect(active).toEqual(["read"]);
 });

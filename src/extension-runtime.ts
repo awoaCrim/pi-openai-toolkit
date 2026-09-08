@@ -853,7 +853,18 @@ export default function registerCompactionExtension(
 		tools.reset();
 	});
 	pi.on("model_select", async (event, ctx) => {
-		await syncTools(ctx, event.model);
+		const active = await syncTools(ctx, event.model);
+		// Switching into a covered model mid-session must open the window
+		// lifecycle immediately: without an identity the request rewrite skips
+		// window metadata, the backend never ingests those turns, and the first
+		// new_context would trim pre-switch history that no history can recover.
+		// ensureInitialized is idempotent when a window already exists.
+		if (!active) return;
+		try {
+			contextWindows.ensureInitialized(pi, ctx, true);
+		} catch {
+			notifyRemoteContextFailure(ctx, "malformed-window-state");
+		}
 	});
 	pi.on("before_agent_start", async (_event, ctx) => {
 		await syncTools(ctx);
