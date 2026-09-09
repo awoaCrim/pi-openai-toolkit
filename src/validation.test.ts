@@ -438,6 +438,7 @@ test("gateway Remote Context headers preserve session affinity and strip inherit
 	const { sessionStart, beforeProviderHeaders } = await loadHookHarness({
 		config: {
 			contextManagement: "remote",
+			gatewayContextModels: ["uwoacrimson/gpt-6-astra"],
 		},
 	});
 	const gatewayModel: TestModel = {

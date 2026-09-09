@@ -67,7 +67,8 @@ export type NativeCodexContextProvider = {
 export type GatewayCodexContextProvider = {
 	kind: "codex-gateway";
 	route: "codex-gateway";
-	provider: "uwoacrimson";
+	/** Operator-defined provider name; matched via compaction.gatewayContextModels. */
+	provider: string;
 	api: "openai-responses";
 	model: string;
 	baseUrl: string;

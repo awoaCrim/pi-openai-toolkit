@@ -3,16 +3,15 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { mergeProviderHeaders } from "../provider-headers";
 import { CODEX_CLIENT_VERSION } from "../responses-headers";
 import { normalizeBaseUrl } from "../runtime";
+import { isExactModelAllowed } from "../model-scope";
 import {
 	isNonEmptyString,
 	type CodexContextProvider,
 	type CodexContextProviderResolution,
 } from "./types";
-import { ASTRA_MODEL_ID } from "../types";
 
 const CODEX_PROVIDER = "openai-codex";
 const CODEX_API = "openai-codex-responses";
-const GATEWAY_PROVIDER = "uwoacrimson";
 const GATEWAY_API = "openai-responses";
 const CODEX_TOOL_ORIGINATOR = "codex_cli_rs";
 const CODEX_GATEWAY_ORIGINATOR = "codex_cli_rs";
@@ -32,12 +31,14 @@ export function isNativeCodexModel(
 
 export function isCodexGatewayModel(
 	model: ExtensionContext["model"] | undefined,
+	gatewayModels: readonly string[] = [],
 ): boolean {
-	// Only the Astra SKU has a verified Codex-compatible gateway relay path
-	// (NEWapi + CLIProxyAPI passthrough); other gateway models stay on remote
-	// compaction v2. Matching is on the bare model id, by design.
-	if (!model || model.provider !== GATEWAY_PROVIDER || model.api !== GATEWAY_API) return false;
-	return model.id === ASTRA_MODEL_ID;
+	// Gateway coverage is an operator allowlist of exact "provider/model" keys
+	// (compaction.gatewayContextModels). The backend relay must actually pass
+	// hosted window markers through; models outside the list stay on remote
+	// compaction v2.
+	if (!model || model.api !== GATEWAY_API) return false;
+	return isExactModelAllowed(model, gatewayModels);
 }
 
 export function normalizeCodexBackendBaseUrl(baseUrl: string | undefined | null): string | undefined {
@@ -172,6 +173,7 @@ export function codexContextProviderHeaders(
 export async function resolveCodexContextProvider(
 	ctx: ExtensionContext,
 	modelOverride: ExtensionContext["model"] = ctx.model,
+	gatewayModels: readonly string[] = [],
 ): Promise<CodexContextProviderResolution> {
 	const model = modelOverride;
 	const descriptor = {
@@ -183,13 +185,9 @@ export async function resolveCodexContextProvider(
 	if (!model) return { ok: false, reason: "unsupported-model" };
 
 	const isNative = isNativeCodexModel(model);
-	const isGateway = isCodexGatewayModel(model);
+	const isGateway = isCodexGatewayModel(model, gatewayModels);
 	if (!isNative && !isGateway) {
-		return {
-			ok: false,
-			reason: model.provider === GATEWAY_PROVIDER ? "unsupported-model" : "unsupported-model",
-			...descriptor,
-		};
+		return { ok: false, reason: "unsupported-model", ...descriptor };
 	}
 	if (!isNative && model.api !== GATEWAY_API) {
 		return { ok: false, reason: "unsupported-api", ...descriptor };
@@ -217,7 +215,7 @@ export async function resolveCodexContextProvider(
 			provider: {
 				kind: "codex-gateway",
 				route: "codex-gateway",
-				provider: GATEWAY_PROVIDER,
+				provider: model.provider,
 				api: GATEWAY_API,
 				model: model.id,
 				baseUrl: rawBaseUrl,

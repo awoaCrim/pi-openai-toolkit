@@ -14,6 +14,7 @@ import {
 	isNativeCodexModel,
 } from "./context-management/codex-provider";
 import { routeContextNamespaceToolMessage } from "./context-management/namespace-tools";
+import { loadHistoryNotesThreadHint } from "./context-management/history-notes";
 import { CodexContextWindowManager } from "./context-management/window-manager";
 import { registerContextManagementTools } from "./context-management/tools";
 import { writeDebugArtifact, writeReplayFailureArtifact } from "./debug";
@@ -109,7 +110,7 @@ async function isRemoteContextActive(
 	model: ExtensionContext["model"] = ctx.model,
 ): Promise<boolean> {
 	if (!config.enabled || config.contextManagement !== "remote") return false;
-	const resolution = await resolveCodexContextProvider(ctx, model);
+	const resolution = await resolveCodexContextProvider(ctx, model, config.gatewayContextModels);
 	return resolution.ok;
 }
 
@@ -118,7 +119,7 @@ function isCodexContextModel(
 	config: CompactionConfig,
 ): boolean {
 	return config.contextManagement === "remote"
-		&& (isNativeCodexModel(model) || isCodexGatewayModel(model));
+		&& (isNativeCodexModel(model) || isCodexGatewayModel(model, config.gatewayContextModels));
 }
 
 function notifyRemoteContextFailure(ctx: ExtensionContext, reason: string): void {
@@ -759,7 +760,9 @@ export default function registerCompactionExtension(
 	overrides: Partial<CompactionDependencies> = {},
 ) {
 	const loadConfig = overrides.loadConfig ?? loadToolkitConfig;
-	const contextWindows = overrides.contextWindows ?? new CodexContextWindowManager();
+	const contextWindows = overrides.contextWindows ?? new CodexContextWindowManager((ctx, signal) =>
+		loadHistoryNotesThreadHint(ctx, signal, loadConfig().config.compaction.gatewayContextModels)
+	);
 	const dependencies: CompactionDependencies = {
 		loadConfig,
 		remoteCompact: executeRemoteV2Compaction,
@@ -775,6 +778,7 @@ export default function registerCompactionExtension(
 			const config = dependencies.loadConfig().config.compaction;
 			return tools.isRegistered && await isRemoteContextActive(ctx, config);
 		},
+		() => dependencies.loadConfig().config.compaction.gatewayContextModels,
 	);
 	const remoteContextActive: RemoteContextActive = async (ctx, config, model = ctx.model) =>
 		tools.isRegistered && await isRemoteContextActive(ctx, config, model);
@@ -807,7 +811,7 @@ export default function registerCompactionExtension(
 				activationReason = "tool-name-conflict";
 				notifyRemoteContextFailure(ctx, activationReason);
 			} else {
-				const remoteResolution = await resolveCodexContextProvider(ctx, ctx.model);
+				const remoteResolution = await resolveCodexContextProvider(ctx, ctx.model, config.gatewayContextModels);
 				activationReason = remoteResolution.ok ? "codex-context-unavailable" : remoteResolution.reason;
 				notifyRemoteContextFailure(ctx, activationReason);
 			}
@@ -874,7 +878,7 @@ export default function registerCompactionExtension(
 		const config = dependencies.loadConfig().config.compaction;
 		if (!isCodexContextModel(ctx.model, config)) return;
 		if (!(await remoteContextActive(ctx, config))) return;
-		const provider = await resolveCodexContextProvider(ctx, ctx.model);
+		const provider = await resolveCodexContextProvider(ctx, ctx.model, config.gatewayContextModels);
 		if (provider.ok && provider.provider.kind === "codex-gateway") {
 			const sessionId = getSessionId(ctx);
 			const gatewayHeaders = codexContextProviderHeaders(provider.provider, {

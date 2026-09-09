@@ -81,6 +81,12 @@ export type CompactionConfig = {
 	 */
 	responsesApis: string[];
 	/**
+	 * Exact "provider/model" keys allowed to use Codex Remote Context on the
+	 * `openai-responses` gateway wire. The native `openai-codex` route ignores
+	 * this list; gateway coverage is opt-in per model.
+	 */
+	gatewayContextModels: string[];
+	/**
 	 * Percentage of the context window that, when remaining tokens drop below it,
 	 * triggers a checkpoint/new_context reminder (0-100; 0 disables reminders).
 	 */
@@ -506,6 +512,7 @@ export const DEFAULT_COMPACTION_CONFIG: CompactionConfig = {
 	remoteCompactModel: undefined,
 	nativeFallback: { ...DEFAULT_NATIVE_FALLBACK_CONFIG },
 	responsesApis: [...RESPONSES_COMPACT_CAPABLE_APIS],
+	gatewayContextModels: [],
 	contextReminderThresholdPercent: 5,
 	notifyOnLoad: false,
 	debug: false,

@@ -47,6 +47,7 @@ const COMPACTION_FIELDS = new Set([
 	"remoteCompactModel",
 	"nativeFallback",
 	"responsesApis",
+	"gatewayContextModels",
 	"contextReminderThresholdPercent",
 	"notifyOnLoad",
 	"debug",
@@ -345,6 +346,15 @@ function applyCompactionConfig(
 	);
 	if (apis !== undefined) {
 		resolved.responsesApis = apis;
+	}
+
+	const gatewayContextModels = toStringList(
+		raw.gatewayContextModels,
+		"compaction.gatewayContextModels",
+		warnings,
+	);
+	if (gatewayContextModels !== undefined) {
+		resolved.gatewayContextModels = gatewayContextModels;
 	}
 
 	if (typeof raw.artifactRoot === "string" && raw.artifactRoot.trim().length > 0) {

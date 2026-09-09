@@ -50,6 +50,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.responsesApis).toEqual([
 			...DEFAULT_COMPACTION_CONFIG.responsesApis,
 		]);
+		expect(loaded.config.compaction.gatewayContextModels).toEqual([]);
 		expect(loaded.config.webSearch).toEqual({
 			...DEFAULT_WEB_SEARCH_CONFIG,
 			models: [...DEFAULT_WEB_SEARCH_CONFIG.models],
@@ -76,6 +77,7 @@ describe("loadToolkitConfig", () => {
 						thinkingLevel: "medium",
 					},
 					responsesApis: ["openai-responses"],
+					gatewayContextModels: [" uwoacrimson/gpt-6-astra ", "uwoacrimson/gpt-5.6-luna", "uwoacrimson/gpt-6-astra", ""],
 					debug: true,
 					notifyOnLoad: true,
 					artifactRoot: "~/artifacts/pot",
@@ -123,6 +125,10 @@ describe("loadToolkitConfig", () => {
 		});
 		expect(loaded.config.compaction).not.toHaveProperty("autoCompaction");
 		expect(loaded.config.compaction.responsesApis).toEqual(["openai-responses"]);
+		expect(loaded.config.compaction.gatewayContextModels).toEqual([
+			"uwoacrimson/gpt-6-astra",
+			"uwoacrimson/gpt-5.6-luna",
+		]);
 		expect(loaded.config.compaction.debug).toBe(true);
 		expect(loaded.config.compaction.notifyOnLoad).toBe(true);
 		expect(loaded.config.compaction.contextReminderThresholdPercent).toBe(5);
@@ -280,6 +286,7 @@ describe("loadToolkitConfig", () => {
 						futureOption: true,
 					},
 					responsesApis: ["openai-responses", "anthropic-messages"],
+					gatewayContextModels: 42,
 					artifactRoot: "",
 				},
 				webSearch: {
@@ -309,6 +316,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.nativeFallback).toEqual({ ...DEFAULT_NATIVE_FALLBACK_CONFIG });
 		expect(loaded.config.compaction).not.toHaveProperty("autoCompaction");
 		expect(loaded.config.compaction.responsesApis).toEqual(["openai-responses"]);
+		expect(loaded.config.compaction.gatewayContextModels).toEqual([]);
 		expect(loaded.config.webSearch).toEqual({ enabled: true, models: ["provider/model"] });
 		expect(loaded.config.imageGeneration).toEqual({ enabled: false });
 		expect(loaded.config.autoMode).toEqual({

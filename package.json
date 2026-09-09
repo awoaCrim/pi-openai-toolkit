@@ -1,6 +1,6 @@
 {
   "name": "pi-openai-toolkit",
-  "version": "0.14.3",
+  "version": "0.14.4",
   "private": false,
   "type": "module",
   "engines": {
@@ -96,6 +96,7 @@
     "src/web-search/payload.ts",
     "src/web-search/prompt.ts",
     "src/web-search/types.ts",
+    "docs/internals.md",
     "README.md",
     "README.zh.md",
     "LICENSE",

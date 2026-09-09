@@ -64,7 +64,7 @@ test("rejects a gateway or other provider even when Codex OAuth is available", a
 	expect(api).toMatchObject({ ok: false, reason: "unsupported-model" });
 });
 
-test("resolves the built-in Astra gateway without native Codex account derivation", async () => {
+test("resolves an allowlisted Astra gateway model without native Codex account derivation", async () => {
 	const gatewayModel = model({
 		provider: "uwoacrimson",
 		api: "openai-responses",
@@ -78,6 +78,7 @@ test("resolves the built-in Astra gateway without native Codex account derivatio
 			headers: { "ChatGPT-Account-ID": "must-not-forward", Cookie: "must-not-forward" },
 		}),
 		gatewayModel,
+		["uwoacrimson/gpt-6-astra"],
 	);
 	expect(result.ok).toBe(true);
 	if (result.ok) {
@@ -89,10 +90,25 @@ test("resolves the built-in Astra gateway without native Codex account derivatio
 		expect(result.provider.headers).not.toHaveProperty("ChatGPT-Account-ID");
 	}
 
-	// Other gateway SKUs stay on the remote-compaction-v2 path: no window protocol.
-	const nonAstra = model({ provider: "uwoacrimson", api: "openai-responses", baseUrl: "https://newapi.example/v1" });
-	const rejected = await resolveCodexContextProvider(context(nonAstra, { ok: true, apiKey: "newapi-key" }), nonAstra);
+	// Gateway coverage is allowlist-driven: an unlisted SKU stays outside
+	// coverage, and any other listed responses-wire SKU resolves the same way.
+	const unlisted = model({ provider: "uwoacrimson", api: "openai-responses", id: "gpt-5.6-luna", baseUrl: "https://newapi.example/v1" });
+	const rejected = await resolveCodexContextProvider(context(unlisted, { ok: true, apiKey: "newapi-key" }), unlisted, []);
 	expect(rejected).toMatchObject({ ok: false, reason: "unsupported-model" });
+	const listed = await resolveCodexContextProvider(
+		context(unlisted, { ok: true, apiKey: "newapi-key" }),
+		unlisted,
+		["uwoacrimson/gpt-5.6-luna"],
+	);
+	expect(listed.ok).toBe(true);
+	if (listed.ok) {
+		expect(listed.provider.kind).toBe("codex-gateway");
+		expect(listed.provider.model).toBe("gpt-5.6-luna");
+	}
+
+	// An empty allowlist covers no gateway models at all, including Astra.
+	const noAllowlist = await resolveCodexContextProvider(context(gatewayModel, { ok: true, apiKey: "newapi-key" }), gatewayModel, []);
+	expect(noAllowlist).toMatchObject({ ok: false, reason: "unsupported-model" });
 });
 
 test("preserves the bare gateway model and affinity headers", () => {
