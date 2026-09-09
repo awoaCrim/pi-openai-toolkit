@@ -176,16 +176,74 @@ test("requires an explicitly scheduled rollover before threshold compaction", ()
 	expect(manager.prepareCompaction(event)).toEqual({ cancel: true });
 });
 
-test("creates a no-summary compaction boundary", () => {
+test("creates a no-summary compaction boundary only for the scheduled rollover", () => {
 	const manager = new CodexContextWindowManager();
+	const marker = rolloverMarker("w2");
+	manager.restore([marker], "session-1");
 	const event = {
-		reason: "manual",
-		branchEntries: [],
+		reason: "threshold",
+		branchEntries: [marker],
 		preparation: { firstKeptEntryId: "keep", tokensBefore: 50 },
 	} as never;
 	const result = manager.prepareCompaction(event);
 	expect(result).toMatchObject({ compaction: { summary: CONTEXT_WINDOW_COMPACTION_SUMMARY } });
+	// The trim is consumed exactly once; a second compaction for the same
+	// rollover must cancel instead of writing another no-op boundary.
+	expect(manager.prepareCompaction(event)).toEqual({ cancel: true });
 });
+
+test("cancels manual and overflow compaction when no rollover trim is pending", () => {
+	const manager = new CodexContextWindowManager();
+	const marker = windowMarker("w1");
+	manager.restore([marker], "session-1");
+	for (const reason of ["manual", "overflow"]) {
+		const event = {
+			reason,
+			branchEntries: [marker],
+			preparation: { firstKeptEntryId: "keep", tokensBefore: 50 },
+		} as never;
+		expect(manager.prepareCompaction(event)).toEqual({ cancel: true });
+	}
+});
+
+test("budget checks wait for the current window's own usage anchor", () => {
+	const sent: Array<Record<string, unknown>> = [];
+	const manager = new CodexContextWindowManager();
+	const marker = rolloverMarker("w2");
+	manager.restore([marker], "session-1");
+	const staleCtx = {
+		model: { contextWindow: 100_000 },
+		sessionManager: { getBranch: () => [marker], getSessionId: () => "session-1" },
+		getContextUsage: () => ({ contextWindow: 100_000, tokens: 78_000 }),
+	} as never;
+	// 78k belongs to the previous window's last request; the new window has
+	// not produced any usage yet, so no reminder may fire on that stale anchor.
+	manager.recordBudget(fakePi(sent), staleCtx, true, 10);
+	expect(sent).toHaveLength(0);
+
+	const freshCtx = {
+		...staleCtx,
+		sessionManager: { getBranch: () => [marker, assistantUsage(20_000)], getSessionId: () => "session-1" },
+	} as never;
+	manager.recordBudget(fakePi(sent), freshCtx, true, 10);
+	expect(sent).toHaveLength(1);
+	expect(String(sent[0]?.content)).toContain("context tokens remain");
+});
+
+function rolloverMarker(windowId: string) {
+	return {
+		type: "custom_message", id: `entry-m-${windowId}`, parentId: null, timestamp: "2026-09-07T00:00:00.000Z",
+		customType: CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, content: "window", display: true,
+		details: { protocol: 1, id: `m-${windowId}`, sessionId: "session-1", contextManagement: { protocol: 1, kind: "window", firstWindowId: "w1", currentWindowId: windowId, windowNumber: 1, trimPreviousWindow: true } },
+	} as never;
+}
+
+function assistantUsage(tokens: number) {
+	return {
+		type: "message", id: `entry-u-${tokens}`, parentId: null, timestamp: "2026-09-07T00:00:03.000Z",
+		message: { role: "assistant", content: [{ type: "text", text: "ok" }], stopReason: "stop", usage: { totalTokens: tokens } },
+	} as never;
+}
 
 function notesCall(id: string, action: string) {
 	return {

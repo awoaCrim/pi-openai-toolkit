@@ -205,6 +205,12 @@ export class CodexContextWindowManager {
 		contextTokens?: number,
 	): void {
 		if (!active || !this.identity || contextReminderThresholdPercent <= 0) return;
+		// Right after a rollover, Pi's usage anchor still reports the previous
+		// window's last request until the new window's first request completes.
+		// Budget decisions taken in that gap act on stale numbers: they burn the
+		// once-per-window reminder on a false alarm seconds after a successful
+		// rollover, leaving the window silent for the rest of its life.
+		if (!hasAssistantUsageSinceWindowBoundary(ctx.sessionManager.getBranch(), this.sessionId)) return;
 		const reminder = this.budget.record(ctx, this.identity, contextTokens, contextReminderThresholdPercent);
 		if (!reminder) return;
 		sendContextWindowMessage(
@@ -230,13 +236,23 @@ export class CodexContextWindowManager {
 	prepareCompaction(
 		event: SessionBeforeCompactEvent,
 	): { cancel: true } | { compaction: CompactionResult<ContextWindowCompactionDetails> } {
-		if (event.reason === "threshold") {
-			const boundary = findLatestWindowBoundaryEntry(event.branchEntries, this.sessionId);
-			if (!boundary || boundary.details.contextManagement.currentWindowId !== this.trimPendingWindowId) {
-				return { cancel: true };
-			}
+		// Only the compaction that consumes a scheduled rollover may write a
+		// boundary. Every other path — threshold, manual /compact, overflow —
+		// stays cancelled: a boundary written without a pending trim does not
+		// shrink anything, becomes Pi's latest-compaction anchor, and blinds
+		// getContextUsage (null tokens) until the next assistant usage lands —
+		// which is exactly how the exhausted-window fallback can go silent.
+		const boundary = findLatestWindowBoundaryEntry(event.branchEntries, this.sessionId);
+		if (!boundary || boundary.details.contextManagement.currentWindowId !== this.trimPendingWindowId) {
+			return { cancel: true };
 		}
-		return { compaction: this.createCompaction(event) };
+		const compaction = this.createCompaction(event);
+		// Consume the trim synchronously. Pi does not re-fire session_compact
+		// for hook-written entries, so relying on that event leaks the pending
+		// id and lets every later compaction pass this gate again, writing an
+		// endless run of no-op boundaries for the same window.
+		this.trimPendingWindowId = undefined;
+		return { compaction };
 	}
 
 	recordCompaction(details: unknown): void {
@@ -303,6 +319,48 @@ function identityFromDetails(details: CodexContextManagementMessageDetails): Con
 }
 
 const NOTES_CHECKPOINT_ACTIONS: ReadonlySet<string> = new Set(["append_to_file", "write_file"]);
+
+/**
+ * Whether the branch contains a successful assistant usage after the latest
+ * window boundary. Before that first usage lands, any context measurement is
+ * still anchored to the previous window's last request.
+ */
+export function hasAssistantUsageSinceWindowBoundary(
+	entries: readonly SessionEntry[],
+	sessionId?: string,
+): boolean {
+	let boundaryIndex = -1;
+	for (let index = entries.length - 1; index >= 0; index -= 1) {
+		const entry = entries[index]!;
+		if (entry.type !== "custom_message" || entry.customType !== CODEX_CONTEXT_WINDOW_MESSAGE_TYPE) continue;
+		if (!couldBelongToSession(entry.details, sessionId)) continue;
+		if (!isCodexContextManagementMessageDetails(entry.details)) {
+			throw new Error("Malformed persisted Codex context-window message");
+		}
+		if (!matchesSession(entry.details.sessionId, sessionId)) continue;
+		if (entry.details.contextManagement.kind === "window") {
+			boundaryIndex = index;
+			break;
+		}
+	}
+	if (boundaryIndex < 0) return false;
+	for (let index = boundaryIndex + 1; index < entries.length; index += 1) {
+		const entry = entries[index]!;
+		if (entry.type !== "message") continue;
+		const message = entry.message;
+		if (message.role !== "assistant") continue;
+		const candidate = message as unknown as {
+			stopReason?: string;
+			usage?: { totalTokens?: number; input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+		};
+		if (candidate.stopReason === "aborted" || candidate.stopReason === "error") continue;
+		const usage = candidate.usage;
+		if (!usage) continue;
+		const tokens = usage.totalTokens ?? (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
+		if (tokens > 0) return true;
+	}
+	return false;
+}
 
 /**
  * Whether the branch contains a successful notes append/write result after the

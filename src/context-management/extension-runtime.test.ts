@@ -295,7 +295,10 @@ test("remote context owns Codex compaction and activates only its four tools", a
 			turnPrefixMessages: [],
 		},
 	} as never, makeContext());
-	expect(result).toMatchObject({ compaction: { summary: expect.stringContaining("no conversation summary") } });
+	// A manual /compact without a scheduled rollover must never write a
+	// boundary: no-op compactions become Pi's latest-compaction anchor and
+	// blind the budget fallback until the next assistant usage lands.
+	expect(result).toEqual({ cancel: true });
 	expect(compactCalls).toBe(0);
 
 	await handlers.get("session_shutdown")?.({} as never, makeContext());
