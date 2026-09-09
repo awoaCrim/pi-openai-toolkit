@@ -21,6 +21,11 @@ describe("appendWebSearchPrompt", () => {
 		expect(first).toBe(`Base prompt\n\n${WEB_SEARCH_PROMPT_SECTION}`);
 		expect(second).toBe(first);
 		expect(first.match(/## Web Search/g)).toHaveLength(1);
+		// The guidance must name the callable tool and forbid capability denial:
+		// hosted tools carry no client-side description, so prose is the model's
+		// only link between "web search" and the `web_search` entry in its tools.
+		expect(WEB_SEARCH_PROMPT_SECTION).toContain("`web_search`");
+		expect(WEB_SEARCH_PROMPT_SECTION).toMatch(/never claim/i);
 	});
 
 	test("adds guidance for allowlisted openai-codex-responses turns", () => {
