@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ResponsesRuntime } from "../runtime";
+import { DEFAULT_IMAGE_GENERATION_MODEL } from "../types";
 import { _clientTest, requestGeneratedImage } from "./client";
 import { buildImageGenerationRequest, normalizeGenerateImageParams } from "./protocol";
 import { completedImageResponse } from "./test-helpers";
@@ -40,6 +41,7 @@ function codexToken(accountId: string): string {
 function body() {
 	return buildImageGenerationRequest({
 		routingModel: "gpt-5.5",
+		imageModel: DEFAULT_IMAGE_GENERATION_MODEL,
 		params: normalizeGenerateImageParams({ prompt: "draw a cat" }),
 		references: [],
 	});

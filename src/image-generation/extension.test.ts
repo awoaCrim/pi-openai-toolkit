@@ -41,6 +41,7 @@ function createHarness(eligible = true) {
 			},
 			imageGeneration: {
 				...DEFAULT_IMAGE_GENERATION_CONFIG,
+				models: [...DEFAULT_IMAGE_GENERATION_CONFIG.models],
 				enabled: eligible,
 			},
 		},
@@ -58,10 +59,14 @@ function createHarness(eligible = true) {
 		edited: false,
 		referenceCount: 0,
 	};
-	const executeImage = async () => ({
-		text: "Generated PNG.\nArtifact: /agent/generated-images/session/ig.png",
-		details,
-	});
+	let executedParams: unknown;
+	const executeImage = async (args: { params: unknown }) => {
+		executedParams = args.params;
+		return {
+			text: "Generated PNG.\nArtifact: /agent/generated-images/session/ig.png",
+			details,
+		};
+	};
 	const ctx = {
 		model: { provider: "newapi", api: "openai-responses", id: "gpt-5.5" },
 	};
@@ -75,6 +80,7 @@ function createHarness(eligible = true) {
 		getActiveTools: () => activeTools,
 		getRegisteredTool: () => registeredTool,
 		getRegisterCount: () => registerCount,
+		getExecutedParams: () => executedParams,
 	};
 }
 
@@ -139,9 +145,17 @@ describe("image generation extension", () => {
 		]);
 		expect(parameters.properties.referenceImagePaths.description).toContain("Use null");
 		expect(parameters.properties.outputPath.description).toContain("Use null");
+		expect(parameters.properties.model.anyOf.map((schema: { type: string }) => schema.type)).toEqual([
+			"null",
+			"string",
+		]);
+		expect(parameters.properties.model.description).toContain("imageGeneration.models");
 		expect(tool.promptSnippet).toContain("Generate or edit PNG images");
 		expect(tool.promptGuidelines.some((guideline: string) => guideline.includes("never invent paths"))).toBe(true);
 		expect(tool.promptGuidelines.some((guideline: string) => guideline.includes("never invent a destination"))).toBe(true);
+		expect(
+			tool.promptGuidelines.some((guideline: string) => guideline.includes("never invent or guess a model id")),
+		).toBe(true);
 	});
 
 	test("returns path-only content and bounded details", async () => {
@@ -156,10 +170,13 @@ describe("image generation extension", () => {
 		expect(tool.executionMode).toBe("sequential");
 		const result = await tool.execute(
 			"tool-call-1",
-			{ prompt: "draw a cat" },
+			{ prompt: "draw a cat", model: "grok-imagine-image-2.0" },
 			undefined,
 			undefined,
 			harness.ctx,
+		);
+		expect(harness.getExecutedParams()).toEqual(
+			expect.objectContaining({ prompt: "draw a cat", model: "grok-imagine-image-2.0" }),
 		);
 		expect(result).toEqual({
 			content: [

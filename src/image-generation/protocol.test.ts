@@ -6,6 +6,7 @@ import {
 	normalizeGenerateImageParams,
 	parseImageGenerationResponse,
 	readPngDimensions,
+	selectImageGenerationModel,
 } from "./protocol";
 import {
 	completedImageResponse,
@@ -15,7 +16,11 @@ import {
 	validPng,
 	validWebp,
 } from "./test-helpers";
-import { isImageGenerationDetails, sanitizeImageDiagnostic } from "./types";
+import {
+	ImageGenerationError,
+	isImageGenerationDetails,
+	sanitizeImageDiagnostic,
+} from "./types";
 
 describe("image generation protocol", () => {
 	test("normalizes the small tool interface and infers generate/edit", () => {
@@ -139,7 +144,81 @@ describe("image generation protocol", () => {
 		).toThrow("outputPath must be a path string or null.");
 	});
 
-	test("builds an isolated one-turn non-streaming gpt-image-2 request", () => {
+	test("normalizes the optional model argument and rejects malformed values", () => {
+		expect(normalizeGenerateImageParams({ prompt: "draw", model: " grok-imagine-image-2.0 " }).model).toBe(
+			"grok-imagine-image-2.0",
+		);
+		expect(normalizeGenerateImageParams({ prompt: "draw", model: null }).model).toBeUndefined();
+		expect(normalizeGenerateImageParams({ prompt: "draw", model: " \t " }).model).toBeUndefined();
+		expect(normalizeGenerateImageParams({ prompt: "draw" }).model).toBeUndefined();
+		expect(() =>
+			normalizeGenerateImageParams({ prompt: "draw", model: 42 as unknown as string }),
+		).toThrow("model must be a model id string or null.");
+		expect(() =>
+			normalizeGenerateImageParams({ prompt: "draw", model: "x".repeat(257) }),
+		).toThrow("model must be at most 256 characters when provided.");
+	});
+
+	test("selects the configured default or an explicitly configured image model", () => {
+		expect(selectImageGenerationModel({ configuredModels: ["gpt-image-2"] })).toBe("gpt-image-2");
+		expect(selectImageGenerationModel({})).toBe("gpt-image-2.5");
+		expect(selectImageGenerationModel({ configuredModels: undefined })).toBe("gpt-image-2.5");
+		expect(selectImageGenerationModel({ configuredModels: [] })).toBe("gpt-image-2.5");
+		// Configuration order expresses the default, so the first usable entry wins.
+		expect(
+			selectImageGenerationModel({ configuredModels: ["grok-imagine-image-2.0", "gpt-image-2"] }),
+		).toBe("grok-imagine-image-2.0");
+		expect(
+			selectImageGenerationModel({
+				requestedModel: " gpt-image-2 ",
+				configuredModels: ["grok-imagine-image-2.0", "gpt-image-2"],
+			}),
+		).toBe("gpt-image-2");
+		// Whitespace and duplicates never become selectable models.
+		expect(
+			selectImageGenerationModel({
+				requestedModel: "grok-imagine-image-2.0",
+				configuredModels: [" ", "grok-imagine-image-2.0", "grok-imagine-image-2.0"],
+			}),
+		).toBe("grok-imagine-image-2.0");
+		expect(selectImageGenerationModel({ configuredModels: [" \t "] })).toBe("gpt-image-2.5");
+	});
+
+	test("rejects an unconfigured image model before it can be selected", () => {
+		expect(() =>
+			selectImageGenerationModel({
+				requestedModel: "grok-imagine-image-2.0",
+				configuredModels: ["gpt-image-2"],
+			}),
+		).toThrow(
+			'Unknown image generation model "grok-imagine-image-2.0". Configure it in imageGeneration.models first; available models: gpt-image-2.',
+		);
+		// Matching is exact: prefixes, casing, and provider prefixes are not aliases.
+		expect(() =>
+			selectImageGenerationModel({ requestedModel: "gpt-image", configuredModels: ["gpt-image-2"] }),
+		).toThrow(ImageGenerationError);
+		expect(() =>
+			selectImageGenerationModel({
+				requestedModel: "openai/gpt-image-2",
+				configuredModels: ["gpt-image-2"],
+			}),
+		).toThrow(ImageGenerationError);
+
+		const configuredModels = Array.from({ length: 10 }, (_, index) => `image-model-${index}`);
+		let error: unknown;
+		try {
+			selectImageGenerationModel({ requestedModel: "missing", configuredModels });
+		} catch (caught) {
+			error = caught;
+		}
+		expect(error).toBeInstanceOf(ImageGenerationError);
+		expect((error as Error).message).toContain("image-model-0");
+		expect((error as Error).message).toContain("and 5 more");
+		expect((error as Error).message).not.toContain("image-model-9");
+		expect((error as Error).message.length).toBeLessThan(2_000);
+	});
+
+	test("builds an isolated one-turn non-streaming request with the selected image model", () => {
 		const params = normalizeGenerateImageParams({
 			prompt: "Turn this into a watercolor",
 			referenceImagePaths: ["reference.png"],
@@ -148,6 +227,7 @@ describe("image generation protocol", () => {
 		});
 		const body = buildImageGenerationRequest({
 			routingModel: "gpt-5.5",
+			imageModel: "grok-imagine-image-2.0",
 			params,
 			references: [{ path: "reference.png", mimeType: "image/png", bytes: validPng() }],
 		});
@@ -173,7 +253,7 @@ describe("image generation protocol", () => {
 			tools: [
 				{
 					type: "image_generation",
-					model: "gpt-image-2",
+					model: "grok-imagine-image-2.0",
 					action: "edit",
 					size: "1536x1024",
 					quality: "medium",
@@ -192,6 +272,23 @@ describe("image generation protocol", () => {
 		expect(body).not.toHaveProperty("include");
 		expect(body).not.toHaveProperty("reasoning");
 		expect(body).not.toHaveProperty("previous_response_id");
+	});
+
+	test("keeps the routing model and the nested image model independent and rejects an empty image model", () => {
+		const params = normalizeGenerateImageParams({ prompt: "draw a cat" });
+		const build = (imageModel: string) =>
+			buildImageGenerationRequest({
+				routingModel: "gpt-5.5",
+				imageModel,
+				params,
+				references: [],
+			});
+
+		expect(build("gpt-image-2").model).toBe("gpt-5.5");
+		expect(build("gpt-image-2").tools[0]?.model).toBe("gpt-image-2");
+		expect(build("grok-imagine-image-2.0").tools[0]?.model).toBe("grok-imagine-image-2.0");
+		expect(() => build(" ")).toThrow("A configured image generation model is required.");
+		expect(() => build("x".repeat(257))).toThrow("A configured image generation model is required.");
 	});
 
 	test("parses exactly one completed image call and validates PNG metadata", () => {
@@ -274,8 +371,14 @@ describe("image generation protocol", () => {
 	test("bounds persisted details and redacts image data from diagnostics", () => {
 		const details = imageDetails("/agent/generated-images/session/ig.png");
 		expect(isImageGenerationDetails(details)).toBe(true);
+		// A configured custom model is as valid in persisted details as the shipped default.
+		expect(isImageGenerationDetails({ ...details, imageModel: "grok-imagine-image-2.0" })).toBe(true);
+		expect(isImageGenerationDetails({ ...details, imageModel: "" })).toBe(false);
+		expect(isImageGenerationDetails({ ...details, imageModel: "x".repeat(257) })).toBe(false);
+		expect(isImageGenerationDetails({ ...details, imageModel: undefined })).toBe(false);
 		expect(isImageGenerationDetails({ ...details, artifactPath: "x".repeat(4097) })).toBe(false);
 		expect(isImageGenerationDetails({ ...details, imageCallId: "x".repeat(257) })).toBe(false);
+		expect(isImageGenerationDetails({ ...details, imageModel: "   " })).toBe(false);
 		expect(isImageGenerationDetails({ ...details, referenceCount: 6 })).toBe(false);
 
 		const diagnostic = sanitizeImageDiagnostic(

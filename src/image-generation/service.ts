@@ -11,6 +11,7 @@ import { isImageGenerationEnabledForModel } from "./eligibility";
 import {
 	buildImageGenerationRequest,
 	normalizeGenerateImageParams,
+	selectImageGenerationModel,
 } from "./protocol";
 import {
 	clearPreparedReferences,
@@ -19,7 +20,6 @@ import {
 import {
 	IMAGE_GENERATION_CAPABLE_APIS,
 	IMAGE_GENERATION_MIME_TYPE,
-	IMAGE_GENERATION_MODEL,
 	ImageGenerationError,
 	sanitizeImageDiagnostic,
 	type GenerateImageParams,
@@ -142,6 +142,11 @@ export function createImageGenerationExecutor(
 			);
 		}
 
+		const imageModel = selectImageGenerationModel({
+			requestedModel: params.model,
+			configuredModels: config.imageGeneration.models,
+		});
+
 		const runtimeResolution = await deps.resolveRuntime(args.ctx, {
 			enabled: config.imageGeneration.enabled,
 			responsesApis: IMAGE_GENERATION_CAPABLE_APIS,
@@ -168,6 +173,7 @@ export function createImageGenerationExecutor(
 			throwIfAborted(args.signal);
 			const body = buildImageGenerationRequest({
 				routingModel: runtimeResolution.runtime.model,
+				imageModel,
 				params,
 				references,
 			});
@@ -210,7 +216,7 @@ export function createImageGenerationExecutor(
 				artifactPath,
 				...(outputPath ? { outputPath } : {}),
 				routingModel: `${runtimeResolution.runtime.provider}/${runtimeResolution.runtime.model}`,
-				imageModel: IMAGE_GENERATION_MODEL,
+				imageModel,
 				imageCallId: generated.imageCallId,
 				...(generated.responseId ? { responseId: generated.responseId } : {}),
 				mimeType: IMAGE_GENERATION_MIME_TYPE,

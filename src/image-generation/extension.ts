@@ -8,6 +8,7 @@ import {
 	IMAGE_GENERATION_QUALITIES,
 	IMAGE_GENERATION_SIZES,
 	IMAGE_GENERATION_TOOL_NAME,
+	MAX_IMAGE_MODEL_ID_CHARS,
 	MAX_IMAGE_PATH_CHARS,
 	MAX_IMAGE_PROMPT_CHARS,
 	MAX_REFERENCE_IMAGE_COUNT,
@@ -65,6 +66,21 @@ const GenerateImageParameters = Type.Object(
 				description: "Requested image quality, or auto.",
 			}),
 		),
+		model: Type.Optional(
+			Type.Union(
+				[
+					Type.Null(),
+					Type.String({
+						minLength: 1,
+						maxLength: MAX_IMAGE_MODEL_ID_CHARS,
+					}),
+				],
+				{
+					description:
+						"Use null to accept the default image model, which is the first entry of imageGeneration.models; otherwise provide another model id exactly as it appears in that configured list.",
+				},
+			),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -98,14 +114,15 @@ export function registerImageGenerationExtension(
 		name: IMAGE_GENERATION_TOOL_NAME,
 		label: "OpenAI Generate Image",
 		description:
-			"Generate a PNG image, or edit from one to five user-approved local reference images, through the current Responses-capable model and the hosted gpt-image-2 image_generation tool. This is a paid provider operation.",
-		promptSnippet: "Generate or edit PNG images through the current Responses-capable model and gpt-image-2.",
+			"Generate a PNG image, or edit from one to five user-approved local reference images, through the current Responses-capable model and a configured hosted image_generation model. This is a paid provider operation.",
+		promptSnippet: "Generate or edit PNG images through the current Responses-capable model and a configured imageGeneration.models entry.",
 		promptGuidelines: [
 			"Use openai_generate_image when the user explicitly asks to create, draw, render, or edit a raster image and the active model speaks a Responses API.",
 			"Do not call openai_generate_image speculatively: it consumes the user's provider or gateway image quota.",
 			"Keep the image prompt faithful to the user's requested subject and constraints; do not invent unrequested style details.",
 			"Set referenceImagePaths to null unless the user explicitly identified local files; never invent paths or placeholder strings, and remember upload requires user approval.",
 			"Set outputPath to null unless the user explicitly asks for a destination; never invent a destination or placeholder string, and otherwise use the default Pi agent artifact.",
+			"Set model to null unless the user named an image model configured in imageGeneration.models; never invent or guess a model id, and remember an unlisted model fails before the paid request.",
 			"Do not substitute Python, browser automation, shell scripts, or unrelated image tools for an eligible image request.",
 		],
 		parameters: GenerateImageParameters,

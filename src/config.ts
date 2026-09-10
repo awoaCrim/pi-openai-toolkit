@@ -7,6 +7,7 @@ import {
 	DEFAULT_TOOLKIT_CONFIG,
 	DEFAULT_AUTO_MODE_CONFIG,
 	DEFAULT_IMAGE_GENERATION_CONFIG,
+	DEFAULT_IMAGE_GENERATION_MODEL,
 	DEFAULT_NATIVE_FALLBACK_CONFIG,
 	DEFAULT_WEB_SEARCH_CONFIG,
 	RESPONSES_COMPACT_CAPABLE_APIS,
@@ -35,6 +36,7 @@ import {
 	type ToolkitConfig,
 	type WebSearchConfig,
 } from "./types";
+import { MAX_IMAGE_MODEL_ID_CHARS } from "./image-generation/types";
 
 export const CONFIG_DIR = path.join(os.homedir(), ".pi", "agent", "extensions", TOOLKIT_ID);
 export const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
@@ -58,7 +60,7 @@ const COMPACTION_FIELDS = new Set([
 ]);
 const NATIVE_FALLBACK_FIELDS = new Set(["enabled", "model", "thinkingLevel"]);
 const WEB_SEARCH_FIELDS = new Set(["enabled", "models"]);
-const IMAGE_GENERATION_FIELDS = new Set(["enabled"]);
+const IMAGE_GENERATION_FIELDS = new Set(["enabled", "models"]);
 const AUTO_MODE_FIELDS = new Set([
 	"enabled",
 	"models",
@@ -217,6 +219,18 @@ function toStringList(value: unknown, fieldPath: string, warnings: string[]): st
 	return [...new Set(value.map((entry) => entry.trim()).filter(Boolean))];
 }
 
+function toImageGenerationModels(value: unknown, fieldPath: string, warnings: string[]): string[] | undefined {
+	const models = toStringList(value, fieldPath, warnings);
+	if (models === undefined) return undefined;
+	if (models.some((model) => model.length > MAX_IMAGE_MODEL_ID_CHARS)) {
+		warnings.push(
+			`Ignoring ${fieldPath}: each model id must be at most ${MAX_IMAGE_MODEL_ID_CHARS} characters.`,
+		);
+		return undefined;
+	}
+	return models;
+}
+
 function toAutoModeGate(value: unknown, fieldPath: string, warnings: string[]): AutoModeGate | undefined {
 	if (value === undefined) return undefined;
 	if (value === "side-effect" || value === "all") return value;
@@ -251,7 +265,10 @@ function cloneDefaults(): ToolkitConfig {
 			...DEFAULT_WEB_SEARCH_CONFIG,
 			models: [...DEFAULT_WEB_SEARCH_CONFIG.models],
 		},
-		imageGeneration: { ...DEFAULT_IMAGE_GENERATION_CONFIG },
+		imageGeneration: {
+			...DEFAULT_IMAGE_GENERATION_CONFIG,
+			models: [...DEFAULT_IMAGE_GENERATION_CONFIG.models],
+		},
 		autoMode: {
 			...DEFAULT_AUTO_MODE_CONFIG,
 			models: [...DEFAULT_AUTO_MODE_CONFIG.models],
@@ -386,6 +403,18 @@ function applyImageGenerationConfig(
 	warnUnknownFields(raw, IMAGE_GENERATION_FIELDS, "imageGeneration", warnings);
 	resolved.enabled =
 		toBoolean(raw.enabled, "imageGeneration.enabled", warnings) ?? resolved.enabled;
+
+	const models = toImageGenerationModels(raw.models, "imageGeneration.models", warnings);
+	if (models !== undefined) {
+		// An empty or blank-only list cannot express a default, so keep the shipped model.
+		if (models.length === 0) {
+			warnings.push(
+				`Ignoring imageGeneration.models: expected at least one model id; using ${DEFAULT_IMAGE_GENERATION_MODEL}.`,
+			);
+		} else {
+			resolved.models = models;
+		}
+	}
 }
 
 function applyAutoModeConfig(

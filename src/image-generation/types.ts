@@ -1,5 +1,4 @@
 export const IMAGE_GENERATION_TOOL_NAME = "openai_generate_image";
-export const IMAGE_GENERATION_MODEL = "gpt-image-2" as const;
 export const IMAGE_GENERATION_MIME_TYPE = "image/png" as const;
 export const IMAGE_GENERATION_CAPABLE_APIS = [
 	"openai-responses",
@@ -24,6 +23,8 @@ export const IMAGE_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 export const MAX_IMAGE_PATH_CHARS = 4096;
 export const MAX_IMAGE_DIAGNOSTIC_CHARS = 4096;
 export const MAX_IMAGE_IDENTIFIER_CHARS = 256;
+/** Upper bound for a configured or requested `image_generation` model id. */
+export const MAX_IMAGE_MODEL_ID_CHARS = 256;
 export const MAX_IMAGE_DIMENSION = 100_000;
 
 export type ImageGenerationCapableApi = (typeof IMAGE_GENERATION_CAPABLE_APIS)[number];
@@ -44,6 +45,8 @@ export type GenerateImageParams = {
 	outputPath?: string | null;
 	size?: ImageGenerationSize;
 	quality?: ImageGenerationQuality;
+	/** Optional bare image model id that must exist in `imageGeneration.models`. */
+	model?: string | null;
 };
 
 export type NormalizedGenerateImageParams = {
@@ -53,6 +56,8 @@ export type NormalizedGenerateImageParams = {
 	size: ImageGenerationSize;
 	quality: ImageGenerationQuality;
 	action: ImageGenerationAction;
+	/** Trimmed requested model id, or undefined when the caller omitted it. */
+	model?: string;
 };
 
 export type PreparedReferenceImage = {
@@ -74,7 +79,7 @@ export type ImageGenerationDetails = {
 	artifactPath: string;
 	outputPath?: string;
 	routingModel: string;
-	imageModel: typeof IMAGE_GENERATION_MODEL;
+	imageModel: string;
 	imageCallId: string;
 	responseId?: string;
 	mimeType: typeof IMAGE_GENERATION_MIME_TYPE;
@@ -130,7 +135,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isBoundedString(value: unknown, maxChars: number): value is string {
-	return typeof value === "string" && value.length > 0 && value.length <= maxChars;
+	return typeof value === "string" && value.trim().length > 0 && value.length <= maxChars;
 }
 
 export function isImageGenerationDetails(value: unknown): value is ImageGenerationDetails {
@@ -139,7 +144,7 @@ export function isImageGenerationDetails(value: unknown): value is ImageGenerati
 		isBoundedString(value.artifactPath, MAX_IMAGE_PATH_CHARS) &&
 		(value.outputPath === undefined || isBoundedString(value.outputPath, MAX_IMAGE_PATH_CHARS)) &&
 		isBoundedString(value.routingModel, MAX_IMAGE_DIAGNOSTIC_CHARS) &&
-		value.imageModel === IMAGE_GENERATION_MODEL &&
+		isBoundedString(value.imageModel, MAX_IMAGE_MODEL_ID_CHARS) &&
 		isBoundedString(value.imageCallId, MAX_IMAGE_IDENTIFIER_CHARS) &&
 		(value.responseId === undefined || isBoundedString(value.responseId, MAX_IMAGE_IDENTIFIER_CHARS)) &&
 		value.mimeType === IMAGE_GENERATION_MIME_TYPE &&

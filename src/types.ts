@@ -107,6 +107,12 @@ export type WebSearchConfig = {
 
 export type ImageGenerationConfig = {
 	enabled: boolean;
+	/**
+	 * Bare `image_generation` tool model ids this toolkit may send, without a `provider/` prefix.
+	 * The first entry is the default; `openai_generate_image`'s optional `model` argument may
+	 * select any other entry in this order-preserving list.
+	 */
+	models: string[];
 };
 
 /** `side-effect` reviews bash/write/edit plus extras; `all` reviews every tool call. */
@@ -527,8 +533,13 @@ export const DEFAULT_WEB_SEARCH_CONFIG: WebSearchConfig = {
 	models: [],
 };
 
+/** Single source of truth for the hosted image model used when nothing is configured. */
+export const DEFAULT_IMAGE_GENERATION_MODEL = "gpt-image-2.5";
+export const DEFAULT_IMAGE_GENERATION_MODELS: readonly string[] = [DEFAULT_IMAGE_GENERATION_MODEL];
+
 export const DEFAULT_IMAGE_GENERATION_CONFIG: ImageGenerationConfig = {
 	enabled: false,
+	models: [...DEFAULT_IMAGE_GENERATION_MODELS],
 };
 
 export const DEFAULT_AUTO_MODE_CONFIG: AutoModeConfig = {

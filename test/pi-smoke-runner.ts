@@ -26,7 +26,12 @@ try {
 	if (imageSmoke) {
 		const configDir = join(env.agentDir, "extensions/pi-openai-toolkit");
 		await mkdir(configDir, { recursive: true });
-		await writeFile(join(configDir, "config.json"), JSON.stringify({ imageGeneration: { enabled: true } }));
+		await writeFile(
+			join(configDir, "config.json"),
+			JSON.stringify({
+				imageGeneration: { enabled: true, models: ["gpt-image-2.5", "grok-imagine-image-2.0"] },
+			}),
+		);
 	}
 	const modelRuntime = await ModelRuntime.create({
 		credentials: new InMemoryCredentialStore(), modelsStore: new InMemoryModelsStore(), modelsPath: null,
@@ -53,7 +58,12 @@ try {
 	try {
 		if (imageSmoke) {
 			if (!session.getActiveToolNames().includes("openai_generate_image")) throw new Error("Image tool was not active");
-			if (!session.systemPrompt.includes("Generate or edit PNG images through the current Responses-capable model and gpt-image-2.")) throw new Error("Missing image tool description");
+			if (
+				!session.systemPrompt.includes(
+					"Generate or edit PNG images through the current Responses-capable model and a configured imageGeneration.models entry.",
+				)
+			)
+				throw new Error("Missing image tool description");
 			if (!session.systemPrompt.includes("Use openai_generate_image when the user explicitly asks")) throw new Error("Missing image tool guidelines");
 		}
 		await session.prompt("Reply with the single word OK.");
