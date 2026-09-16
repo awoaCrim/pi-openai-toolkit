@@ -63,6 +63,15 @@ type TestSessionEntry =
 		timestamp: string;
 		customType: string;
 		data?: unknown;
+	}
+	| {
+		type: "custom_message";
+		id: string;
+		timestamp: string;
+		customType: string;
+		content: string;
+		display: boolean;
+		details?: unknown;
 	};
 
 type HookHandler = (event: unknown, ctx: unknown) => Promise<unknown>;
@@ -245,6 +254,17 @@ function toReplayMessage(entry: TestSessionEntry): Record<string, unknown> {
 		throw new Error(`Expected message entry, got ${entry.type}`);
 	}
 	return entry.message;
+}
+
+function toCustomReplayMessage(entry: Extract<TestSessionEntry, { type: "custom_message" }>): Record<string, unknown> {
+	return {
+		role: "custom",
+		customType: entry.customType,
+		content: entry.content,
+		display: entry.display,
+		details: entry.details,
+		timestamp: new Date(entry.timestamp).getTime(),
+	};
 }
 
 async function buildPiReplayPayload(args: {
@@ -2006,5 +2026,26 @@ test("context filtering honors effective auth endpoints and aborts partial retai
 	modified[3].content = [{ type: "text", text: "Modified retained answer" }];
 	expect(await contextHook({ messages: modified }, context)).toBeUndefined();
 	expect(aborts).toBe(1);
+	expect({ messages, branchEntries }).toEqual(before);
+});
+
+test("context filtering accepts retained custom messages removed by an earlier hook", async () => {
+	const { contextHook } = await loadHookHarness();
+	const keptUser = createUserEntry("kept-user", "Covered user message");
+	const state = { type: "custom_message", id: "state", timestamp: nextTimestamp(),
+		customType: "bash_background.state", content: "running", display: false } as const;
+	const wake = { type: "custom_message", id: "wake", timestamp: nextTimestamp(),
+		customType: "bash_background.wake", content: "continue", display: false } as const;
+	const checkpoint = createCompactionEntry({ id: "checkpoint", firstKeptEntryId: keptUser.id,
+		compactedWindow: [{ type: "compaction", encrypted_content: "opaque" }] });
+	const post = createUserEntry("post", "New message");
+	const branchEntries: TestSessionEntry[] = [keptUser, state, wake, checkpoint, post];
+	const summary = createCompactionSummaryMessage(checkpoint);
+	const messages = [summary, toReplayMessage(keptUser), toCustomReplayMessage(wake), toReplayMessage(post)];
+	const before = structuredClone({ messages, branchEntries });
+	let aborts = 0;
+	const result = await contextHook({ messages }, createContext({ branchEntries, onAbort: () => { aborts++; } }));
+	expect(result).toEqual({ messages: [summary, toReplayMessage(post)] });
+	expect(aborts).toBe(0);
 	expect({ messages, branchEntries }).toEqual(before);
 });

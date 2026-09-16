@@ -6,11 +6,12 @@ import { resolveLatestNativeCompactionEntry } from "./details-store";
 import { removeNativeCompactionRetainedMessages } from "./payload-rewrite";
 import { createNativeCompactionDetails, NATIVE_COMPACTION_FALLBACK_SUMMARY } from "./types";
 
-function fixture() {
+function fixture(appendRetained?: (manager: SessionManager) => void) {
 	const manager = SessionManager.inMemory("C:/offline");
 	manager.appendMessage({ role: "user", content: "old", timestamp: 1 });
 	const firstKeptEntryId = manager.appendMessage(fauxAssistantMessage(fauxToolCall("read", {}, { id: "call_read|fc_read" }), { stopReason: "toolUse", timestamp: 2 }));
 	manager.appendMessage({ role: "toolResult", toolCallId: "call_read|fc_read", toolName: "read", content: [{ type: "text", text: "real result" }], isError: false, timestamp: 3 });
+	appendRetained?.(manager);
 	manager.appendCompaction(NATIVE_COMPACTION_FALLBACK_SUMMARY, firstKeptEntryId, 100,
 		createNativeCompactionDetails({ provider: "openai", api: "openai-responses", model: "gpt-6-astra", baseUrl: "https://offline.invalid/v1", compactedWindow: [{ type: "compaction", encrypted_content: "opaque" }] }));
 	manager.appendMessage({ role: "user", content: "new", timestamp: 4 });
@@ -44,6 +45,21 @@ describe("latest Pi retained context", () => {
 		tool.content = [{ type: "text", text: "different" }];
 		const before = structuredClone(messages);
 		expect(removeNativeCompactionRetainedMessages({ ...args, messages })).toEqual({ ok: false, reason: "retained-context-mismatch" });
+		expect(messages).toEqual(before);
+	});
+	test("allows retained custom messages to be filtered by another context hook", () => {
+		const args = fixture((manager) => {
+			manager.appendCustomMessageEntry("bash_background.state", "running", false);
+			manager.appendCustomMessageEntry("bash_background.exit", "finished", true);
+			manager.appendCustomMessageEntry("bash_background.wake", "continue", false);
+		});
+		const messages = args.messages.filter(
+			(message) => message.role !== "custom" || (message.customType !== "bash_background.state" && message.customType !== "bash_background.exit"),
+		);
+		const before = structuredClone(messages);
+		const result = removeNativeCompactionRetainedMessages({ ...args, messages });
+		assert(result.ok);
+		expect(result.messages).toEqual([messages[0], messages.at(-1)]);
 		expect(messages).toEqual(before);
 	});
 	test("filters recursive retained history including an earlier compaction summary", () => {

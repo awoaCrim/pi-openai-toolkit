@@ -332,19 +332,25 @@ export function removeNativeCompactionRetainedMessages(args: {
 	const summaryIndex = args.messages.findIndex((message) => areEquivalentValues(message, summary));
 	if (summaryIndex < 0) return { ok: false, reason: "compaction-summary-not-found" };
 	const retained = args.branchEntries.slice(firstKept, boundary).flatMap(sessionEntryToContextMessages);
+	// Context hooks may legitimately filter extension-injected custom messages.
+	// Remove those messages when present, but do not require them for parity.
+	const isOptionalExpected = (message: AgentMessage): boolean => message.role === "custom";
+	const requiredCount = retained.filter((message) => !isOptionalExpected(message)).length;
 	const removed = new Set<number>();
+	let removedRequired = 0;
 	let cursor = summaryIndex + 1;
 	for (const expected of retained) {
 		const index = args.messages.findIndex((message, index) => index >= cursor && areEquivalentValues(message, expected));
 		if (index >= 0) {
 			removed.add(index);
 			cursor = index + 1;
+			if (!isOptionalExpected(expected)) removedRequired += 1;
 		}
 	}
 	// Already removed by another context handler: leave it alone. Partial
 	// matches are ambiguous; never remove half a call/result batch.
 	if (removed.size === 0) return { ok: true, messages: args.messages };
-	if (removed.size !== retained.length) return { ok: false, reason: "retained-context-mismatch" };
+	if (removedRequired !== requiredCount) return { ok: false, reason: "retained-context-mismatch" };
 	return { ok: true, messages: args.messages.filter((_, index) => !removed.has(index)) };
 }
 
