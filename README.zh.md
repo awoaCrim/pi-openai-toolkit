@@ -199,7 +199,7 @@ standalone 路由属于实验性的 CPA/Codex 网关协议，不是稳定的公�
 }
 ```
 
-在会话中使用 `/auto on`。默认的 `side-effect` 审查范围覆盖 `bash`、`write`、`edit` 和额外配置的工具。如果需要审查所有工具调用，将 `gate` 设置为 `"all"`。审查超时不会自动放行调用。
+在会话中使用 `/auto on`，也可以用 `--auto` 启动 Pi。TUI 会显示自动模式已开启的提示；每次审查受控工具时，工作指示器会临时显示 `Auto mode: reviewing <tool>`，底部状态栏会保留当前审查范围。在支持兼容 tool renderer 的 Pi 版本中，自动模式下每个工具块底部都会显示一行状态：已审查的调用会显示 `allowed by reviewer · low risk · authorization medium` 或 `denied · <reason>`，不在当前审查范围内的调用会显示 `not reviewed · outside the configured gate`。如果当前 Pi 没有这个 renderer seam，扩展会告警一次并继续使用底部状态栏提示。默认的 `side-effect` 审查范围覆盖 `bash`、`write`、`edit` 和额外配置的工具。如果需要审查所有工具调用，将 `gate` 设置为 `"all"`。审查超时不会自动放行调用。
 
 ## 常用配置
 

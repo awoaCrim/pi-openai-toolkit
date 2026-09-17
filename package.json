@@ -1,6 +1,6 @@
 {
   "name": "pi-openai-toolkit",
-  "version": "0.14.8",
+  "version": "0.14.9",
   "private": false,
   "type": "module",
   "engines": {
@@ -74,6 +74,7 @@
     "src/image-generation/service.ts",
     "src/image-generation/types.ts",
     "src/auto-mode/extension.ts",
+    "src/auto-mode/tool-review-tui.ts",
     "src/auto-mode/policy.ts",
     "src/auto-mode/prompt.ts",
     "src/auto-mode/transcript.ts",

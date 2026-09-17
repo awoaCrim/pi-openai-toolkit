@@ -9,6 +9,7 @@ Developer-facing reference for [pi-openai-toolkit](../README.md). The README kee
 - [Remote Context protocol](#remote-context-protocol)
 - [Rollover lifecycle](#rollover-lifecycle)
 - [Remote Compaction v2 wire contract](#remote-compaction-v2-wire-contract)
+- [Auto Mode TUI review renderer](#auto-mode-tui-review-renderer)
 - [Artifacts and debugging](#artifacts-and-debugging)
 - [Provenance](#provenance)
 
@@ -82,6 +83,23 @@ Pi 0.85.1's `session_before_compact` event supplies preparation and branch data,
 Setting `compaction.remoteV2ContextSource: "pi-context-hook"` opts into a narrow runtime bridge around Pi's public `ExtensionRunner.createContext()`. It adds a non-enumerable `ctx.projectContextForCompaction(messages)` method backed by `ExtensionRunner.emitContext()`. In this opt-in mode, Remote V2 first reads `buildSessionContext()` and then runs the ordered projection. If the bridge, session context, or recursive summary anchor is unavailable, the extension cancels rather than sending an unprojected history. The legacy mode is an intentional compatibility trade-off and does not claim parity with provider-visible context hooks.
 
 New checkpoints record `inputProvenance: "pi-context-hook-v1"` or `"legacy-raw-context-v1"`, and replay/recursion reject missing or mode-mismatched markers without searching past the latest compaction. Retained `role: "custom"` messages are optional during replay because they may be changed or removed by context hooks; required user, assistant, and complete tool-call/result content remains ordered and fail-closed.
+
+---
+
+### Auto Mode TUI review renderer
+
+Auto Mode owns the review decision, but Pi owns the built-in tool-block component. Pi 0.85.1 exports `ToolExecutionComponent` without a public decorator interface, so `src/auto-mode/tool-review-tui.ts` installs a narrow, idempotent compatibility patch on its `render()` method. The patch only reads the component's existing tool-call ID and appends one bounded, single-line status after the normal block output; it never changes tool execution, event ordering, or provider payloads.
+
+The extension updates an ephemeral per-call state through the same `tool_call` lifecycle that performs the review:
+
+- `skipped` when the tool is outside the configured Auto Mode gate;
+- `reviewing` while the reviewer model is running;
+- `awaiting-user` when an unavailable review reaches interactive confirmation;
+- `allowed`, `denied`, or `blocked` after the final decision.
+
+The state is intentionally not persisted to the session. It is bounded to recent calls and cleared at `session_start`, so reloading a session does not invent historical approval claims. The renderer uses Pi's current theme when available, truncates untrusted rationale text, and preserves the original render output when no state exists.
+
+This is a version-coupled adapter, not a stable Pi extension contract. It is feature-detected at registration time and marked with a global symbol so extension reloads do not wrap the class repeatedly. If the exported component shape changes or becomes non-writable, the adapter becomes a no-op, emits one warning in TUI mode, and the existing footer/working-message review indicators remain the fallback.
 
 ---
 

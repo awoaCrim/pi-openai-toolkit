@@ -199,7 +199,7 @@ Allow a model and reviewer in `autoMode`:
 }
 ```
 
-Use `/auto on` in the session. The default `side-effect` gate reviews `bash`, `write`, `edit`, and configured extra tools. Set `gate` to `"all"` when every tool call needs review. A reviewer timeout does not approve a call.
+Use `/auto on` in the session, or start Pi with `--auto`. The TUI shows an activation notice and temporarily changes the working indicator to `Auto mode: reviewing <tool>` while a gated call is being reviewed; the footer keeps the active gate visible. On Pi versions that expose the compatible tool renderer, each tool block in Auto Mode also gets a bottom line: reviewed calls show states such as `allowed by reviewer · low risk · authorization medium` or `denied · <reason>`, while calls outside the configured gate show `not reviewed · outside the configured gate`. If that renderer seam is unavailable, the extension warns once and keeps the footer-only status. The default `side-effect` gate reviews `bash`, `write`, `edit`, and configured extra tools. Set `gate` to `"all"` when every tool call needs review. A reviewer timeout does not approve a call.
 
 ## Common configuration
 
