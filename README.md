@@ -130,6 +130,10 @@ Earlier windows remain available through `history`, but they are not all automat
 
 Leave Remote Context off when you want the Responses compaction path instead. Remote Compaction v2 stores and replays an encrypted checkpoint for eligible Responses models. Set `compaction.remoteCompactModel` only when the compaction request should use a separate model.
 
+When `compaction.remoteV2ContextSource` is omitted, Remote V2 keeps the original `"legacy"` input chain: first compaction uses Pi's current session context (or the supplied preparation as a last resort), and recursive compaction uses the raw branch tail. This preserves existing behavior, but can diverge from provider-visible context when other extensions rewrite messages.
+
+Set `compaction.remoteV2ContextSource` to `"pi-context-hook"` to opt into the Pi 0.85.1 runtime bridge. The toolkit then uses the same ordered `context` hook chain as the live provider request. If Pi cannot expose that public hook path, Remote V2 cancels instead of sending an unprojected history. Checkpoint replay is accepted only when its source marker matches the current setting. Switching between the two modes requires a new Remote V2 checkpoint; disable Remote V2 or use Pi's native compaction when custom-only state must survive inside the opaque checkpoint.
+
 ### Choose a Web Search route
 
 Web Search has three mutually exclusive routes. Configure one global default and, when needed, exact `provider/model-id` overrides:
@@ -207,6 +211,7 @@ The config file is `~/.pi/agent/extensions/pi-openai-toolkit/config.json`. Unkno
 | `compaction.contextManagement` | `"off"` | Enables Codex Remote Context when set to `"remote"`. |
 | `compaction.gatewayContextModels` | `[]` | Gateway models allowed to use Remote Context. |
 | `compaction.remoteCompactModel` | unset | Optional model used only for a v2 compaction request. |
+| `compaction.remoteV2ContextSource` | `"legacy"` | Preserve the original raw session/branch input path. Set `"pi-context-hook"` to opt into Pi's ordered context-hook projection. Checkpoints are mode-specific. |
 | `compaction.contextReminderThresholdPercent` | `5` | Remaining budget percentage for the once-per-window reminder. `0` disables the reminder and exhausted-window fallback. |
 | `webSearch.enabled` | `true` | Total switch for the toolkit's Web Search route selection. `false` selects no toolkit route. |
 | `webSearch.defaultRoute` | unset | Default route: `local`, `hosted`, or `standalone-alpha`. Unset preserves legacy behavior. |

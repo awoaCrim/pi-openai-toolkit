@@ -59,8 +59,10 @@ sequenceDiagram
 State invariants the lifecycle code must keep honest:
 
 - The checkpoint gate verifies a successful `notes` `append_to_file` or `write_file` against the persisted session branch after the latest window boundary, so it survives restarts and forks. A response with `ok: false` or `success: false` is not successful, even when HTTP returns 200.
+- The gate uses the live session/branch identity from `ctx.sessionManager`; cached manager identity must not hide a valid current-window pair, and old or foreign-session evidence must remain rejected.
 - Every rollover carries the most recent successful checkpoint path in its handoff message. The optional `thread_hint` is supplemental; a hint failure must not erase the local receipt.
-- `new_context` has no force escape hatch: a successful notes checkpoint is always required before rollover.
+- `new_context` has no force escape hatch: a persisted successful notes checkpoint in the current window is always required before rollover. The model must wait for the notes result to be persisted before retrying.
+- After a marker is accepted for sending, the manager keeps a session/window-anchored pending guard until that exact target marker is persisted or the session changes. A duplicate `new_context` during this persistence gap returns `started: false` and sends no second marker; projected/in-memory messages do not retire the guard.
 - Budget checks are skipped until the current window has produced its own assistant usage. Acting on the previous window's usage anchor would burn the once-per-window reminder on a false alarm.
 - The scheduled trim is consumed exactly once, synchronously, by the first compaction attempt whose boundary window ID matches. Every other compaction path, including a threshold without a scheduled rollover, manual `/compact`, and overflow, is cancelled.
 - A window boundary is persisted as a `codex-context-window` custom message. `session_start` replays boundaries from the branch and rebuilds identity after forks.
@@ -74,6 +76,12 @@ v2 is what an uncovered session gets. Any model that Remote Context declines, su
 A `compaction_trigger` item appended to the live streaming request yields one output item of `type: "compaction"` with non-empty `encrypted_content`, stored in `CompactionEntry.details.compactedWindow`. On later requests the opaque checkpoint is replayed ahead of live turns, with no text summary. Replay fails closed: if the summary anchor cannot be located, the request is aborted with a notification and a content-free failure artifact. The sentinel-only payload is never sent.
 
 A v2 response with a missing or empty checkpoint is never stored, and the `nativeFallback` tier is skipped. Pi's own threshold drives the next attempt, which may use `remoteCompactModel` when configured. `remoteCompactModel` must resolve to the same effective base URL as the active model.
+
+Pi 0.85.1's `session_before_compact` event supplies preparation and branch data, while the direct Remote V2 client can bypass the provider `context` hook chain. To preserve compatibility, an omitted `compaction.remoteV2ContextSource` keeps the original `"legacy"` behavior: first compaction uses `buildSessionContext()` and falls back to `SessionBeforeCompactEvent.preparation`, while recursion uses the opaque window plus the raw branch tail.
+
+Setting `compaction.remoteV2ContextSource: "pi-context-hook"` opts into a narrow runtime bridge around Pi's public `ExtensionRunner.createContext()`. It adds a non-enumerable `ctx.projectContextForCompaction(messages)` method backed by `ExtensionRunner.emitContext()`. In this opt-in mode, Remote V2 first reads `buildSessionContext()` and then runs the ordered projection. If the bridge, session context, or recursive summary anchor is unavailable, the extension cancels rather than sending an unprojected history. The legacy mode is an intentional compatibility trade-off and does not claim parity with provider-visible context hooks.
+
+New checkpoints record `inputProvenance: "pi-context-hook-v1"` or `"legacy-raw-context-v1"`, and replay/recursion reject missing or mode-mismatched markers without searching past the latest compaction. Retained `role: "custom"` messages are optional during replay because they may be changed or removed by context hooks; required user, assistant, and complete tool-call/result content remains ordered and fail-closed.
 
 ---
 

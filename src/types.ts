@@ -23,6 +23,17 @@ export const LEGACY_NATIVE_COMPACTION_STRATEGY = "openai-native-compact-v1";
 export const REMOTE_V2_COMPACTION_STRATEGY = "openai-remote-compaction-v2";
 export const NATIVE_COMPACTION_STRATEGY = REMOTE_V2_COMPACTION_STRATEGY;
 /**
+ * Provenance recorded when the checkpoint input came from Pi's ordered context
+ * hook projection. Older persisted entries may omit it and must not be
+ * replayed by Remote V2.
+ */
+export const NATIVE_COMPACTION_INPUT_PROVENANCE = "pi-context-hook-v1" as const;
+/** Explicit opt-in marker for the pre-projection raw session/branch chain. */
+export const LEGACY_REMOTE_V2_INPUT_PROVENANCE = "legacy-raw-context-v1" as const;
+export type NativeCompactionInputProvenance =
+	| typeof NATIVE_COMPACTION_INPUT_PROVENANCE
+	| typeof LEGACY_REMOTE_V2_INPUT_PROVENANCE;
+/**
  * Pi currently requires CompactionResult.summary to be text. This marker is only a
  * replay shim; the provider receives the opaque item from details.compactedWindow.
  */
@@ -45,6 +56,9 @@ export type DebugArtifactKind =
 	| "lifecycle";
 
 export type ContextManagementMode = "off" | "remote";
+
+/** How Remote V2 obtains the history it sends to the compaction endpoint. */
+export type RemoteV2ContextSource = "pi-context-hook" | "legacy";
 
 /** Native-method fallback compaction: which model runs pi's compact() and how deeply. */
 export type NativeFallbackConfig = {
@@ -74,6 +88,11 @@ export type CompactionConfig = {
 	 * remains the checkpoint consumer and continues handling normal requests.
 	 */
 	remoteCompactModel?: string;
+	/**
+	 * Remote V2 input source. Pi's patched context hook preserves the normal
+	 * provider-visible projection; legacy keeps the pre-patch raw session/branch chain.
+	 */
+	remoteV2ContextSource: RemoteV2ContextSource;
 	/** Native-method fallback compaction policy (non-Responses APIs, or when the compact endpoint fails). */
 	nativeFallback: NativeFallbackConfig;
 	/**
@@ -258,6 +277,12 @@ export type DeferredToolCarryoverV1 = {
 
 export type NativeCompactionDetails = NativeCompactionIdentity & {
 	strategy: NativeCompactionStrategy;
+	/**
+	 * Input source recorded for checkpoints created by this extension. Older
+	 * persisted entries may omit it and must not be treated as verified for
+	 * Remote V2 replay.
+	 */
+	inputProvenance?: NativeCompactionInputProvenance;
 	/** Actual producer of the opaque checkpoint; absent on legacy same-model entries. */
 	compactionModel?: NativeCompactionIdentity;
 	/** Cache-stack activation state captured at this opaque checkpoint. */
@@ -271,6 +296,7 @@ export type NativeCompactionDetails = NativeCompactionIdentity & {
 export type NativeCompactionEntry = CompactionEntry<NativeCompactionDetails>;
 
 export type CreateNativeCompactionDetailsInput = NativeCompactionIdentity & {
+	inputProvenance: NativeCompactionInputProvenance;
 	compactionModel?: NativeCompactionIdentity;
 	deferredToolCarryover?: DeferredToolCarryoverV1;
 	compactedWindow: unknown[];
@@ -386,6 +412,16 @@ export function isNativeCompactionIdentity(value: unknown): value is NativeCompa
 	);
 }
 
+export function isNativeCompactionInputProvenance(value: unknown): value is NativeCompactionInputProvenance {
+	return value === NATIVE_COMPACTION_INPUT_PROVENANCE || value === LEGACY_REMOTE_V2_INPUT_PROVENANCE;
+}
+
+export function getRemoteV2InputProvenance(source: RemoteV2ContextSource): NativeCompactionInputProvenance {
+	return source === "pi-context-hook"
+		? NATIVE_COMPACTION_INPUT_PROVENANCE
+		: LEGACY_REMOTE_V2_INPUT_PROVENANCE;
+}
+
 export function isDeferredToolCarryover(value: unknown): value is DeferredToolCarryoverV1 {
 	if (!isRecord(value) || value.version !== 1 || value.source !== CACHE_STACK_ACTIVATION_ENTRY_TYPE) {
 		return false;
@@ -453,6 +489,7 @@ export function isNativeCompactionDetails(value: unknown): value is NativeCompac
 	return (
 		(candidate.strategy === LEGACY_NATIVE_COMPACTION_STRATEGY ||
 			candidate.strategy === REMOTE_V2_COMPACTION_STRATEGY) &&
+		(candidate.inputProvenance === undefined || isNativeCompactionInputProvenance(candidate.inputProvenance)) &&
 		(candidate.compactionModel === undefined || isNativeCompactionIdentity(candidate.compactionModel)) &&
 		(candidate.deferredToolCarryover === undefined || isDeferredToolCarryover(candidate.deferredToolCarryover)) &&
 		Array.isArray(candidate.compactedWindow) &&
@@ -470,6 +507,7 @@ export function isNativeCompactionEntry(value: unknown): value is NativeCompacti
 export function createNativeCompactionDetails(input: CreateNativeCompactionDetailsInput): NativeCompactionDetails {
 	return {
 		strategy: NATIVE_COMPACTION_STRATEGY,
+		inputProvenance: input.inputProvenance,
 		provider: normalizeString(input.provider),
 		api: normalizeString(input.api),
 		model: normalizeString(input.model),
@@ -522,6 +560,8 @@ export const DEFAULT_COMPACTION_CONFIG: CompactionConfig = {
 	contextManagement: "off",
 	allowCompactionContinuityBreak: false,
 	remoteCompactModel: undefined,
+	remoteV2ContextSource: "legacy",
+
 	nativeFallback: { ...DEFAULT_NATIVE_FALLBACK_CONFIG },
 	responsesApis: [...RESPONSES_COMPACT_CAPABLE_APIS],
 	gatewayContextModels: [],

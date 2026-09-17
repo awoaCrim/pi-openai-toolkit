@@ -31,6 +31,7 @@ import {
 	type CompactionConfig,
 	type ContextManagementMode,
 	type ImageGenerationConfig,
+	type RemoteV2ContextSource,
 	type LoadedToolkitConfig,
 	type NativeFallbackConfig,
 	type ToolkitConfig,
@@ -48,6 +49,7 @@ const COMPACTION_FIELDS = new Set([
 	"contextManagement",
 	"allowCompactionContinuityBreak",
 	"remoteCompactModel",
+	"remoteV2ContextSource",
 	"nativeFallback",
 	"responsesApis",
 	"gatewayContextModels",
@@ -146,6 +148,20 @@ function toContextManagementMode(
 		if (normalized === "off" || normalized === "remote") return normalized;
 	}
 	warnings.push(`Ignoring ${fieldPath}: expected one of off, remote.`);
+	return undefined;
+}
+
+function toRemoteV2ContextSource(
+	value: unknown,
+	fieldPath: string,
+	warnings: string[],
+): RemoteV2ContextSource | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value === "string") {
+		const normalized = value.trim();
+		if (normalized === "pi-context-hook" || normalized === "legacy") return normalized;
+	}
+	warnings.push(`Ignoring ${fieldPath}: expected one of pi-context-hook, legacy.`);
 	return undefined;
 }
 
@@ -400,6 +416,10 @@ function applyCompactionConfig(
 	if (remoteCompactModelSpec !== undefined) {
 		resolved.remoteCompactModel = remoteCompactModelSpec === null ? undefined : remoteCompactModelSpec;
 	}
+
+	resolved.remoteV2ContextSource =
+		toRemoteV2ContextSource(raw.remoteV2ContextSource, "compaction.remoteV2ContextSource", warnings) ??
+		resolved.remoteV2ContextSource;
 
 	if (raw.nativeFallback !== undefined) {
 		if (isRecord(raw.nativeFallback)) {

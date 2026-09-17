@@ -8,6 +8,7 @@ import { executeRemoteV2Compaction } from "./remote-v2-client";
 import { buildCompactUrl, buildResponsesUrl } from "./runtime";
 import {
 	DEFAULT_COMPACTION_CONFIG,
+	NATIVE_COMPACTION_INPUT_PROVENANCE,
 	createNativeCompactionDetails,
 	isNativeCompactionDetails,
 } from "./types";
@@ -102,12 +103,16 @@ test("native compaction details preserve optional producer identity and legacy c
 		api: "openai-responses",
 		model: "gpt-5.6-sol",
 		baseUrl: "https://gateway.example/v1",
+		inputProvenance: NATIVE_COMPACTION_INPUT_PROVENANCE,
 		compactionModel: producer,
 		compactedWindow: [{ type: "compaction", encrypted_content: "opaque" }],
 		createdAt: "2026-08-18T00:00:00.000Z",
 	});
 	producer.model = "mutated-after-create";
 
+	expect(details.inputProvenance).toBe(NATIVE_COMPACTION_INPUT_PROVENANCE);
+	expect(isNativeCompactionDetails({ ...details, inputProvenance: undefined })).toBe(true);
+	expect(isNativeCompactionDetails({ ...details, inputProvenance: "unknown" })).toBe(false);
 	expect(details.compactionModel).toEqual({
 		provider: "uwoacrimson",
 		api: "openai-responses",

@@ -1,3 +1,4 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type {
 	BeforeProviderRequestEvent,
 	ContextEvent,
@@ -18,8 +19,22 @@ import { loadHistoryNotesThreadHint } from "./context-management/history-notes";
 import { CodexContextWindowManager } from "./context-management/window-manager";
 import { registerContextManagementTools } from "./context-management/tools";
 import { writeDebugArtifact, writeReplayFailureArtifact } from "./debug";
+import {
+	COMPACTION_CHECKPOINT_PROVENANCE_UNAVAILABLE,
+	COMPACTION_PROJECTION_UNAVAILABLE,
+	COMPACTION_SESSION_CONTEXT_UNAVAILABLE,
+	COMPACTION_PROJECTED_CONTEXT_UNAVAILABLE,
+	hasVerifiedCompactionInputProvenance,
+	type UnprojectedCompactionReason,
+} from "./compaction-projection";
 import { CODEX_GATEWAY_FORWARD_HEADERS } from "./responses-headers";
 import { resolveLatestNativeCompactionEntry } from "./details-store";
+import {
+	getPiContextHookProjector,
+	installPiContextHookPatch,
+	reportPiContextHookFailure,
+	type PiContextHookPatchResult,
+} from "./pi-context-hook";
 import { runNativeFallbackCompaction } from "./native-fallback";
 import {
 	rewriteResponsesPayloadWithNativeReplay,
@@ -34,23 +49,37 @@ import {
 	resolveRemoteCompactionExecution,
 	type RemoteCompactionExecution,
 } from "./runtime";
-import { serializeMessagesToCompactRequest, type NativeCompactionRequestBody, type ResponsesInputItem } from "./serializer";
+import {
+	serializeMessagesToCompactRequest,
+	serializeMessagesToResponsesInput,
+	type NativeCompactionRequestBody,
+	type ResponsesInputItem,
+} from "./serializer";
 import {
 	createNativeCompactionDetails,
 	createNativeCompactionResult,
 	COMPACTION_EXTENSION_ID,
 	getLatestDeferredToolCarryover,
+	getRemoteV2InputProvenance,
 	isNativeCompactionDetails,
 	type CompactionConfig,
 	type NativeCompactionDetails,
 	type NativeCompactionRequestMeta,
 } from "./types";
 
+type CompactionContextProjection = (
+	messages: readonly AgentMessage[],
+	ctx: ExtensionContext,
+) => readonly AgentMessage[] | undefined | Promise<readonly AgentMessage[] | undefined>;
+
 type CompactionDependencies = {
 	loadConfig: typeof loadToolkitConfig;
 	remoteCompact: typeof executeRemoteV2Compaction;
 	nativeFallback: typeof runNativeFallbackCompaction;
 	contextWindows: CodexContextWindowManager;
+	/** Test seam for the same ordered projection exposed by the Pi host patch. */
+	projectCompactionContext?: CompactionContextProjection;
+	piContextHookPatch: PiContextHookPatchResult;
 };
 
 type RemoteContextActive = (
@@ -62,7 +91,11 @@ type RemoteContextActive = (
 type ResponsesCompactOutcome =
 	| { outcome: "success"; compaction: CompactionResult<NativeCompactionDetails> }
 	| { outcome: "aborted" }
-	| { outcome: "failed" };
+	| { outcome: "failed" }
+	| {
+			outcome: "unprojected-input";
+			reason: UnprojectedCompactionReason;
+	  };
 
 function buildCompactionRequestMeta(event: SessionBeforeCompactEvent): NativeCompactionRequestMeta {
 	return {
@@ -143,12 +176,86 @@ function buildCompactionInstructions(systemPrompt: string, customInstructions?: 
 	return `${systemPrompt}\n\nAdditional user guidance for this manual /compact request:\n${guidance}`;
 }
 
+function findLatestProjectedCompactionSummaryIndex(
+	messages: readonly AgentMessage[],
+	summary: string,
+): number {
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		const message = messages[index];
+		if (message?.role === "compactionSummary" && message.summary === summary) {
+			return index;
+		}
+	}
+
+	return -1;
+}
+
+type SessionManagerWithOptionalContext = ExtensionContext["sessionManager"] & {
+	buildSessionContext?: () => { messages?: readonly AgentMessage[] };
+};
+
+function readSessionContextMessages(ctx: ExtensionContext): AgentMessage[] | undefined {
+	const sessionManager = ctx.sessionManager as SessionManagerWithOptionalContext;
+	if (typeof sessionManager.buildSessionContext !== "function") {
+		return undefined;
+	}
+
+	try {
+		const sessionContext = sessionManager.buildSessionContext();
+		if (!sessionContext || !Array.isArray(sessionContext.messages)) {
+			return undefined;
+		}
+		return structuredClone([...sessionContext.messages]);
+	} catch {
+		return undefined;
+	}
+}
+
+type CompactionProjectionResult =
+	| { ok: true; messages: readonly AgentMessage[] }
+	| { ok: false; reason: typeof COMPACTION_PROJECTION_UNAVAILABLE | typeof COMPACTION_SESSION_CONTEXT_UNAVAILABLE };
+
+async function projectSessionContextForCompaction(
+	ctx: ExtensionContext,
+	projectCompactionContext: CompactionContextProjection | undefined,
+): Promise<CompactionProjectionResult> {
+	const messages = readSessionContextMessages(ctx);
+	if (!messages) {
+		return { ok: false, reason: COMPACTION_SESSION_CONTEXT_UNAVAILABLE };
+	}
+
+	const projector = projectCompactionContext ?? getPiContextHookProjector(ctx);
+	if (!projector) {
+		return { ok: false, reason: COMPACTION_PROJECTION_UNAVAILABLE };
+	}
+
+	try {
+		const projected = await projector(messages, ctx);
+		return Array.isArray(projected)
+			? { ok: true, messages: projected }
+			: { ok: false, reason: COMPACTION_PROJECTION_UNAVAILABLE };
+	} catch {
+		return { ok: false, reason: COMPACTION_PROJECTION_UNAVAILABLE };
+	}
+}
+
+function getLegacySessionContextMessages(
+	event: SessionBeforeCompactEvent,
+	ctx: ExtensionContext,
+): AgentMessage[] {
+	return readSessionContextMessages(ctx) ?? [
+		...event.preparation.messagesToSummarize,
+		...event.preparation.turnPrefixMessages,
+	];
+}
+
 async function runResponsesNativeCompact(
 	event: SessionBeforeCompactEvent,
 	ctx: ExtensionContext,
 	config: CompactionConfig,
 	execution: RemoteCompactionExecution,
 	remoteCompact: typeof executeRemoteV2Compaction,
+	projectCompactionContext: CompactionContextProjection | undefined,
 ): Promise<ResponsesCompactOutcome> {
 	const { consumer, compactor } = execution;
 	const instructions = buildCompactionInstructions(ctx.getSystemPrompt(), event.customInstructions);
@@ -158,24 +265,61 @@ async function runResponsesNativeCompact(
 		baseUrl: consumer.baseUrl,
 	});
 
+	const inputProvenance = getRemoteV2InputProvenance(config.remoteV2ContextSource);
 	let requestSource: "session-context" | "non-native-session-context" | "latest-native-replay";
 	let request: NativeCompactionRequestBody;
 	if (latestNativeCompaction.ok) {
-		const liveTailEntries = branchEntries.slice(latestNativeCompaction.index + 1);
 		const details = latestNativeCompaction.entry.details;
 		if (!details) {
 			return { outcome: "failed" };
 		}
+		if (!hasVerifiedCompactionInputProvenance(details, inputProvenance)) {
+			return {
+				outcome: "unprojected-input",
+				reason: COMPACTION_CHECKPOINT_PROVENANCE_UNAVAILABLE,
+			};
+		}
 		requestSource = "latest-native-replay";
-		const input: ResponsesInputItem[] = [
-			...(cloneOpaqueWindow(details.compactedWindow) as ResponsesInputItem[]),
-			...serializeLiveTailToResponsesInput({ model: compactor.currentModel, entries: liveTailEntries }),
-		];
-		request = {
-			model: compactor.model,
-			input,
-			instructions,
-		};
+
+		if (config.remoteV2ContextSource === "pi-context-hook") {
+			const projection = await projectSessionContextForCompaction(ctx, projectCompactionContext);
+			if (!projection.ok) {
+				return { outcome: "unprojected-input", reason: projection.reason };
+			}
+			const summaryIndex = findLatestProjectedCompactionSummaryIndex(
+				projection.messages,
+				latestNativeCompaction.entry.summary,
+			);
+			if (summaryIndex < 0) {
+				return {
+					outcome: "unprojected-input",
+					reason: COMPACTION_PROJECTED_CONTEXT_UNAVAILABLE,
+				};
+			}
+			const input: ResponsesInputItem[] = [
+				...(cloneOpaqueWindow(details.compactedWindow) as ResponsesInputItem[]),
+				...serializeMessagesToResponsesInput(
+					compactor.currentModel,
+					[...projection.messages.slice(summaryIndex + 1)],
+				),
+			];
+			request = {
+				model: compactor.model,
+				input,
+				instructions,
+			};
+		} else {
+			const liveTailEntries = branchEntries.slice(latestNativeCompaction.index + 1);
+			const input: ResponsesInputItem[] = [
+				...(cloneOpaqueWindow(details.compactedWindow) as ResponsesInputItem[]),
+				...serializeLiveTailToResponsesInput({ model: compactor.currentModel, entries: liveTailEntries }),
+			];
+			request = {
+				model: compactor.model,
+				input,
+				instructions,
+			};
+		}
 	} else if (
 		latestNativeCompaction.reason === "no-compaction" ||
 		(latestNativeCompaction.reason === "latest-compaction-not-native" &&
@@ -183,18 +327,23 @@ async function runResponsesNativeCompact(
 	) {
 		requestSource =
 			latestNativeCompaction.reason === "no-compaction" ? "session-context" : "non-native-session-context";
-		const sessionManagerWithContext = ctx.sessionManager as typeof ctx.sessionManager & {
-			buildSessionContext?: () => { messages: Parameters<typeof serializeMessagesToCompactRequest>[0]["messages"] };
-		};
-		const messages = sessionManagerWithContext.buildSessionContext?.().messages ?? [
-			...event.preparation.messagesToSummarize,
-			...event.preparation.turnPrefixMessages,
-		];
-		request = serializeMessagesToCompactRequest({
-			model: compactor.currentModel,
-			messages,
-			instructions,
-		});
+		if (config.remoteV2ContextSource === "pi-context-hook") {
+			const projection = await projectSessionContextForCompaction(ctx, projectCompactionContext);
+			if (!projection.ok) {
+				return { outcome: "unprojected-input", reason: projection.reason };
+			}
+			request = serializeMessagesToCompactRequest({
+				model: compactor.currentModel,
+				messages: [...projection.messages],
+				instructions,
+			});
+		} else {
+			request = serializeMessagesToCompactRequest({
+				model: compactor.currentModel,
+				messages: getLegacySessionContextMessages(event, ctx),
+				instructions,
+			});
+		}
 	} else {
 		writeDebugArtifact(
 			"compaction-event",
@@ -276,6 +425,7 @@ async function runResponsesNativeCompact(
 			compactResponseId: compactResult.compactResponseId,
 			createdAt: compactResult.createdAt,
 			requestMeta: buildCompactionRequestMeta(event),
+			inputProvenance,
 		});
 	} catch (error) {
 		writeDebugArtifact(
@@ -325,6 +475,8 @@ async function runResponsesNativeCompact(
 				baseUrl: compactor.baseUrl,
 			},
 			requestSource,
+			remoteV2ContextSource: config.remoteV2ContextSource,
+			inputProvenance,
 			requestInputItems: request.input.length,
 			requestExtras: extras ? Object.keys(extras) : [],
 			compactResponseId: compactResult.compactResponseId,
@@ -406,11 +558,45 @@ async function handleSessionBeforeCompact(
 	);
 	if (resolution.ok) {
 		remoteAttempted = true;
-		const responsesOutcome = await runResponsesNativeCompact(event, ctx, config, resolution.execution, dependencies.remoteCompact);
+		const responsesOutcome = await runResponsesNativeCompact(
+			event,
+			ctx,
+			config,
+			resolution.execution,
+			dependencies.remoteCompact,
+			dependencies.projectCompactionContext,
+		);
 		if (responsesOutcome.outcome === "success") {
 			return { compaction: responsesOutcome.compaction };
 		}
 		if (responsesOutcome.outcome === "aborted") {
+			return { cancel: true };
+		}
+		if (responsesOutcome.outcome === "unprojected-input") {
+			const message = responsesOutcome.reason === COMPACTION_PROJECTION_UNAVAILABLE
+				? "Pi's ordered context-hook projection is unavailable; Remote V2 was not sent raw session history."
+				: responsesOutcome.reason === COMPACTION_SESSION_CONTEXT_UNAVAILABLE
+					? "Pi did not provide the current session context required by its context-hook projection."
+					: responsesOutcome.reason === COMPACTION_PROJECTED_CONTEXT_UNAVAILABLE
+						? "Pi's projected context did not include the current compaction summary anchor."
+						: "The latest opaque checkpoint has no marker for the configured Remote V2 context source, or was created in the other mode.";
+			writeDebugArtifact(
+				"compaction-event",
+				{
+					event: "session_before_compact.remote-v2-unprojected-input",
+					reason: responsesOutcome.reason,
+					contextSource: config.remoteV2ContextSource,
+					inputProvenance: getRemoteV2InputProvenance(config.remoteV2ContextSource),
+					piContextHookPatch: dependencies.piContextHookPatch,
+					message,
+				},
+				config,
+				ctx,
+			);
+			notifyWarning(
+				ctx,
+				`Remote V2 compaction cancelled (${responsesOutcome.reason}); ${message} Keep the context-source setting aligned with the checkpoint or choose legacy mode explicitly.`,
+			);
 			return { cancel: true };
 		}
 		// failed: fall through to the configured-model fallback below.
@@ -493,7 +679,7 @@ async function handleSessionBeforeCompact(
 	return undefined;
 }
 
-async function handleContext(
+async function handleContextInternal(
 	event: ContextEvent,
 	ctx: ExtensionContext,
 	pi: ExtensionAPI,
@@ -514,6 +700,7 @@ async function handleContext(
 			contextWindows.synchronize(ctx);
 		} catch {
 			notifyRemoteContextFailure(ctx, "malformed-window-state");
+			reportPiContextHookFailure(ctx, "malformed-window-state");
 			ctx.abort();
 			return undefined;
 		}
@@ -533,6 +720,7 @@ async function handleContext(
 					: { messages: projected };
 			} catch (error) {
 				notifyRemoteContextFailure(ctx, "malformed-window-state");
+				reportPiContextHookFailure(ctx, "malformed-window-state");
 				ctx.abort();
 				return undefined;
 			}
@@ -545,6 +733,7 @@ async function handleContext(
 		if (isCodexContextModel(ctx.model, config)) {
 			if (isCodexGatewayModel(ctx.model, config.gatewayContextModels)) {
 				notifyRemoteContextFailure(ctx, "codex-context-unavailable");
+				reportPiContextHookFailure(ctx, "codex-context-unavailable");
 				ctx.abort();
 				return undefined;
 			}
@@ -569,14 +758,41 @@ async function handleContext(
 	const branchEntries = ctx.sessionManager.getBranch();
 	const latest = resolveLatestNativeCompactionEntry(branchEntries, { baseUrl: resolution.runtime.baseUrl });
 	if (!latest.ok) return undefined;
-	const result = removeNativeCompactionRetainedMessages({ messages: replayEvent.messages, branchEntries, compactionEntry: latest.entry });
+	const result = removeNativeCompactionRetainedMessages({
+		messages: replayEvent.messages,
+		branchEntries,
+		compactionEntry: latest.entry,
+		expectedInputProvenance: getRemoteV2InputProvenance(config.remoteV2ContextSource),
+	});
 	if (!result.ok) {
 		writeReplayFailureArtifact({ reason: result.reason, compactionEntryId: latest.entry.id }, config, ctx);
 		if (ctx.hasUI) ctx.ui.notify(`${COMPACTION_EXTENSION_ID}: replay failed (${result.reason}); request aborted`, "error");
+		reportPiContextHookFailure(ctx, `replay-failed:${result.reason}`);
 		ctx.abort();
 		return undefined;
 	}
 	return result.messages === replayEvent.messages ? undefined : { messages: result.messages };
+}
+
+/**
+ * Pi's emitContext() catches handler exceptions. Re-throw as usual for Pi, but
+ * also report the failure so the compaction projector cannot mistake the
+ * caught exception for a successful projection.
+ */
+async function handleContext(
+	event: ContextEvent,
+	ctx: ExtensionContext,
+	pi: ExtensionAPI,
+	loadConfig: typeof loadToolkitConfig,
+	contextWindows: CodexContextWindowManager,
+	remoteContextActive: RemoteContextActive,
+) {
+	try {
+		return await handleContextInternal(event, ctx, pi, loadConfig, contextWindows, remoteContextActive);
+	} catch (error) {
+		reportPiContextHookFailure(ctx, error instanceof Error ? error.message : String(error));
+		throw error;
+	}
 }
 
 async function handleBeforeProviderRequest(
@@ -707,6 +923,7 @@ async function handleBeforeProviderRequest(
 		payload,
 		branchEntries,
 		compactionEntry: latestNativeCompactionEntry,
+		expectedInputProvenance: getRemoteV2InputProvenance(config.remoteV2ContextSource),
 	});
 	if (!rewrite.ok) {
 		writeDebugArtifact(
@@ -784,6 +1001,7 @@ export default function registerCompactionExtension(
 	overrides: Partial<CompactionDependencies> = {},
 ) {
 	const loadConfig = overrides.loadConfig ?? loadToolkitConfig;
+	const piContextHookPatch = installPiContextHookPatch();
 	const contextWindows = overrides.contextWindows ?? new CodexContextWindowManager((ctx, signal) =>
 		loadHistoryNotesThreadHint(ctx, signal, loadConfig().config.compaction.gatewayContextModels)
 	);
@@ -793,6 +1011,7 @@ export default function registerCompactionExtension(
 		nativeFallback: runNativeFallbackCompaction,
 		contextWindows,
 		...overrides,
+		piContextHookPatch: overrides.piContextHookPatch ?? piContextHookPatch,
 	};
 	let tools!: ReturnType<typeof registerContextManagementTools>;
 	tools = registerContextManagementTools(
@@ -855,9 +1074,11 @@ export default function registerCompactionExtension(
 				activation: {
 					active,
 					contextManagement: config.contextManagement,
+					remoteV2ContextSource: config.remoteV2ContextSource,
 					model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
 					...(activationReason ? { reason: activationReason } : {}),
 				},
+				piContextHookPatch: dependencies.piContextHookPatch,
 			},
 			config,
 			ctx,

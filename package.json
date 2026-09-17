@@ -1,6 +1,6 @@
 {
   "name": "pi-openai-toolkit",
-  "version": "0.14.7",
+  "version": "0.14.8",
   "private": false,
   "type": "module",
   "engines": {
@@ -47,6 +47,8 @@
     "extensions/image-generation.ts",
     "extensions/auto-mode.ts",
     "src/compact-client.ts",
+    "src/compaction-projection.ts",
+    "src/pi-context-hook.ts",
     "src/config.ts",
     "src/debug.ts",
     "src/details-store.ts",

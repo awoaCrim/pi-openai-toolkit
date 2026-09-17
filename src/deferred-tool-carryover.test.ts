@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	CACHE_STACK_ACTIVATION_ENTRY_TYPE,
+	NATIVE_COMPACTION_INPUT_PROVENANCE,
 	createNativeCompactionDetails,
 	getLatestDeferredToolCarryover,
 	isNativeCompactionDetails,
@@ -81,6 +82,7 @@ describe("cache-stack activation and deferred tool carryover", () => {
 			api: "openai-responses",
 			model: "gpt-5.4",
 			baseUrl: "https://api.openai.com/v1",
+			inputProvenance: NATIVE_COMPACTION_INPUT_PROVENANCE,
 			compactedWindow: [{ type: "compaction", encrypted_content: "opaque" }],
 		});
 

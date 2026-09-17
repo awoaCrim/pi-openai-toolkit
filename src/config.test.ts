@@ -45,6 +45,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(false);
 		expect(loaded.config.compaction.contextManagement).toBe("off");
 		expect(loaded.config.compaction.remoteCompactModel).toBeUndefined();
+		expect(loaded.config.compaction.remoteV2ContextSource).toBe("legacy");
 		expect(loaded.config.compaction.nativeFallback).toEqual({ ...DEFAULT_NATIVE_FALLBACK_CONFIG });
 		expect(loaded.config.compaction).not.toHaveProperty("autoCompaction");
 		expect(loaded.config.compaction.responsesApis).toEqual([
@@ -72,6 +73,7 @@ describe("loadToolkitConfig", () => {
 					contextManagement: "remote",
 					allowCompactionContinuityBreak: true,
 					remoteCompactModel: " uwoacrimson/gpt-5.6-luna ",
+					remoteV2ContextSource: " legacy ",
 					nativeFallback: {
 						enabled: true,
 						model: " google/gemini-2.5-flash ",
@@ -120,6 +122,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.contextManagement).toBe("remote");
 		expect(loaded.config.compaction).not.toHaveProperty("codexGatewayModels");
 		expect(loaded.config.compaction.remoteCompactModel).toBe("uwoacrimson/gpt-5.6-luna");
+		expect(loaded.config.compaction.remoteV2ContextSource).toBe("legacy");
 		expect(loaded.config.compaction.nativeFallback).toEqual({
 			enabled: true,
 			model: "google/gemini-2.5-flash",
@@ -283,6 +286,7 @@ describe("loadToolkitConfig", () => {
 				compaction: {
 					enabled: "yes",
 					allowCompactionContinuityBreak: "yes",
+					remoteV2ContextSource: "raw",
 					remoteCompactModel: { provider: "uwoacrimson" },
 					nativeFallback: {
 						enabled: "yes",
@@ -317,6 +321,7 @@ describe("loadToolkitConfig", () => {
 
 		expect(loaded.config.compaction.enabled).toBe(true);
 		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(false);
+		expect(loaded.config.compaction.remoteV2ContextSource).toBe("legacy");
 		expect(loaded.config.compaction.remoteCompactModel).toBeUndefined();
 		expect(loaded.config.compaction.nativeFallback).toEqual({ ...DEFAULT_NATIVE_FALLBACK_CONFIG });
 		expect(loaded.config.compaction).not.toHaveProperty("autoCompaction");

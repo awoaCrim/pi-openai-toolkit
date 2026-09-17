@@ -61,8 +61,10 @@ export interface NewContextDetails { started: boolean; }
 export const NEW_CONTEXT_PARAMETERS = Type.Object({}, { additionalProperties: false });
 
 export const NEW_CONTEXT_CHECKPOINT_REQUIRED_MESSAGE =
-	"new_context refused: no successful notes checkpoint in this window. "
-	+ "Save the active request, decisions, progress and next steps with notes append_to_file or write_file, then retry.";
+	"new_context refused: no persisted successful notes checkpoint in the current context window. "
+	+ "Write the active request, decisions, progress and next steps with notes append_to_file or write_file, "
+	+ "wait until that notes result is persisted, then retry new_context in a later tool turn. "
+	+ "Do not pass force arguments and do not repeat new_context while a rollover is already scheduled.";
 export interface ContextRemainingDetails {
 	remainingTokens?: number;
 	windowId?: string;
@@ -88,13 +90,23 @@ export function createContextManagementTools(
 	const newContext: ToolDefinition<typeof NEW_CONTEXT_PARAMETERS, NewContextDetails> = {
 		name: "new_context",
 		label: "new_context",
-		description: "Start a new remote Codex context window without generating a conversation summary. Requires a successful notes checkpoint in the current window.",
+		description: "Start a new remote Codex context window without generating a conversation summary. Requires a persisted successful notes checkpoint in the current window.",
 		parameters: NEW_CONTEXT_PARAMETERS,
 		promptSnippet: "Start a new remote Codex context window without summarizing history.",
-		promptGuidelines: ["Checkpoint active work in notes before calling new_context; no conversation summary carries over. A successful notes append/write in this window is required."],
+		promptGuidelines: [
+			"Checkpoint active work in notes before calling new_context; no conversation summary carries over. Only a persisted successful notes append/write in the current window unlocks the rollover.",
+			"Wait for the notes tool result before calling new_context; an in-flight or failed write is not a checkpoint. If new_context reports that a rollover is already scheduled, do not call it again in the same window.",
+		],
 		executionMode: "sequential",
 		async execute(_id, _params, signal, _update, ctx) {
 			await assertActive(ctx);
+			manager.synchronize(ctx);
+			if (manager.hasPendingRollover(ctx)) {
+				return {
+					content: [{ type: "text", text: "A new context window is already scheduled." }],
+					details: { started: false },
+				};
+			}
 			if (!manager.hasNotesCheckpointSinceBoundary(ctx)) {
 				throw new Error(NEW_CONTEXT_CHECKPOINT_REQUIRED_MESSAGE);
 			}
@@ -148,7 +160,7 @@ export function createContextManagementTools(
 		parameters: NOTES_PARAMETERS,
 		promptSnippet: "Read and checkpoint remote Codex notes across context windows.",
 		promptGuidelines: [
-			"Before calling new_context, checkpoint the current turn's active work (unfinished tasks, decisions, open questions, references) into notes with append_to_file or write_file so it survives the window change.",
+			"Before calling new_context, checkpoint the current turn's active work (unfinished tasks, decisions, open questions, references) into notes with append_to_file or write_file so it survives the window change; wait for that result to be persisted before calling new_context.",
 			"When a large task spans multiple context windows, keep a running note per line of work and read it at the start of each new window; append new state instead of replacing it unless the note is stale.",
 			"Prefer read_file or search_contents for looking things up; reserve write_file for explicit rewrite/clear and append_to_file for incremental state.",
 			"Keep note text concise and self-contained: it may be read later without the rest of the conversation, so include identifiers and verbatim key decisions, not hearsay summaries.",

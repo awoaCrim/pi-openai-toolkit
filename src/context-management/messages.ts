@@ -35,7 +35,7 @@ export const CONTEXT_WINDOW_COMPACTION_SUMMARY =
 	"[Pi Codex context-window boundary; no conversation summary was generated.]";
 
 const CONTEXT_WINDOW_GUIDANCE = `<context_window_guidance>
-Checkpoint the active request, known history IDs, decisions, progress, learnings and next steps in notes before new_context; no summary carries over. After rollover, read the checkpoint receipt note first when present; use a thread hint only as supplemental guidance. Use history only for a missing detail.
+Checkpoint the active request, known history IDs, decisions, progress, learnings and next steps in notes before new_context, and wait for that notes result to be persisted; only a persisted successful result in the current window unlocks the rollover, and no summary carries over. If new_context reports that a rollover is already scheduled, do not call it again in the same window. After rollover, read the checkpoint receipt note first when present; use a thread hint only as supplemental guidance. Use history only for a missing detail.
 </context_window_guidance>`;
 
 export function renderContextWindowMessage(

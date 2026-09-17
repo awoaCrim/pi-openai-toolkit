@@ -10,7 +10,9 @@ import {
 	DEFAULT_TOOLKIT_CONFIG,
 	DEFAULT_IMAGE_GENERATION_CONFIG,
 	DEFAULT_WEB_SEARCH_CONFIG,
+	LEGACY_REMOTE_V2_INPUT_PROVENANCE,
 	NATIVE_COMPACTION_FALLBACK_SUMMARY,
+	NATIVE_COMPACTION_INPUT_PROVENANCE,
 	createNativeCompactionDetails,
 	type CompactionConfig,
 	type DeferredToolCarryoverV1,
@@ -71,6 +73,7 @@ type HookHarnessOptions = {
 	compactResult?: Record<string, unknown>;
 	config?: Partial<CompactionConfig>;
 	nativeFallbackResult?: Record<string, unknown>;
+	disableCompactionProjection?: boolean;
 };
 
 const defaultModel: TestModel = {
@@ -198,11 +201,36 @@ function createCompactionEntry(args: {
 	tokensBefore?: number;
 	model?: TestModel;
 	compactionModel?: TestModel;
+	inputProvenance?: typeof NATIVE_COMPACTION_INPUT_PROVENANCE | typeof LEGACY_REMOTE_V2_INPUT_PROVENANCE;
 	deferredToolCarryover?: DeferredToolCarryoverV1;
+	omitInputProvenance?: boolean;
 	compactedWindow: unknown[];
 	compactResponseId?: string;
 }): TestSessionEntry {
 	const model = args.model ?? defaultModel;
+	const details = createNativeCompactionDetails({
+		provider: model.provider,
+		api: model.api,
+		model: model.id,
+		baseUrl: model.baseUrl,
+		inputProvenance: args.inputProvenance ?? NATIVE_COMPACTION_INPUT_PROVENANCE,
+		compactionModel: args.compactionModel
+			? {
+				provider: args.compactionModel.provider,
+				api: args.compactionModel.api,
+				model: args.compactionModel.id,
+				baseUrl: args.compactionModel.baseUrl,
+			}
+			: undefined,
+		deferredToolCarryover: args.deferredToolCarryover,
+		compactedWindow: args.compactedWindow,
+		compactResponseId: args.compactResponseId,
+		createdAt: nextTimestamp(),
+	});
+	if (args.omitInputProvenance) {
+		delete (details as unknown as Record<string, unknown>).inputProvenance;
+	}
+
 	return {
 		type: "compaction",
 		id: args.id,
@@ -210,24 +238,7 @@ function createCompactionEntry(args: {
 		summary: NATIVE_COMPACTION_FALLBACK_SUMMARY,
 		firstKeptEntryId: args.firstKeptEntryId,
 		tokensBefore: args.tokensBefore ?? 256,
-		details: createNativeCompactionDetails({
-			provider: model.provider,
-			api: model.api,
-			model: model.id,
-			baseUrl: model.baseUrl,
-			compactionModel: args.compactionModel
-				? {
-					provider: args.compactionModel.provider,
-					api: args.compactionModel.api,
-					model: args.compactionModel.id,
-					baseUrl: args.compactionModel.baseUrl,
-				}
-				: undefined,
-			deferredToolCarryover: args.deferredToolCarryover,
-			compactedWindow: args.compactedWindow,
-			compactResponseId: args.compactResponseId,
-			createdAt: nextTimestamp(),
-		}),
+		details,
 	};
 }
 
@@ -300,8 +311,11 @@ function createContext(args: {
 } = {}) {
 	const branchEntries = args.branchEntries ?? [];
 	const model = args.model ?? defaultModel;
-	const sessionContextMessages =
-		args.sessionContextMessages ?? branchEntries.filter((entry) => entry.type === "message").map(toReplayMessage);
+	const sessionContextMessages = args.sessionContextMessages ?? branchEntries.flatMap((entry) => {
+		if (entry.type === "message") return [toReplayMessage(entry)];
+		if (entry.type === "compaction") return [createCompactionSummaryMessage(entry)];
+		return [];
+	});
 	return {
 		cwd: "/tmp/pi-openai-toolkit-validation",
 		hasUI: false,
@@ -367,6 +381,9 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 				...DEFAULT_TOOLKIT_CONFIG,
 				compaction: {
 					...DEFAULT_COMPACTION_CONFIG,
+					// Most validation cases exercise the opt-in projection behavior;
+					// the production default is covered separately by config tests.
+					remoteV2ContextSource: "pi-context-hook",
 					responsesApis: [...DEFAULT_COMPACTION_CONFIG.responsesApis],
 					artifactRoot: options.config?.artifactRoot ?? testArtifactRoot,
 					...(options.config ?? {}),
@@ -392,6 +409,11 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 				response: { id: "resp_default", status: "completed", output: [{ type: "compaction", encrypted_content: "opaque-default" }] },
 			}) as never;
 		},
+		// Test-only seam for the Pi context-hook projection. The runtime still
+		// obtains the source messages through buildSessionContext().
+		projectCompactionContext: options.disableCompactionProjection
+			? undefined
+			: (messages) => messages,
 	});
 	// Pi owns scheduling. The compaction extension only supplies/replays results.
 	expect([...handlers.keys()]).toEqual([
@@ -432,6 +454,311 @@ afterEach(() => {
 	timestampCounter = 0;
 	clearRequestContextCache();
 	fs.rmSync(testArtifactRoot, { recursive: true, force: true });
+});
+
+test("remote compaction cancels when raw custom content lacks a host projection", async () => {
+	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
+		config: { nativeFallback: { enabled: false } },
+		disableCompactionProjection: true,
+	});
+	const rawMessages = [
+		{ role: "user", content: "Keep the user request.", timestamp: 1 },
+		{ role: "custom", customType: "state", content: "FILTER-ME-STATE", display: true, details: { internal: true }, timestamp: 2 },
+		{ role: "custom", customType: "exit", content: "FILTER-ME-EXIT", display: true, details: { internal: true }, timestamp: 3 },
+		{ role: "custom", customType: "wake", content: "KEEP-ME-WAKE", display: true, details: { internal: true }, timestamp: 4 },
+	] as never;
+	const ctx = createContext({ sessionContextMessages: rawMessages });
+	const result = await sessionBeforeCompact({
+		signal: new AbortController().signal,
+		customInstructions: undefined,
+		branchEntries: [],
+		preparation: {
+			firstKeptEntryId: "entry-user",
+			tokensBefore: 512,
+			previousSummary: undefined,
+			messagesToSummarize: rawMessages,
+			turnPrefixMessages: [],
+		},
+	} as never, ctx);
+
+	expect(result).toEqual({ cancel: true });
+	expect(compactCalls).toHaveLength(0);
+	expect(fallbackCalls).toHaveLength(0);
+	// The safe local behavior is to cancel instead of sealing raw custom
+	// messages into an opaque Remote V2 checkpoint.
+});
+
+test("remote compaction serializes the ordered projection instead of raw preparation messages", async () => {
+	const { sessionBeforeCompact, compactCalls } = await loadHookHarness();
+	const rawMessages = [
+		{ role: "user", content: "Keep the user request.", timestamp: 1 },
+		{ role: "custom", customType: "state", content: "FILTER-ME-STATE", display: true, details: { internal: true }, timestamp: 2 },
+		{ role: "custom", customType: "exit", content: "FILTER-ME-EXIT", display: true, details: { internal: true }, timestamp: 3 },
+		{ role: "custom", customType: "wake", content: "KEEP-ME-WAKE", display: true, details: { internal: true }, timestamp: 4 },
+	] as never;
+	const projectedMessages = rawMessages.filter((message: { role: string; customType?: string }) =>
+		message.role !== "custom" || message.customType === "wake",
+	);
+	const result = await sessionBeforeCompact({
+		signal: new AbortController().signal,
+		customInstructions: undefined,
+		branchEntries: [],
+		preparation: {
+			firstKeptEntryId: "entry-user",
+			tokensBefore: 512,
+			previousSummary: undefined,
+			messagesToSummarize: rawMessages,
+			turnPrefixMessages: [],
+		},
+	} as never, createContext({ sessionContextMessages: projectedMessages }));
+
+	expect(result).toBeDefined();
+	expect(compactCalls).toHaveLength(1);
+	const request = compactCalls[0]?.request as { input: unknown[] };
+	expect(JSON.stringify(request.input)).not.toContain("FILTER-ME-STATE");
+	expect(JSON.stringify(request.input)).not.toContain("FILTER-ME-EXIT");
+	expect(JSON.stringify(request.input)).toContain("KEEP-ME-WAKE");
+});
+
+test("remote compaction cancels instead of using incomplete preparation when session context is unavailable", async () => {
+	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
+		config: { nativeFallback: { enabled: false } },
+	});
+	const ctx = createContext({
+		sessionContextMessages: [{ role: "user", content: "complete session context", timestamp: 1 }],
+	});
+	delete (ctx.sessionManager as { buildSessionContext?: unknown }).buildSessionContext;
+	const result = await sessionBeforeCompact({
+		signal: new AbortController().signal,
+		customInstructions: undefined,
+		branchEntries: [],
+		preparation: {
+			firstKeptEntryId: "entry-user",
+			tokensBefore: 512,
+			previousSummary: undefined,
+			messagesToSummarize: [{ role: "user", content: "incomplete preparation", timestamp: 1 }],
+			turnPrefixMessages: [],
+		},
+	} as never, ctx);
+
+	expect(result).toEqual({ cancel: true });
+	expect(compactCalls).toHaveLength(0);
+	expect(fallbackCalls).toHaveLength(0);
+});
+
+test("legacy Remote V2 source uses session context without a projection callback", async () => {
+	const { sessionBeforeCompact, compactCalls } = await loadHookHarness({
+		config: { remoteV2ContextSource: "legacy" },
+		disableCompactionProjection: true,
+	});
+	const rawMessages = [
+		{ role: "user", content: "legacy user context", timestamp: 1 },
+		{ role: "custom", customType: "wake", content: "legacy custom context", display: true, timestamp: 2 },
+	] as never;
+	const result = (await sessionBeforeCompact({
+		signal: new AbortController().signal,
+		customInstructions: undefined,
+		branchEntries: [],
+		preparation: {
+			firstKeptEntryId: "entry-user",
+			tokensBefore: 512,
+			previousSummary: undefined,
+			messagesToSummarize: [{ role: "user", content: "preparation fallback", timestamp: 1 }],
+			turnPrefixMessages: [],
+		},
+	} as never, createContext({ sessionContextMessages: rawMessages }))) as {
+		compaction: { details: { inputProvenance: string } };
+	};
+
+	expect(compactCalls).toHaveLength(1);
+	expect(JSON.stringify((compactCalls[0]?.request as { input: unknown[] }).input)).toContain("legacy custom context");
+	expect(JSON.stringify((compactCalls[0]?.request as { input: unknown[] }).input)).not.toContain("preparation fallback");
+	expect(result.compaction.details.inputProvenance).toBe(LEGACY_REMOTE_V2_INPUT_PROVENANCE);
+});
+
+test("legacy Remote V2 source falls back to preparation when session context is unavailable", async () => {
+	const { sessionBeforeCompact, compactCalls } = await loadHookHarness({
+		config: { remoteV2ContextSource: "legacy" },
+		disableCompactionProjection: true,
+	});
+	const ctx = createContext({ sessionContextMessages: [{ role: "user", content: "unused context", timestamp: 1 }] });
+	delete (ctx.sessionManager as { buildSessionContext?: unknown }).buildSessionContext;
+	await sessionBeforeCompact({
+		signal: new AbortController().signal,
+		customInstructions: undefined,
+		branchEntries: [],
+		preparation: {
+			firstKeptEntryId: "entry-user",
+			tokensBefore: 512,
+			previousSummary: undefined,
+			messagesToSummarize: [{ role: "user", content: "preparation is supported in legacy mode", timestamp: 1 }],
+			turnPrefixMessages: [],
+		},
+	} as never, ctx);
+
+	expect(compactCalls).toHaveLength(1);
+	expect(JSON.stringify((compactCalls[0]?.request as { input: unknown[] }).input)).toContain("preparation is supported in legacy mode");
+});
+
+test("pi-context-hook mode rejects a checkpoint created in legacy mode", async () => {
+	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
+		config: { nativeFallback: { enabled: false } },
+	});
+	const previousCompaction = createCompactionEntry({
+		id: "compact-legacy-marker",
+		firstKeptEntryId: "entry-keep-legacy-marker",
+		inputProvenance: LEGACY_REMOTE_V2_INPUT_PROVENANCE,
+		compactedWindow: [{ type: "compaction", encrypted_content: "opaque-legacy-marker" }],
+	});
+	const tailUser = createUserEntry("entry-tail-legacy-marker", "new live tail");
+	const branchEntries = [
+		createUserEntry("entry-keep-legacy-marker", "covered before checkpoint"),
+		previousCompaction,
+		tailUser,
+	] as never;
+	const result = await sessionBeforeCompact({
+		signal: new AbortController().signal,
+		customInstructions: undefined,
+		branchEntries,
+		preparation: {
+			firstKeptEntryId: tailUser.id,
+			tokensBefore: 512,
+			previousSummary: NATIVE_COMPACTION_FALLBACK_SUMMARY,
+			messagesToSummarize: [toReplayMessage(tailUser)],
+			turnPrefixMessages: [],
+		},
+	} as never, createContext({ branchEntries }));
+
+	expect(result).toEqual({ cancel: true });
+	expect(compactCalls).toHaveLength(0);
+	expect(fallbackCalls).toHaveLength(0);
+});
+
+test("legacy recursive Remote V2 uses the raw branch tail and stores the legacy marker", async () => {
+	const { sessionBeforeCompact, compactCalls } = await loadHookHarness({
+		config: { remoteV2ContextSource: "legacy" },
+		disableCompactionProjection: true,
+	});
+	const previousCompaction = createCompactionEntry({
+		id: "compact-legacy-recursive",
+		firstKeptEntryId: "entry-legacy-root",
+		inputProvenance: LEGACY_REMOTE_V2_INPUT_PROVENANCE,
+		compactedWindow: [{ type: "compaction", encrypted_content: "opaque-legacy-recursive" }],
+	});
+	const tailCustom: TestSessionEntry = {
+		type: "message",
+		id: "entry-legacy-custom",
+		timestamp: nextTimestamp(),
+		message: {
+			role: "custom",
+			customType: "wake",
+			content: "raw legacy tail custom",
+			display: true,
+			timestamp: Date.now(),
+		},
+	};
+	const tailUser = createUserEntry("entry-legacy-tail", "raw legacy tail user");
+	const branchEntries = [createUserEntry("entry-legacy-root", "before"), previousCompaction, tailCustom, tailUser] as never;
+	const result = (await sessionBeforeCompact({
+		signal: new AbortController().signal,
+		customInstructions: undefined,
+		branchEntries,
+		preparation: {
+			firstKeptEntryId: tailCustom.id,
+			tokensBefore: 512,
+			previousSummary: NATIVE_COMPACTION_FALLBACK_SUMMARY,
+			messagesToSummarize: [],
+			turnPrefixMessages: [],
+		},
+	} as never, createContext({ branchEntries }))) as {
+		compaction: { details: { inputProvenance: string } };
+	};
+	const input = (compactCalls[0]?.request as { input: unknown[] }).input;
+
+	expect(compactCalls).toHaveLength(1);
+	expect(JSON.stringify(input)).toContain("raw legacy tail custom");
+	expect(JSON.stringify(input)).toContain("raw legacy tail user");
+	expect(input[0]).toEqual({ type: "compaction", encrypted_content: "opaque-legacy-recursive" });
+	expect(result.compaction.details.inputProvenance).toBe(LEGACY_REMOTE_V2_INPUT_PROVENANCE);
+});
+
+test("recursive remote compaction cancels for an old unproven opaque checkpoint", async () => {
+	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
+		config: { nativeFallback: { enabled: false } },
+	});
+	const previousCompaction = createCompactionEntry({
+		id: "compact-old-unproven",
+		firstKeptEntryId: "entry-keep-old",
+		omitInputProvenance: true,
+		compactedWindow: [{ type: "compaction", encrypted_content: "opaque-old" }],
+	});
+	const tailUser = createUserEntry("entry-tail-old", "new live tail");
+	const branchEntries = [
+		createUserEntry("entry-keep-old", "covered before old checkpoint"),
+		previousCompaction,
+		tailUser,
+	] as never;
+	const result = await sessionBeforeCompact({
+		signal: new AbortController().signal,
+		customInstructions: undefined,
+		branchEntries,
+		preparation: {
+			firstKeptEntryId: tailUser.id,
+			tokensBefore: 512,
+			previousSummary: NATIVE_COMPACTION_FALLBACK_SUMMARY,
+			messagesToSummarize: [toReplayMessage(tailUser)],
+			turnPrefixMessages: [],
+		},
+	} as never, createContext({ branchEntries }));
+
+	expect(result).toEqual({ cancel: true });
+	expect(compactCalls).toHaveLength(0);
+	expect(fallbackCalls).toHaveLength(0);
+});
+
+test("recursive remote compaction cancels when raw live tail contains custom content", async () => {
+	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
+		config: { nativeFallback: { enabled: false } },
+		disableCompactionProjection: true,
+	});
+	const previousCompaction = createCompactionEntry({
+		id: "compact-previous",
+		firstKeptEntryId: "entry-keep",
+		compactedWindow: [{ type: "compaction", encrypted_content: "opaque-previous" }],
+	});
+	const branchEntries = [
+		createUserEntry("entry-keep", "kept before the checkpoint"),
+		previousCompaction,
+		{
+			type: "custom_message",
+			id: "entry-state",
+			timestamp: nextTimestamp(),
+			customType: "state",
+			content: "FILTER-ME-STATE-TAIL",
+			display: true,
+			details: { internal: true },
+		},
+	] as never;
+	const ctx = createContext({
+		branchEntries,
+		sessionContextMessages: [{ role: "custom", customType: "state", content: "FILTER-ME-STATE-TAIL", display: true, timestamp: 1 }],
+	});
+	const result = await sessionBeforeCompact({
+		signal: new AbortController().signal,
+		customInstructions: undefined,
+		branchEntries,
+		preparation: {
+			firstKeptEntryId: "entry-state",
+			tokensBefore: 512,
+			previousSummary: "previous summary",
+			messagesToSummarize: [{ role: "user", content: "old", timestamp: 1 }],
+			turnPrefixMessages: [],
+		},
+	} as never, ctx);
+
+	expect(result).toEqual({ cancel: true });
+	expect(compactCalls).toHaveLength(0);
+	expect(fallbackCalls).toHaveLength(0);
 });
 
 test("gateway Remote Context headers preserve session affinity and strip inherited credentials", async () => {
@@ -687,6 +1014,12 @@ test("repeated native compaction reuses the latest stored compacted window inste
 			content: [{ type: "output_text", text: "Opaque compacted window", annotations: [] }],
 		},
 	];
+	const olderCompaction = createCompactionEntry({
+		id: "compaction_repeat_older",
+		firstKeptEntryId: oldKeptUser.id,
+		model,
+		compactedWindow: [{ type: "compaction", encrypted_content: "opaque-older" }],
+	});
 	const priorCompaction = createCompactionEntry({
 		id: "compaction_repeat",
 		firstKeptEntryId: oldKeptUser.id,
@@ -716,12 +1049,12 @@ test("repeated native compaction reuses the latest stored compacted window inste
 	await sessionBeforeCompact(
 		event,
 		createContext({
-			branchEntries: [oldKeptUser, priorCompaction, tailUser, tailAssistant],
+			branchEntries: [oldKeptUser, olderCompaction, priorCompaction, tailUser, tailAssistant],
 			model,
 			systemPrompt: "Current instructions v-repeat",
 			sessionContextMessages: [
+				createCompactionSummaryMessage(olderCompaction),
 				createCompactionSummaryMessage(priorCompaction),
-				toReplayMessage(oldKeptUser),
 				toReplayMessage(tailUser),
 				toReplayMessage(tailAssistant),
 			],
@@ -1322,7 +1655,7 @@ test("same-endpoint switching reuses the latest opaque checkpoint despite provid
 		branchEntries,
 		model: luna,
 		registryModels: [luna],
-		sessionContextMessages: [toReplayMessage(user)],
+		sessionContextMessages: [createCompactionSummaryMessage(priorCompaction)],
 	});
 	const result = (await sessionBeforeCompact(
 		{

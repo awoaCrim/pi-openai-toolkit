@@ -8,8 +8,12 @@ import type {
 	SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
 import type { ResponsesCompatibleRequestPayload } from "./runtime";
+import { hasVerifiedCompactionInputProvenance } from "./compaction-projection";
 import { rewritePayloadWithDeferredToolCarryover } from "./deferred-tool-carryover";
-import type { NativeCompactionEntry } from "./types";
+import type {
+	NativeCompactionEntry,
+	NativeCompactionInputProvenance,
+} from "./types";
 import { serializeMessagesToResponsesInput, type ResponsesInputContentItem, type ResponsesInputItem, type ResponsesInputMessageItem } from "./serializer";
 
 export type NativeReplaySegments = {
@@ -35,7 +39,8 @@ export type NativeReplayPayloadRewriteFailureReason =
 	| "invalid-compacted-window"
 	| "unexpected-compaction-after-boundary"
 	| "compaction-summary-not-found"
-	| "retained-context-mismatch";
+	| "retained-context-mismatch"
+	| "unverified-compaction-input";
 
 export type NativeReplayPayloadRewriteFailure = {
 	ok: false;
@@ -323,29 +328,60 @@ export function removeNativeCompactionRetainedMessages(args: {
 	messages: AgentMessage[];
 	branchEntries: readonly SessionEntry[];
 	compactionEntry: NativeCompactionEntry;
+	expectedInputProvenance: NativeCompactionInputProvenance;
 }): { ok: true; messages: AgentMessage[] } | NativeReplayPayloadRewriteFailure {
 	const boundary = findCompactionBoundaryIndex(args.branchEntries, args.compactionEntry.id);
 	if (boundary === undefined) return { ok: false, reason: "compaction-boundary-not-found" };
+	if (!hasVerifiedCompactionInputProvenance(args.compactionEntry.details, args.expectedInputProvenance)) {
+		return { ok: false, reason: "unverified-compaction-input" };
+	}
 	const firstKept = findEntryIndexByIdBeforeBoundary(args.branchEntries, args.compactionEntry.firstKeptEntryId, boundary);
 	if (firstKept === undefined) return { ok: false, reason: "first-kept-entry-not-found" };
-	const summary = sessionEntryToContextMessages(args.compactionEntry)[0];
+	const summary = structuredClone(sessionEntryToContextMessages(args.compactionEntry)[0]);
 	const summaryIndex = args.messages.findIndex((message) => areEquivalentValues(message, summary));
 	if (summaryIndex < 0) return { ok: false, reason: "compaction-summary-not-found" };
-	const retained = args.branchEntries.slice(firstKept, boundary).flatMap(sessionEntryToContextMessages);
+	const retained = args.branchEntries
+		.slice(firstKept, boundary)
+		.flatMap(sessionEntryToContextMessages)
+		.map((message) => structuredClone(message));
+	// Custom messages are optional context-hook entries: a hook may filter or
+	// rewrite them before provider serialization. An exact custom copy is still
+	// removed when present, while a missing or rewritten copy is left alone.
+	// Required user/assistant/tool messages keep the ordered, fail-closed
+	// matching contract.
+	const requiredRetained = retained.filter((message) => message.role !== "custom");
+	const optionalRetained = retained.filter((message) => message.role === "custom");
 	const removed = new Set<number>();
 	let cursor = summaryIndex + 1;
-	for (const expected of retained) {
+	for (const expected of requiredRetained) {
 		const index = args.messages.findIndex((message, index) => index >= cursor && areEquivalentValues(message, expected));
 		if (index >= 0) {
 			removed.add(index);
 			cursor = index + 1;
 		}
 	}
-	// Already removed by another context handler: leave it alone. Partial
-	// matches are ambiguous; never remove half a call/result batch.
-	if (removed.size === 0) return { ok: true, messages: args.messages };
-	if (removed.size !== retained.length) return { ok: false, reason: "retained-context-mismatch" };
-	return { ok: true, messages: args.messages.filter((_, index) => !removed.has(index)) };
+	// An empty required span is valid. For a non-empty span, zero matches is
+	// ambiguous with the entire required history having been removed or changed;
+	// fail closed instead of treating it as an already-filtered no-op. Partial
+	// matches are equally unsafe because they can remove half a call/result batch.
+	if (requiredRetained.length > 0 && removed.size !== requiredRetained.length) {
+		return { ok: false, reason: "retained-context-mismatch" };
+	}
+
+	// Optional entries do not affect the strict parity decision. Search for each
+	// exact copy independently so a reordered custom entry can still be removed,
+	// but a provider-visible metadata/content rewrite remains untouched.
+	for (const expected of optionalRetained) {
+		const index = args.messages.findIndex(
+			(message, candidateIndex) =>
+				candidateIndex > summaryIndex && !removed.has(candidateIndex) && areEquivalentValues(message, expected),
+		);
+		if (index >= 0) removed.add(index);
+	}
+
+	return removed.size === 0
+		? { ok: true, messages: args.messages }
+		: { ok: true, messages: args.messages.filter((_, index) => !removed.has(index)) };
 }
 
 export function serializeLiveTailToResponsesInput<TApi extends Api>(args: {
@@ -360,6 +396,7 @@ function buildNativeReplaySegmentsInternal<TApi extends Api>(args: {
 	payload: ResponsesCompatibleRequestPayload;
 	branchEntries: readonly SessionEntry[];
 	compactionEntry: NativeCompactionEntry;
+	expectedInputProvenance: NativeCompactionInputProvenance;
 }): NativeReplayPayloadRewriteResult {
 	const boundaryIndex = findCompactionBoundaryIndex(args.branchEntries, args.compactionEntry.id);
 	if (boundaryIndex === undefined) {
@@ -396,6 +433,12 @@ function buildNativeReplaySegmentsInternal<TApi extends Api>(args: {
 		return {
 			ok: false,
 			reason: "invalid-compacted-window",
+		};
+	}
+	if (!hasVerifiedCompactionInputProvenance(details, args.expectedInputProvenance)) {
+		return {
+			ok: false,
+			reason: "unverified-compaction-input",
 		};
 	}
 
@@ -462,6 +505,7 @@ export function buildNativeReplaySegments<TApi extends Api>(args: {
 	payload: ResponsesCompatibleRequestPayload;
 	branchEntries: readonly SessionEntry[];
 	compactionEntry: NativeCompactionEntry;
+	expectedInputProvenance: NativeCompactionInputProvenance;
 }): NativeReplayPayloadRewriteResult {
 	return buildNativeReplaySegmentsInternal(args);
 }
@@ -471,6 +515,7 @@ export function rewriteResponsesPayloadWithNativeReplay<TApi extends Api>(args: 
 	payload: ResponsesCompatibleRequestPayload;
 	branchEntries: readonly SessionEntry[];
 	compactionEntry: NativeCompactionEntry;
+	expectedInputProvenance: NativeCompactionInputProvenance;
 }): NativeReplayPayloadRewriteResult {
 	return buildNativeReplaySegmentsInternal(args);
 }

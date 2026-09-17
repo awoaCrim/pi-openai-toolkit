@@ -130,6 +130,10 @@ pi --model my-gateway/gpt-5.6-luna
 
 如果希望使用 Responses 压缩路径，就保持远程上下文关闭。远程压缩 v2 会为符合条件的 Responses 模型保存并回放加密检查点。只有在压缩请求需要使用其他模型时，才设置 `compaction.remoteCompactModel`。
 
+不配置 `compaction.remoteV2ContextSource` 时，Remote V2 保持原来的 `"legacy"` 输入链路：首次压缩使用 Pi 当前的 session context（最后才回退到事件提供的 preparation），递归压缩使用原始 branch tail。这会保留既有行为，但如果其他扩展改写消息，可能与 provider 实际看到的上下文不同。
+
+将 `compaction.remoteV2ContextSource` 设为 `"pi-context-hook"` 可主动启用 Pi 0.85.1 runtime bridge，让 Remote V2 压缩使用与实时 provider 请求相同的有序 `context` hook 链。如果 Pi 无法提供这条公开 hook 路径，Remote V2 会取消压缩，而不会发送未投影的历史。只有检查点来源标记与当前设置一致时，才会继续回放。在两种模式之间切换后，必须重新创建 Remote V2 检查点；如果自定义状态必须保留在不透明检查点中，请关闭 Remote V2，或使用 Pi 原生压缩。
+
 ### 选择联网搜索路由
 
 联网搜索有三条互斥路由。可以设置一个全局默认路由，也可以按精确的 `provider/model-id` 覆盖：
@@ -207,6 +211,7 @@ standalone 路由属于实验性的 CPA/Codex 网关协议，不是稳定的公�
 | `compaction.contextManagement` | `"off"` | 设置为 `"remote"` 后启用 Codex 远程上下文。 |
 | `compaction.gatewayContextModels` | `[]` | 允许使用远程上下文的网关模型。 |
 | `compaction.remoteCompactModel` | 未设置 | 仅用于 v2 压缩请求的可选模型。 |
+| `compaction.remoteV2ContextSource` | `"legacy"` | 保留原来的原始 session/branch 输入路径。设置为 `"pi-context-hook"` 后才启用 Pi 的有序 context hook projection。检查点与模式绑定。 |
 | `compaction.contextReminderThresholdPercent` | `5` | 每个窗口触发一次提醒的剩余预算百分比。设置为 `0` 会关闭提醒和窗口耗尽兜底。 |
 | `webSearch.enabled` | `true` | 工具包联网搜索路由的总开关。设为 `false` 时不选择任何工具包路由。 |
 | `webSearch.defaultRoute` | 未设置 | 默认路由：`local`、`hosted` 或 `standalone-alpha`。未设置时保留旧版行为。 |
