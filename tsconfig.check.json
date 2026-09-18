@@ -12,10 +12,6 @@
     "typeRoots": ["./node_modules/@types"]
   },
   "include": [
-    "extensions/compaction.ts",
-    "extensions/web-search.ts",
-    "extensions/image-generation.ts",
-    "extensions/auto-mode.ts",
     "src/compact-client.ts",
     "src/compaction-projection.ts",
     "src/pi-context-hook.ts",

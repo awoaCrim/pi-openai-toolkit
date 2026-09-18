@@ -32,20 +32,7 @@
     "codex",
     "responses"
   ],
-  "pi": {
-    "extensions": [
-      "./extensions/compaction.ts",
-      "./extensions/web-search.ts",
-      "./extensions/image-generation.ts",
-      "./extensions/auto-mode.ts",
-      "./extensions/codex-astra.ts"
-    ]
-  },
   "files": [
-    "extensions/compaction.ts",
-    "extensions/web-search.ts",
-    "extensions/image-generation.ts",
-    "extensions/auto-mode.ts",
     "src/compact-client.ts",
     "src/compaction-projection.ts",
     "src/pi-context-hook.ts",
@@ -81,7 +68,6 @@
     "src/auto-mode/reviewer.ts",
     "src/auto-mode/classifier.ts",
     "src/auto-mode/types.ts",
-    "extensions/codex-astra.ts",
     "src/codex-astra/effort-planner.ts",
     "src/codex-astra/extension.ts",
     "src/model-scope.ts",

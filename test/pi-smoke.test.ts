@@ -5,17 +5,12 @@ import { join, resolve } from "node:path";
 const packageDir = resolve(import.meta.dir, "..");
 const runnerPath = join(import.meta.dir, "pi-smoke-runner.ts");
 const targets = [
-	["compaction entry", "compaction"],
 	["native post-tool compaction", "native_threshold"],
 	["Pi-disabled compaction", "native_disabled"],
 	["below-threshold continuation", "native_under"],
 	["manual compaction with auto disabled", "native_manual"],
 	["cooperative compaction cancellation", "native_cancel"],
 	["remote failure and native fallback", "native_failure"],
-	["Web Search entry", "web_search"],
-	["image generation entry", "image_generation"],
-	["auto mode entry", "auto_mode"],
-	["codex astra entry", "codex_astra"],
 	["complete package", "package"],
 ] as const;
 

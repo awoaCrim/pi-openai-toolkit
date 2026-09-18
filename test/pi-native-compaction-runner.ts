@@ -52,7 +52,7 @@ try {
 	const hooks: string[] = [];
 	const resourceLoader = new DefaultResourceLoader({
 		cwd: env.cwd, agentDir: env.agentDir, settingsManager,
-		additionalExtensionPaths: [join(packageDir, "extensions/compaction.ts")],
+		additionalExtensionPaths: [join(packageDir, "src/extension-runtime.ts")],
 		noSkills: true, noPromptTemplates: true, noContextFiles: true, noThemes: true,
 		systemPrompt: "Run the requested deterministic tools, then finish.",
 		extensionFactories: [(pi) => {

@@ -24,27 +24,17 @@ const identity = {
 afterEach(() => clearRequestContextCache());
 
 describe("Compaction and Web Search integration", () => {
-	test("package extension order is compaction before Web Search", () => {
+	test("package does not publish deleted extension entrypoints", () => {
 		const packageJson = JSON.parse(
 			fs.readFileSync(path.resolve(import.meta.dir, "../..", "package.json"), "utf8"),
-		) as { pi?: { extensions?: string[] } };
+		) as { pi?: { extensions?: string[] }; files?: string[] };
 
-		expect(packageJson.pi?.extensions).toEqual([
-			"./extensions/compaction.ts",
-			"./extensions/web-search.ts",
-			"./extensions/image-generation.ts",
-			"./extensions/auto-mode.ts",
-			"./extensions/codex-astra.ts",
-		]);
-		const extensions = packageJson.pi?.extensions ?? [];
-		expect(extensions.indexOf("./extensions/compaction.ts")).toBeLessThan(
-			extensions.indexOf("./extensions/web-search.ts"),
-		);
-		// Auto mode gates tool execution, so it must not sit between the two
-		// provider-payload hooks whose relative order is semantic.
-		expect(extensions.indexOf("./extensions/auto-mode.ts")).toBeGreaterThan(
-			extensions.indexOf("./extensions/web-search.ts"),
-		);
+		expect(packageJson.pi?.extensions ?? []).toEqual([]);
+		expect(packageJson.files ?? []).not.toContain("extensions/compaction.ts");
+		expect(packageJson.files ?? []).not.toContain("extensions/web-search.ts");
+		expect(packageJson.files ?? []).not.toContain("extensions/image-generation.ts");
+		expect(packageJson.files ?? []).not.toContain("extensions/auto-mode.ts");
+		expect(packageJson.files ?? []).not.toContain("extensions/codex-astra.ts");
 	});
 
 	test("compaction caches pre-search tools while the final live payload receives native search", () => {
