@@ -140,6 +140,10 @@ test("Pi 0.85.1 persists a sequential notes result before new_context and dedupl
 		]);
 		expect(markers).toHaveLength(2);
 		expect(markers[1]?.type === "custom_message" ? markers[1].details.contextManagement.windowNumber : undefined).toBe(1);
+		const rolloverContent = markers[1]?.type === "custom_message" ? String(markers[1].content) : "";
+		expect(rolloverContent).toContain("Context switch completed");
+		expect(rolloverContent).toContain("resume the active user task");
+		expect(rolloverContent).toContain("Do not immediately create another checkpoint or call new_context");
 	} finally {
 		session?.dispose();
 		await rm(cwd, { recursive: true, force: true });

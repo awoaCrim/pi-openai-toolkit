@@ -52,6 +52,7 @@ sequenceDiagram
   Toolkit->>Toolkit: verify successful notes write in this window
   Toolkit-->>Model: checkpoint receipt with the successful note path
   Toolkit-->>Pi: window marker appended, previous window trim scheduled
+  Note over Model: Context switch is complete; read the receipt once, then resume the active task
   Model->>Backend: next request with the new x-codex-window-id
   Pi->>Toolkit: session_before_compact
   Toolkit-->>Pi: no-summary boundary consuming the scheduled trim
@@ -62,6 +63,7 @@ State invariants the lifecycle code must keep honest:
 - The checkpoint gate verifies a successful `notes` `append_to_file` or `write_file` against the persisted session branch after the latest window boundary, so it survives restarts and forks. A response with `ok: false` or `success: false` is not successful, even when HTTP returns 200.
 - The gate uses the live session/branch identity from `ctx.sessionManager`; cached manager identity must not hide a valid current-window pair, and old or foreign-session evidence must remain rejected.
 - Every rollover carries the most recent successful checkpoint path in its handoff message. The optional `thread_hint` is supplemental; a hint failure must not erase the local receipt.
+- A successful rollover closes the pre-rollover checkpoint phase. The first turn in the new window reads the receipt once and resumes the active user task; it must not immediately create another checkpoint or call `new_context` as part of that handoff. A later checkpoint is only for a later rollover.
 - `new_context` has no force escape hatch: a persisted successful notes checkpoint in the current window is always required before rollover. The model must wait for the notes result to be persisted before retrying.
 - After a marker is accepted for sending, the manager keeps a session/window-anchored pending guard until that exact target marker is persisted or the session changes. A duplicate `new_context` during this persistence gap returns `started: false` and sends no second marker; projected/in-memory messages do not retire the guard.
 - Budget checks are skipped until the current window has produced its own assistant usage. Acting on the previous window's usage anchor would burn the once-per-window reminder on a false alarm.

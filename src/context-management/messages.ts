@@ -35,7 +35,7 @@ export const CONTEXT_WINDOW_COMPACTION_SUMMARY =
 	"[Pi Codex context-window boundary; no conversation summary was generated.]";
 
 const CONTEXT_WINDOW_GUIDANCE = `<context_window_guidance>
-Checkpoint the active request, known history IDs, decisions, progress, learnings and next steps in notes before new_context, and wait for that notes result to be persisted; only a persisted successful result in the current window unlocks the rollover, and no summary carries over. If new_context reports that a rollover is already scheduled, do not call it again in the same window. After rollover, read the checkpoint receipt note first when present; use a thread hint only as supplemental guidance. Use history only for a missing detail.
+Before calling new_context, checkpoint the active request, known history IDs, decisions, progress, learnings and next steps in notes, and wait for that result to be persisted; only a persisted successful result in the current window unlocks the rollover. If new_context reports that a rollover is already scheduled, do not call it again in the same window. When this message includes a completed context-switch handoff, follow that post-rollover section first instead of restarting the pre-rollover checkpoint steps. A thread hint is supplemental and must not replace the local checkpoint receipt. No conversation summary carries over, and history is only for missing details.
 </context_window_guidance>`;
 
 export function renderContextWindowMessage(
@@ -51,8 +51,11 @@ export function renderContextWindowMessage(
 	];
 	if (identity.previousWindowId) lines.push(`Previous context window id: ${identity.previousWindowId}`);
 	if (checkpoint) {
+		lines.push("Context switch completed. This is the first turn in the new context window.");
 		lines.push("Checkpoint successfully written:");
 		lines.push(`  Read this note before doing anything else with notes action "read_file": ${JSON.stringify(checkpoint.path)}`);
+		lines.push("After reading the checkpoint receipt, resume the active user task.");
+		lines.push("Do not immediately create another checkpoint or call new_context as part of this handoff. Only prepare a new checkpoint when a later context rollover is actually needed.");
 	}
 	if (threadHint) lines.push(threadHint);
 	lines.push("</context_window>");

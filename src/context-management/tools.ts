@@ -94,7 +94,8 @@ export function createContextManagementTools(
 		parameters: NEW_CONTEXT_PARAMETERS,
 		promptSnippet: "Start a new remote Codex context window without summarizing history.",
 		promptGuidelines: [
-			"Checkpoint active work in notes before calling new_context; no conversation summary carries over. Only a persisted successful notes append/write in the current window unlocks the rollover.",
+			"Before this new_context call, checkpoint active work in notes; only a persisted successful notes append/write in the current window unlocks this rollover, and no conversation summary carries over.",
+			"A successful new_context completes one context switch. In the next window, read the checkpoint receipt first when present, then resume the active user task; do not immediately create another checkpoint or call new_context as part of that handoff.",
 			"Wait for the notes tool result before calling new_context; an in-flight or failed write is not a checkpoint. If new_context reports that a rollover is already scheduled, do not call it again in the same window.",
 		],
 		executionMode: "sequential",
@@ -116,7 +117,12 @@ export function createContextManagementTools(
 				trimPreviousWindow: true,
 			});
 			return {
-				content: [{ type: "text", text: started ? "A new context window will start without summarizing conversation history." : "A new context window is already scheduled." }],
+				content: [{
+					type: "text",
+					text: started
+						? "Context switch scheduled successfully. In the next context window, read the checkpoint receipt first when present, then resume the active user task; do not immediately create another checkpoint or call new_context."
+						: "A new context window is already scheduled.",
+				}],
 				details: { started },
 			};
 		},
@@ -161,6 +167,7 @@ export function createContextManagementTools(
 		promptSnippet: "Read and checkpoint remote Codex notes across context windows.",
 		promptGuidelines: [
 			"Before calling new_context, checkpoint the current turn's active work (unfinished tasks, decisions, open questions, references) into notes with append_to_file or write_file so it survives the window change; wait for that result to be persisted before calling new_context.",
+			"After a successful new_context handoff, read the checkpoint receipt first when present and resume the active user task; do not immediately create another checkpoint or call new_context unless a later rollover is actually needed.",
 			"When a large task spans multiple context windows, keep a running note per line of work and read it at the start of each new window; append new state instead of replacing it unless the note is stale.",
 			"Prefer read_file or search_contents for looking things up; reserve write_file for explicit rewrite/clear and append_to_file for incremental state.",
 			"Keep note text concise and self-contained: it may be read later without the rest of the conversation, so include identifiers and verbatim key decisions, not hearsay summaries.",

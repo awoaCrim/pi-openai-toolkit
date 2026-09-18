@@ -107,6 +107,23 @@ test("new_context proceeds after a successful notes checkpoint", async () => {
 	const tools = createContextManagementTools(activePi, manager, () => true);
 	const result = await tools.newContext.execute("t1", {}, undefined, undefined, makeCtx(branch));
 	expect(result.details).toEqual({ started: true });
+	expect(result.content[0]?.text).toContain("Context switch scheduled successfully");
+	expect(result.content[0]?.text).toContain("resume the active user task");
+	expect(result.content[0]?.text).toContain("do not immediately create another checkpoint or call new_context");
+});
+
+test("new_context and notes guidance separate pre-rollover checkpointing from post-rollover resume", () => {
+	const manager = new CodexContextWindowManager(async () => undefined);
+	const tools = createContextManagementTools(activePi, manager, () => true);
+	const newContextGuidance = tools.newContext.promptGuidelines?.join(" ") ?? "";
+	const notesGuidance = tools.notes.promptGuidelines?.join(" ") ?? "";
+
+	expect(newContextGuidance).toContain("Before this new_context call");
+	expect(newContextGuidance).toContain("A successful new_context completes one context switch");
+	expect(newContextGuidance).toContain("do not immediately create another checkpoint or call new_context");
+	expect(notesGuidance).toContain("Before calling new_context");
+	expect(notesGuidance).toContain("After a successful new_context handoff");
+	expect(notesGuidance).toContain("unless a later rollover is actually needed");
 });
 
 test("new_context cannot bypass the checkpoint gate with an obsolete force flag", async () => {

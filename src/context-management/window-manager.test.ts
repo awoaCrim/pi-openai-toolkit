@@ -443,10 +443,14 @@ test("rollover carries a checkpoint receipt when the thread hint is unavailable"
 	manager.restore(entries, "session-1");
 	const ctx = fakeContext(entries);
 	await expect(manager.startNewWindow(fakePi(sent), ctx, { triggerTurn: true, trimPreviousWindow: true })).resolves.toBe(true);
+	expect(sent).toHaveLength(1);
 	const content = String(sent[0]?.content);
+	expect(content).toContain("Context switch completed");
 	expect(content).toContain("Checkpoint successfully written:");
 	expect(content).toContain(JSON.stringify("/active-task.md"));
 	expect(content).toContain("before doing anything else");
+	expect(content).toContain("resume the active user task");
+	expect(content).toContain("Do not immediately create another checkpoint or call new_context");
 });
 
 test("rollover carries a checkpoint receipt when thread hint response is rejected", async () => {
@@ -460,9 +464,12 @@ test("rollover carries a checkpoint receipt when thread hint response is rejecte
 	manager.restore(entries, "session-1");
 	const ctx = fakeHistoryContext(entries);
 	await expect(manager.startNewWindow(fakePi(sent), ctx, { triggerTurn: true, trimPreviousWindow: true })).resolves.toBe(true);
+	expect(sent).toHaveLength(1);
 	const content = String(sent[0]?.content);
+	expect(content).toContain("Context switch completed");
 	expect(content).toContain("Checkpoint successfully written:");
 	expect(content).toContain(JSON.stringify("/active-task.md"));
+	expect(content).toContain("resume the active user task");
 });
 
 test("manager exposes the checkpoint gate for the current session branch", () => {
