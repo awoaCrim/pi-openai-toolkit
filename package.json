@@ -1,12 +1,12 @@
 {
   "name": "pi-openai-toolkit",
-  "version": "0.14.5",
+  "version": "0.14.9",
   "private": false,
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
   },
-  "description": "OpenAI toolkit for Pi: Codex Remote Context windows, remote compaction v2, hosted Web Search, image gen, auto mode.",
+  "description": "OpenAI toolkit for Pi: Codex Remote Context windows, remote compaction v2, routed Web Search, image gen, auto mode.",
   "author": "awoaCrim and contributors",
   "license": "MIT",
   "repository": {
@@ -32,21 +32,10 @@
     "codex",
     "responses"
   ],
-  "pi": {
-    "extensions": [
-      "./extensions/compaction.ts",
-      "./extensions/web-search.ts",
-      "./extensions/image-generation.ts",
-      "./extensions/auto-mode.ts",
-      "./extensions/codex-astra.ts"
-    ]
-  },
   "files": [
-    "extensions/compaction.ts",
-    "extensions/web-search.ts",
-    "extensions/image-generation.ts",
-    "extensions/auto-mode.ts",
     "src/compact-client.ts",
+    "src/compaction-projection.ts",
+    "src/pi-context-hook.ts",
     "src/config.ts",
     "src/debug.ts",
     "src/details-store.ts",
@@ -72,13 +61,13 @@
     "src/image-generation/service.ts",
     "src/image-generation/types.ts",
     "src/auto-mode/extension.ts",
+    "src/auto-mode/tool-review-tui.ts",
     "src/auto-mode/policy.ts",
     "src/auto-mode/prompt.ts",
     "src/auto-mode/transcript.ts",
     "src/auto-mode/reviewer.ts",
     "src/auto-mode/classifier.ts",
     "src/auto-mode/types.ts",
-    "extensions/codex-astra.ts",
     "src/codex-astra/effort-planner.ts",
     "src/codex-astra/extension.ts",
     "src/model-scope.ts",
@@ -92,6 +81,7 @@
     "src/serializer.ts",
     "src/supported-environment.ts",
     "src/types.ts",
+    "src/web-search/alpha-client.ts",
     "src/web-search/extension.ts",
     "src/web-search/payload.ts",
     "src/web-search/prompt.ts",

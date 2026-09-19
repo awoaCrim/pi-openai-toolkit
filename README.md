@@ -13,7 +13,7 @@ Add Codex context windows, Responses compaction, hosted tools, and reviewed tool
 | --- | --- |
 | Codex Remote Context | Start a new context window and retrieve earlier windows with `history`. |
 | Remote Compaction v2 | Continue an eligible Responses session with an encrypted server checkpoint. |
-| Hosted Web Search | Give selected models OpenAI's hosted search tool. |
+| Web Search routes | Choose local `pi-web-access`, hosted Responses `web_search`, or CPA standalone `web.run` per exact model route. |
 | Image generation | Generate images or edit explicitly supplied local reference images. |
 | Tool-call review | Ask a reviewer model whether selected tool calls may run. |
 
@@ -31,7 +31,7 @@ pi install npm:pi-openai-toolkit
 
 Use `--local` to install it in the current project.
 
-Installing the package alone does not enable every feature. With no extension config, compaction is enabled but Remote Context is off, the Web Search model list is empty, image generation is disabled, and Auto Mode has no allowed models or reviewer.
+Installing the package alone does not enable every feature. With no extension config, compaction is enabled but Remote Context is off, Web Search has no toolkit-selected route, image generation is disabled, and Auto Mode has no allowed models or reviewer.
 
 The extension config file is:
 
@@ -130,19 +130,44 @@ Earlier windows remain available through `history`, but they are not all automat
 
 Leave Remote Context off when you want the Responses compaction path instead. Remote Compaction v2 stores and replays an encrypted checkpoint for eligible Responses models. Set `compaction.remoteCompactModel` only when the compaction request should use a separate model.
 
-### Enable hosted Web Search
+When `compaction.remoteV2ContextSource` is omitted, Remote V2 keeps the original `"legacy"` input chain: first compaction uses Pi's current session context (or the supplied preparation as a last resort), and recursive compaction uses the raw branch tail. This preserves existing behavior, but can diverge from provider-visible context when other extensions rewrite messages.
 
-List exact model specifications under `webSearch.models`:
+Set `compaction.remoteV2ContextSource` to `"pi-context-hook"` to opt into the Pi 0.85.1 runtime bridge. The toolkit then uses the same ordered `context` hook chain as the live provider request. If Pi cannot expose that public hook path, Remote V2 cancels instead of sending an unprojected history. Checkpoint replay is accepted only when its source marker matches the current setting. Switching between the two modes requires a new Remote V2 checkpoint; disable Remote V2 or use Pi's native compaction when custom-only state must survive inside the opaque checkpoint.
+
+### Choose a Web Search route
+
+Web Search has three mutually exclusive routes. Configure one global default and, when needed, exact `provider/model-id` overrides:
 
 ```json
 {
   "webSearch": {
-    "models": ["my-gateway/gpt-5.6-luna"]
+    "enabled": true,
+    "defaultRoute": "hosted",
+    "routes": {
+      "uwoacrimson/gpt-6-astra": "standalone-alpha",
+      "my-gateway/gpt-5.6-luna": "local"
+    }
   }
 }
 ```
 
-For those models, the extension replaces Pi's local `web_search` tool with OpenAI's hosted Responses search tool.
+Route selection is exact and deterministic: `routes[provider/model-id]` wins over `defaultRoute`; `defaultRoute` wins over the legacy `models` list. There is no wildcard, fuzzy model matching, capability guessing, fallback, or retry between routes. Invalid route values/keys are ignored with warnings rather than guessed, and overlapping new/legacy fields produce migration warnings. `enabled: false` releases toolkit ownership and disables all three toolkit-selected paths.
+
+- **`local`** keeps the already-installed `pi-web-access` `web_search` tool. The toolkit does not activate it when it was not active, and it does not add a hosted provider tool or `web.run`.
+- **`hosted`** removes the local function named `web_search` and injects the native Responses `{ "type": "web_search" }` tool plus source annotations. The legacy configuration remains valid:
+
+  ```json
+  {
+    "webSearch": {
+      "models": ["my-gateway/gpt-5.6-luna"]
+    }
+  }
+  ```
+
+  With no new route fields, only models in this exact list and the existing Responses-family APIs (`openai-responses` or `openai-codex-responses`) use hosted search.
+- **`standalone-alpha`** exposes one sequential `web.run` tool and sends one isolated `POST` request to the provider-relative `/alpha/search` endpoint. A base URL such as `https://gateway.example/v1` therefore receives `https://gateway.example/v1/alpha/search`, not a Responses endpoint. Supported command families are `search_query`, `image_query`, `open`, `click`, `find`, `screenshot`, `finance`, `weather`, `sports`, and `time`; `response_length` controls the requested result size.
+
+The standalone route is an experimental CPA/Codex gateway protocol, not a stable public OpenAI Responses endpoint. The gateway/provider must expose `/alpha/search`, enable its `alpha-search` capability, and support standalone web search (Codex providers commonly expose this as `supports_standalone_web_search = true`). The request reuses Pi's current model, authentication, provider headers, session identity, and Codex/gateway affinity; it does not change the active model. The MVP sends the bounded command envelope rather than the full conversation transcript, relies on provider session/reference handling for `ref_id` follow-ups, makes at most one request per tool call, and fails closed on invalid configuration, unavailable routes, cancellation, timeout, non-2xx, malformed, or oversized responses.
 
 ### Generate an image
 
@@ -174,7 +199,7 @@ Allow a model and reviewer in `autoMode`:
 }
 ```
 
-Use `/auto on` in the session. The default `side-effect` gate reviews `bash`, `write`, `edit`, and configured extra tools. Set `gate` to `"all"` when every tool call needs review. A reviewer timeout does not approve a call.
+Use `/auto on` in the session, or start Pi with `--auto`. The TUI shows an activation notice and temporarily changes the working indicator to `Auto mode: reviewing <tool>` while a gated call is being reviewed; the footer keeps the active gate visible. On Pi versions that expose the compatible tool renderer, each tool block in Auto Mode also gets a bottom line: reviewed calls show states such as `allowed by reviewer · low risk · authorization medium` or `denied · <reason>`, while calls outside the configured gate show `not reviewed · outside the configured gate`. If that renderer seam is unavailable, the extension warns once and keeps the footer-only status. The default `side-effect` gate reviews `bash`, `write`, `edit`, and configured extra tools. Set `gate` to `"all"` when every tool call needs review. A reviewer timeout does not approve a call.
 
 ## Common configuration
 
@@ -186,8 +211,12 @@ The config file is `~/.pi/agent/extensions/pi-openai-toolkit/config.json`. Unkno
 | `compaction.contextManagement` | `"off"` | Enables Codex Remote Context when set to `"remote"`. |
 | `compaction.gatewayContextModels` | `[]` | Gateway models allowed to use Remote Context. |
 | `compaction.remoteCompactModel` | unset | Optional model used only for a v2 compaction request. |
+| `compaction.remoteV2ContextSource` | `"legacy"` | Preserve the original raw session/branch input path. Set `"pi-context-hook"` to opt into Pi's ordered context-hook projection. Checkpoints are mode-specific. |
 | `compaction.contextReminderThresholdPercent` | `5` | Remaining budget percentage for the once-per-window reminder. `0` disables the reminder and exhausted-window fallback. |
-| `webSearch.models` | `[]` | Models that receive hosted Web Search. |
+| `webSearch.enabled` | `true` | Total switch for the toolkit's Web Search route selection. `false` selects no toolkit route. |
+| `webSearch.defaultRoute` | unset | Default route: `local`, `hosted`, or `standalone-alpha`. Unset preserves legacy behavior. |
+| `webSearch.routes` | unset | Exact `provider/model-id` to route overrides. Exact entries take precedence over `defaultRoute`. |
+| `webSearch.models` | `[]` | Legacy exact allowlist; without the new route fields, listed Responses-family models receive hosted Web Search. |
 | `imageGeneration.enabled` | `false` | Enables `openai_generate_image`. |
 | `imageGeneration.models` | `["gpt-image-2.5"]` | Bare image-generation model IDs; the first entry is the default. |
 | `autoMode.models` | `[]` | Models allowed to use Auto Mode. |

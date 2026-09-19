@@ -14,7 +14,7 @@ import {
 	type RedactOptions,
 } from "./types";
 
-const CRITICAL_KEY_RE = /(authorization|api[-_]?key|token|credential|oauth|auth|account[-_]?id|encrypted[_-]?(content|output))/i;
+const CRITICAL_KEY_RE = /(authorization|api[-_]?key|token|credential|oauth|auth|account[-_]?id|cookie|set[-_]?cookie|response(?:text)?|completed|encrypted[_-]?(content|output))/i;
 const SENSITIVE_KEY_RE = /(authorization|api[-_]?key|token|secret|password|cookie|set-cookie|signature|credential|oauth|auth|account[-_]?id|encrypted[_-]?(content|output))/i;
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._\-+/=]+/gi;
 const OPENAI_KEY_RE = /\bsk-[A-Za-z0-9\-_]+\b/g;

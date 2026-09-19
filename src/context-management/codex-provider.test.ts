@@ -27,6 +27,9 @@ function context(
 		modelRegistry: {
 			getApiKeyAndHeaders: async () => auth,
 		},
+		sessionManager: {
+			getSessionId: () => "test-session",
+		},
 	} as never;
 }
 
@@ -75,7 +78,11 @@ test("resolves an allowlisted Astra gateway model without native Codex account d
 		context(gatewayModel, {
 			ok: true,
 			apiKey: "newapi-key",
-			headers: { "ChatGPT-Account-ID": "must-not-forward", Cookie: "must-not-forward" },
+			headers: {
+				"ChatGPT-Account-ID": "must-not-forward",
+				Cookie: "must-not-forward",
+				"X-Management-Key": "must-not-forward",
+			},
 		}),
 		gatewayModel,
 		["uwoacrimson/gpt-6-astra"],
@@ -88,6 +95,7 @@ test("resolves an allowlisted Astra gateway model without native Codex account d
 		expect(result.provider.model).toBe("gpt-6-astra");
 		expect(result.provider.headers).not.toHaveProperty("Cookie");
 		expect(result.provider.headers).not.toHaveProperty("ChatGPT-Account-ID");
+		expect(result.provider.headers).not.toHaveProperty("X-Management-Key");
 	}
 
 	// Gateway coverage is allowlist-driven: an unlisted SKU stays outside
@@ -109,6 +117,15 @@ test("resolves an allowlisted Astra gateway model without native Codex account d
 	// An empty allowlist covers no gateway models at all, including Astra.
 	const noAllowlist = await resolveCodexContextProvider(context(gatewayModel, { ok: true, apiKey: "newapi-key" }), gatewayModel, []);
 	expect(noAllowlist).toMatchObject({ ok: false, reason: "unsupported-model" });
+});
+
+test("rejects gateway context when the Pi session has no stable identity", async () => {
+	const gatewayModel = model({ provider: "my-gateway", api: "openai-responses", id: "gpt-5.6-luna", baseUrl: "https://newapi.example/v1" });
+	const result = await resolveCodexContextProvider({
+		model: gatewayModel,
+		modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "newapi-key" }) },
+	} as never, gatewayModel, ["my-gateway/gpt-5.6-luna"]);
+	expect(result).toMatchObject({ ok: false, reason: "missing-session-id" });
 });
 
 test("preserves the bare gateway model and affinity headers", () => {

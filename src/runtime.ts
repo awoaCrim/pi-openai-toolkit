@@ -1,11 +1,17 @@
 import type { Api, Model, ProviderHeaders } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { isExactModelAllowed } from "./model-scope";
+import {
+	CODEX_AFFINITY_SCOPE,
+	type CodexAffinity,
+} from "./responses-headers";
 import { RESPONSES_COMPACT_CAPABLE_APIS } from "./types";
 
 const OPENAI_RESPONSES_PATH = "responses";
 const CODEX_RESPONSES_PATH = "codex/responses";
 const OPENAI_COMPACT_PATH = "responses/compact";
 const CODEX_COMPACT_PATH = "codex/responses/compact";
+const ALPHA_SEARCH_PATH = "alpha/search";
 
 export type ResponsesApi = (typeof RESPONSES_COMPACT_CAPABLE_APIS)[number];
 
@@ -24,6 +30,7 @@ export type NativeCompactionFailureReason =
 	| "model-not-found"
 	| "unsupported-api"
 	| "missing-base-url"
+	| "missing-session-id"
 	| "missing-api-key"
 	| "auth-resolution-failed"
 	| "unsupported-payload"
@@ -34,6 +41,8 @@ export type NativeCompactionSupportOptions = {
 	enabled?: boolean;
 	/** Which Responses APIs should use the compact endpoint; defaults to all capable APIs. */
 	responsesApis?: readonly string[];
+	/** Exact provider/model keys whose Responses traffic carries gateway Codex affinity metadata. */
+	codexGatewayModels?: readonly string[];
 };
 
 export type ResponsesSupportOptions = NativeCompactionSupportOptions;
@@ -60,6 +69,8 @@ export type ResponsesRuntime = {
 	 * requests used or the backend treats them as a new conversation.
 	 */
 	sessionId?: string;
+	/** Opt-in gateway Codex routing metadata for synthetic Responses/compact requests. */
+	codexAffinity?: CodexAffinity;
 	currentModel: RuntimeModel;
 };
 
@@ -130,6 +141,19 @@ function normalizeConfiguredApis(values: readonly string[] | undefined): Set<str
 	return new Set(values.map((value) => value.trim()).filter((value) => value.length > 0));
 }
 
+function resolveCodexGatewayAffinity(
+	model: RuntimeModel,
+	gatewayModels: readonly string[] | undefined,
+): CodexAffinity | undefined {
+	if (model.api !== "openai-responses" || !isExactModelAllowed(model, gatewayModels ?? [])) {
+		return undefined;
+	}
+	return {
+		model: model.id,
+		scope: CODEX_AFFINITY_SCOPE,
+	};
+}
+
 /** Parse "provider/model-id" (model ids may themselves contain slashes). */
 export function parseModelSpec(spec: string): ParsedModelSpec | undefined {
 	const trimmed = spec.trim();
@@ -190,6 +214,57 @@ export function buildCompactUrl(baseUrl: string, api: ResponsesCompactApi): stri
 
 export function buildCompactPath(api: ResponsesCompactApi): string {
 	return api === "openai-codex-responses" ? CODEX_COMPACT_PATH : OPENAI_COMPACT_PATH;
+}
+
+/**
+ * Build the provider-relative standalone-search endpoint. This deliberately
+ * rejects a full Responses endpoint so an already-resolved URL cannot become
+ * `/responses/alpha/search` or `/codex/responses/alpha/search` by accident.
+ */
+export function buildAlphaSearchUrl(baseUrl: string): string | undefined {
+	const normalized = normalizeBaseUrl(baseUrl);
+	if (!normalized) return undefined;
+
+	let parsed: URL;
+	try {
+		parsed = new URL(normalized);
+	} catch {
+		return undefined;
+	}
+	if (
+		(parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+		parsed.username ||
+		parsed.password ||
+		parsed.search ||
+		parsed.hash
+	) {
+		return undefined;
+	}
+
+	const pathname = parsed.pathname.replace(/\/+$/, "");
+	if (
+		pathname.endsWith("/responses/alpha/search") ||
+		pathname.endsWith("/codex/responses/alpha/search") ||
+		pathname.endsWith("/responses/compact/alpha/search") ||
+		pathname.endsWith("/codex/responses/compact/alpha/search")
+	) {
+		return undefined;
+	}
+	if (pathname.endsWith("/alpha/search")) {
+		parsed.pathname = pathname;
+		return parsed.toString();
+	}
+	if (
+		pathname.endsWith("/responses") ||
+		pathname.endsWith("/codex/responses") ||
+		pathname.endsWith("/responses/compact") ||
+		pathname.endsWith("/codex/responses/compact")
+	) {
+		return undefined;
+	}
+
+	parsed.pathname = `${pathname}/${ALPHA_SEARCH_PATH}`.replace(/^\/\//, "/");
+	return parsed.toString();
 }
 
 async function resolveRequestAuth(ctx: ExtensionContext, model: RuntimeModel): Promise<ResolvedRequestAuth> {
@@ -329,6 +404,17 @@ async function resolveNativeCompactionEnvironmentForModel(
 		};
 	}
 
+	const codexAffinity = resolveCodexGatewayAffinity(currentModel, options.codexGatewayModels);
+	const sessionId = resolveRuntimeSessionId(ctx);
+	if (codexAffinity && !sessionId) {
+		return {
+			ok: false,
+			reason: "missing-session-id",
+			...descriptor,
+			baseUrl,
+		};
+	}
+
 	if (!auth.apiKey) {
 		return {
 			ok: false,
@@ -351,7 +437,8 @@ async function resolveNativeCompactionEnvironmentForModel(
 			responsesUrl: buildResponsesUrl(baseUrl, descriptor.api),
 			compactPath: buildCompactPath(descriptor.api),
 			compactUrl: buildCompactUrl(baseUrl, descriptor.api),
-			sessionId: resolveRuntimeSessionId(ctx),
+			sessionId,
+			codexAffinity,
 			payload: requestPayload,
 			currentModel,
 		},
@@ -378,6 +465,7 @@ export async function resolveResponsesEnvironment(
 			responsesPath: runtime.responsesPath,
 			responsesUrl: runtime.responsesUrl,
 			sessionId: runtime.sessionId,
+			codexAffinity: runtime.codexAffinity,
 			currentModel: runtime.currentModel,
 		},
 	};

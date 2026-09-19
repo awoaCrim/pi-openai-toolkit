@@ -43,6 +43,11 @@ import {
 	MAX_REVIEW_REASON_CHARS,
 	type ReviewOutcome,
 } from "./types";
+import {
+	installToolReviewRenderer,
+	type ToolReviewDisplayState,
+	type ToolReviewRendererBridge,
+} from "./tool-review-tui";
 
 const registeredApis = new WeakSet<object>();
 
@@ -133,10 +138,13 @@ export function registerAutoModeExtension(
 	pi: ExtensionAPI,
 	loadConfig: typeof loadToolkitConfig = loadToolkitConfig,
 	requestReview: typeof requestToolReview = requestToolReview,
+	createToolReviewRenderer: () => ToolReviewRendererBridge = installToolReviewRenderer,
 ): void {
 	if (registeredApis.has(pi)) return;
 	registeredApis.add(pi);
 
+	const toolReviewRenderer = createToolReviewRenderer();
+	let toolReviewRendererWarningShown = false;
 	const runtime: AutoModeRuntimeState = createRuntimeState(DEFAULT_AUTO_MODE_CONFIG);
 	const breaker: RejectionBreakerState = createRejectionBreaker();
 	const tracker: ScoreTracker = createScoreTracker();
@@ -144,12 +152,32 @@ export function registerAutoModeExtension(
 	let callIndex = 0;
 	let scoringInFlight = false;
 
-	function updateStatus(ctx: ExtensionContext): void {
+	function updateStatus(ctx: ExtensionContext, reviewingTool?: string): void {
 		if (!ctx.hasUI) return;
+		if (ctx.mode === "tui") {
+			toolReviewRenderer.setTheme(ctx.ui.theme);
+			if (reviewingTool) ctx.ui.setWorkingMessage(`Auto mode: reviewing ${reviewingTool}`);
+		}
+		const rendererSuffix = toolReviewRenderer.supported ? "" : " (footer only)";
 		ctx.ui.setStatus(
 			AUTO_MODE_STATUS_KEY,
-			runtime.engaged ? `auto-review: ${describeGate(runtime)}` : undefined,
+			runtime.engaged
+				? reviewingTool
+					? `auto-review: reviewing ${reviewingTool}${rendererSuffix}`
+					: `auto-review: ${describeGate(runtime)}${rendererSuffix}`
+				: undefined,
 		);
+	}
+
+	function setReviewDisplay(ctx: ExtensionContext, toolCallId: string, state: ToolReviewDisplayState): void {
+		if (ctx.mode === "tui") toolReviewRenderer.setTheme(ctx.ui.theme);
+		toolReviewRenderer.setState(toolCallId, state);
+	}
+
+	function clearReviewActivity(ctx: ExtensionContext): void {
+		if (!ctx.hasUI) return;
+		if (ctx.mode === "tui") ctx.ui.setWorkingMessage(undefined);
+		updateStatus(ctx);
 	}
 
 	function recordDecision(data: Omit<AutoModeDecisionRecord, "timestamp">): void {
@@ -390,14 +418,30 @@ export function registerAutoModeExtension(
 		},
 	});
 
-	pi.on("session_start", (_event, ctx) => {
+	pi.on("session_start", (event, ctx) => {
 		const { config } = loadConfig();
+		toolReviewRenderer.clear();
+		if (
+			!toolReviewRenderer.supported &&
+			!toolReviewRendererWarningShown &&
+			ctx.hasUI &&
+			ctx.mode === "tui"
+		) {
+			ctx.ui.notify(
+				"Per-tool auto-review display is unavailable in this Pi version; using the footer status instead.",
+				"warning",
+			);
+			toolReviewRendererWarningShown = true;
+		}
 		setGateOverride(runtime, config.autoMode, undefined);
 		applyConfiguredGate(runtime, config.autoMode);
 		resetScoreTracker(tracker);
 		resetRejectionBreaker(breaker);
 		callIndex = 0;
-		if (pi.getFlag(AUTO_MODE_FLAG)) engage(ctx, config.autoMode);
+		const startedFromFlag = pi.getFlag(AUTO_MODE_FLAG) === true && engage(ctx, config.autoMode);
+		if (startedFromFlag && event.reason === "startup" && ctx.mode === "tui") {
+			ctx.ui.notify(`Auto mode on. Reviewing: ${describeGate(runtime)}`, "info");
+		}
 		updateStatus(ctx);
 	});
 
@@ -436,7 +480,15 @@ export function registerAutoModeExtension(
 			disengage(ctx);
 			return undefined;
 		}
-		if (!shouldReviewTool(event.toolName, runtime)) return undefined;
+		if (!shouldReviewTool(event.toolName, runtime)) {
+			setReviewDisplay(ctx, event.toolCallId, {
+				phase: "skipped",
+				toolName: event.toolName,
+				detail: "outside the configured gate",
+			});
+			updateStatus(ctx);
+			return undefined;
+		}
 
 		const pending = {
 			toolName: event.toolName,
@@ -456,6 +508,13 @@ export function registerAutoModeExtension(
 				maxLag: auto.classifier.maxLag,
 			});
 			if (fast.eligible) {
+				setReviewDisplay(ctx, pending.toolCallId, {
+					phase: "allowed",
+					toolName: pending.toolName,
+					source: "classifier",
+					detail: "low-risk trajectory pre-score",
+				});
+				updateStatus(ctx);
 				recordDecision({
 					toolName: pending.toolName,
 					toolCallId: pending.toolCallId,
@@ -472,26 +531,48 @@ export function registerAutoModeExtension(
 		const entries = ctx.sessionManager.buildContextEntries();
 		const transcript = auto.transcript ? transcriptFromEntries(entries).text : undefined;
 
-		const outcome = await requestReview({
-			registry: reviewerRegistry(ctx),
-			reviewerModelSpec: pending.reviewerModelSpec,
-			toolName: event.toolName,
-			toolInput: event.input,
-			transcript,
-			cwd: ctx.cwd,
-			timeoutMs: auto.timeoutMs,
-			signal: ctx.signal,
-			evidenceTools: auto.evidenceTools ? evidenceToolsFor(ctx.cwd) : undefined,
-			maxEvidenceRounds: auto.maxEvidenceRounds,
-		});
+		setReviewDisplay(ctx, pending.toolCallId, { phase: "reviewing", toolName: pending.toolName });
+		updateStatus(ctx, event.toolName);
+		let outcome: ReviewOutcome;
+		try {
+			outcome = await requestReview({
+				registry: reviewerRegistry(ctx),
+				reviewerModelSpec: pending.reviewerModelSpec,
+				toolName: event.toolName,
+				toolInput: event.input,
+				transcript,
+				cwd: ctx.cwd,
+				timeoutMs: auto.timeoutMs,
+				signal: ctx.signal,
+				evidenceTools: auto.evidenceTools ? evidenceToolsFor(ctx.cwd) : undefined,
+				maxEvidenceRounds: auto.maxEvidenceRounds,
+			});
+		} finally {
+			clearReviewActivity(ctx);
+		}
 
 		const decision = evaluateOutcome(outcome, pending, ctx, auto.circuitBreaker);
 		if (decision.kind === "ask-human") {
+			setReviewDisplay(ctx, pending.toolCallId, { phase: "awaiting-user", toolName: pending.toolName });
+			updateStatus(ctx);
 			const confirmed = await ctx.ui.confirm(
 				"Auto-mode review unavailable",
 				`${decision.reason}\n\nAllow ${event.toolName} to run?`,
 			);
 			if (confirmed) recordNonDenial(breaker);
+			setReviewDisplay(
+				ctx,
+				pending.toolCallId,
+				confirmed
+					? {
+							phase: "allowed",
+							toolName: pending.toolName,
+						source: "human",
+							detail: `review unavailable · ${outcome.kind === "unavailable" ? outcome.cause : "manual confirmation"}`,
+					  }
+					: { phase: "blocked", toolName: pending.toolName, detail: "user declined" },
+			);
+			updateStatus(ctx);
 			recordDecision({
 				toolName: event.toolName,
 				toolCallId: event.toolCallId,
@@ -505,10 +586,38 @@ export function registerAutoModeExtension(
 				: { block: true, reason: "Blocked by user after auto-mode review could not complete." };
 		}
 
+		if (decision.kind === "block") {
+			setReviewDisplay(
+				ctx,
+				pending.toolCallId,
+				outcome.kind === "deny"
+					? {
+							phase: "denied",
+							toolName: pending.toolName,
+							detail: `${outcome.verdict.riskLevel} risk · ${outcome.verdict.rationale}`,
+					  }
+					: {
+							phase: "blocked",
+							toolName: pending.toolName,
+							detail:
+								outcome.kind === "unavailable" ? `${outcome.cause} · ${outcome.reason}` : decision.reason,
+					  },
+			);
+			updateStatus(ctx);
+			return { block: true, reason: decision.reason, ...(decision.terminate ? { terminate: true } : {}) };
+		}
+
+		setReviewDisplay(ctx, pending.toolCallId, {
+			phase: "allowed",
+			toolName: pending.toolName,
+			source: "reviewer",
+			detail:
+				outcome.kind === "allow"
+					? `${outcome.verdict.riskLevel} risk · authorization ${outcome.verdict.userAuthorization}`
+					: "review completed",
+		});
 		updateStatus(ctx);
-		return decision.kind === "block"
-			? { block: true, reason: decision.reason, ...(decision.terminate ? { terminate: true } : {}) }
-			: undefined;
+		return undefined;
 	});
 
 	pi.on("tool_result", (event, ctx) => {

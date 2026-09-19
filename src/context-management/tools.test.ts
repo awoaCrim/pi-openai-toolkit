@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createContextManagementTools, NEW_CONTEXT_CHECKPOINT_REQUIRED_MESSAGE } from "./tools";
+import {
+	createContextManagementTools,
+	NEW_CONTEXT_CHECKPOINT_REQUIRED_MESSAGE,
+	NEW_CONTEXT_PARAMETERS,
+} from "./tools";
 import { CodexContextWindowManager } from "./window-manager";
 import { CODEX_CONTEXT_WINDOW_MESSAGE_TYPE } from "./messages";
 
@@ -44,6 +48,34 @@ function makeCtx(branch: readonly unknown[]): ExtensionContext {
 
 const activePi = { sendMessage: () => undefined } as unknown as ExtensionAPI;
 
+test("new_context is idempotent while the first rollover marker is not persisted", async () => {
+	const branch = [
+		{
+			type: "custom_message", id: "entry-b", parentId: null, timestamp: "2026-09-07T00:00:00.000Z",
+			customType: CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, content: "window", display: true,
+			details: boundaryDetails("w-current"),
+		},
+		notesCallEntry,
+		notesOkEntry,
+	] as never[];
+	const sent: Array<Record<string, unknown>> = [];
+	const pi = {
+		sendMessage: (message: Record<string, unknown>) => { sent.push(message); },
+	} as unknown as ExtensionAPI;
+	const manager = new CodexContextWindowManager(async () => undefined);
+	manager.restore(branch, "session-1");
+	const tools = createContextManagementTools(pi, manager, () => true);
+	const ctx = makeCtx(branch);
+
+	const first = await tools.newContext.execute("t1", {}, undefined, undefined, ctx);
+	const second = await tools.newContext.execute("t2", {}, undefined, undefined, ctx);
+
+	expect(first.details).toEqual({ started: true });
+	expect(second.details).toEqual({ started: false });
+	expect(second.content[0]?.text).toContain("already scheduled");
+	expect(sent).toHaveLength(1);
+});
+
 test("new_context refuses rollover without a successful notes checkpoint", async () => {
 	const branch = [
 		{
@@ -75,9 +107,26 @@ test("new_context proceeds after a successful notes checkpoint", async () => {
 	const tools = createContextManagementTools(activePi, manager, () => true);
 	const result = await tools.newContext.execute("t1", {}, undefined, undefined, makeCtx(branch));
 	expect(result.details).toEqual({ started: true });
+	expect(result.content[0]?.text).toContain("Context switch scheduled successfully");
+	expect(result.content[0]?.text).toContain("resume the active user task");
+	expect(result.content[0]?.text).toContain("do not immediately create another checkpoint or call new_context");
 });
 
-test("new_context force bypasses the checkpoint gate", async () => {
+test("new_context and notes guidance separate pre-rollover checkpointing from post-rollover resume", () => {
+	const manager = new CodexContextWindowManager(async () => undefined);
+	const tools = createContextManagementTools(activePi, manager, () => true);
+	const newContextGuidance = tools.newContext.promptGuidelines?.join(" ") ?? "";
+	const notesGuidance = tools.notes.promptGuidelines?.join(" ") ?? "";
+
+	expect(newContextGuidance).toContain("Before this new_context call");
+	expect(newContextGuidance).toContain("A successful new_context completes one context switch");
+	expect(newContextGuidance).toContain("do not immediately create another checkpoint or call new_context");
+	expect(notesGuidance).toContain("Before calling new_context");
+	expect(notesGuidance).toContain("After a successful new_context handoff");
+	expect(notesGuidance).toContain("unless a later rollover is actually needed");
+});
+
+test("new_context cannot bypass the checkpoint gate with an obsolete force flag", async () => {
 	const branch = [
 		{
 			type: "custom_message", id: "entry-b", parentId: null, timestamp: "2026-09-07T00:00:00.000Z",
@@ -88,8 +137,10 @@ test("new_context force bypasses the checkpoint gate", async () => {
 	const manager = new CodexContextWindowManager(async () => undefined);
 	manager.restore(branch, "session-1");
 	const tools = createContextManagementTools(activePi, manager, () => true);
-	const result = await tools.newContext.execute("t1", { force: true }, undefined, undefined, makeCtx(branch));
-	expect(result.details).toEqual({ started: true });
+	expect((NEW_CONTEXT_PARAMETERS as { properties?: Record<string, unknown> }).properties).toEqual({});
+	await expect(
+		tools.newContext.execute("t1", { force: true } as never, undefined, undefined, makeCtx(branch)),
+	).rejects.toThrow(NEW_CONTEXT_CHECKPOINT_REQUIRED_MESSAGE);
 });
 
 test("new_context is still gated when remote context is inactive", async () => {
@@ -104,6 +155,6 @@ test("new_context is still gated when remote context is inactive", async () => {
 	manager.restore(branch, "session-1");
 	const tools = createContextManagementTools(activePi, manager, () => false);
 	await expect(
-		tools.newContext.execute("t1", { force: true }, undefined, undefined, makeCtx(branch)),
+		tools.newContext.execute("t1", {}, undefined, undefined, makeCtx(branch)),
 	).rejects.toThrow("remote-context-inactive");
 });

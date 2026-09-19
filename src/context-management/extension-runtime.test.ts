@@ -68,6 +68,35 @@ test("model selection evaluates the selected model rather than stale ctx.model",
 	expect(active).toEqual(["read", "new_context", "get_context_remaining", "history", "notes"]);
 });
 
+test("switching to an unsupported model removes context tools already active at startup", async () => {
+	const handlers = new Map<string, (event: never, ctx: never) => unknown>();
+	const registeredTools: Array<{ name: string; description: string; parameters: unknown; promptGuidelines?: string[] }> = [];
+	let active = ["read", "new_context", "get_context_remaining", "history", "notes"];
+	const pi = {
+		on: (name: string, handler: (event: never, ctx: never) => unknown) => handlers.set(name, handler),
+		registerTool: (tool: { name: string; description: string; parameters: unknown; promptGuidelines?: string[] }) => registeredTools.push(tool),
+		getAllTools: () => registeredTools,
+		getActiveTools: () => active,
+		setActiveTools: (names: string[]) => { active = names; },
+		sendMessage: () => true,
+	} as unknown as ExtensionAPI;
+	const unsupported = { ...model, provider: "openai", api: "openai-responses" };
+	extension(pi, {
+		loadConfig: () => ({
+			config: {
+				...DEFAULT_TOOLKIT_CONFIG,
+				compaction: { ...DEFAULT_COMPACTION_CONFIG, contextManagement: "remote", artifactRoot: "/tmp" },
+			},
+			warnings: [],
+		}),
+	} as never);
+
+	await handlers.get("session_start")?.({} as never, makeContext([], model));
+	await handlers.get("model_select")?.({ model: unsupported, previousModel: model, source: "set" } as never, makeContext([], model));
+
+	expect(active).toEqual(["read"]);
+});
+
 test("a context-tool name conflict disables the Remote runtime instead of rewriting requests", async () => {
 	const handlers = new Map<string, (event: never, ctx: never) => unknown>();
 	let active = ["read"];
@@ -382,6 +411,51 @@ test("a non-covered gateway model never writes a window boundary or warns on ses
 	expect(sentMessages.filter((message) => message.customType === "codex-context-window")).toEqual([]);
 	expect(active).toEqual(["read"]);
 	expect(notices).toEqual([]);
+});
+
+test("covered gateway traffic aborts when its session transport is unavailable", async () => {
+	const handlers = new Map<string, (event: never, ctx: never) => unknown>();
+	let aborted = false;
+	const pi = {
+		on: (name: string, handler: (event: never, ctx: never) => unknown) => handlers.set(name, handler),
+		registerTool: () => undefined,
+		getAllTools: () => [],
+		getActiveTools: () => [],
+		setActiveTools: () => undefined,
+	} as unknown as ExtensionAPI;
+	const gatewayModel = {
+		provider: "my-gateway",
+		api: "openai-responses",
+		id: "gpt-5.6-luna",
+		baseUrl: "https://newapi.example/v1",
+		contextWindow: 272_000,
+	};
+	const ctx = {
+		...makeContext([], gatewayModel),
+		sessionManager: {
+			getBranch: () => [],
+			getSessionId: () => undefined,
+		},
+		abort: () => { aborted = true; },
+	} as never;
+	extension(pi, {
+		loadConfig: () => ({
+			config: {
+				...DEFAULT_TOOLKIT_CONFIG,
+				compaction: {
+					...DEFAULT_COMPACTION_CONFIG,
+					contextManagement: "remote",
+					gatewayContextModels: ["my-gateway/gpt-5.6-luna"],
+					artifactRoot: "/tmp",
+				},
+			},
+			warnings: [],
+		}),
+	} as never);
+
+	await handlers.get("before_provider_request")?.({ payload: { model: gatewayModel.id, input: [] } } as never, ctx);
+	await handlers.get("before_provider_headers")?.({ headers: {} } as never, ctx);
+	expect(aborted).toBe(true);
 });
 
 test("switching into a covered model mid-session initializes the window lifecycle", async () => {

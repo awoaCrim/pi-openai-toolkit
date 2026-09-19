@@ -31,8 +31,13 @@ import {
 	isNonEmptyString,
 	isRecord,
 	isContextWindowCompactionDetails,
+	type NotesCheckpointReceipt,
 } from "./types";
-import { encodeEncryptedOutputForContext, loadHistoryNotesThreadHint } from "./history-notes";
+import {
+	encodeEncryptedOutputForContext,
+	isSuccessfulHistoryNotesToolResult,
+	loadHistoryNotesThreadHint,
+} from "./history-notes";
 import { rewriteContextNamespaceTools } from "./namespace-tools";
 
 interface StartContextWindowOptions {
@@ -50,12 +55,23 @@ type WindowBoundaryEntry = Extract<SessionEntry, { type: "custom_message" }> & {
 	details: CodexContextManagementMessageDetails;
 };
 
+/**
+ * In-process duplicate guard for one scheduled rollover. It is anchored to the
+ * session that scheduled it and to the exact target window id, so it can never
+ * be satisfied by an older or foreign marker. It is not checkpoint evidence:
+ * only a persisted notes result unlocks the gate.
+ */
+type PendingRollover = {
+	sessionId?: string;
+	targetWindowId: string;
+};
+
 export class CodexContextWindowManager {
 	private identity: ContextWindowIdentity | undefined;
 	private sessionId: string | undefined;
 	private restoredMarkerId: string | undefined;
 	private readonly budget = new ContextWindowBudget();
-	private rolloverPending = false;
+	private pendingRollover: PendingRollover | undefined;
 	private trimPendingWindowId: string | undefined;
 	private readonly loadThreadHint: ThreadHintLoader;
 
@@ -64,20 +80,26 @@ export class CodexContextWindowManager {
 	}
 
 	reset(): void {
-		this.identity = undefined;
-		this.sessionId = undefined;
-		this.restoredMarkerId = undefined;
-		this.budget.reset();
-		this.rolloverPending = false;
-		this.trimPendingWindowId = undefined;
+		this.resetWindowState();
+		this.pendingRollover = undefined;
 	}
 
 	currentIdentity(): ContextWindowIdentity | undefined {
 		return this.identity ? { ...this.identity } : undefined;
 	}
 
+	private resetWindowState(): void {
+		this.identity = undefined;
+		this.sessionId = undefined;
+		this.restoredMarkerId = undefined;
+		this.budget.reset();
+		this.trimPendingWindowId = undefined;
+	}
+
 	restore(entries: readonly SessionEntry[], sessionId?: string): void {
-		this.reset();
+		// A rebuild of derived state must not drop an outstanding rollover guard;
+		// only a changed session or an observed target marker retires it below.
+		this.resetWindowState();
 		this.sessionId = sessionId;
 		for (const entry of entries) {
 			if (entry.type === "compaction") {
@@ -98,21 +120,43 @@ export class CodexContextWindowManager {
 			}
 			this.budget.restore(details.kind, details.currentWindowId);
 		}
+		this.retireSatisfiedOrStalePending(entries, sessionId);
 	}
 
 	/** Rebuild state when Pi navigates to a different session/branch. */
 	synchronize(ctx: Pick<ExtensionContext, "sessionManager">): void {
 		const entries = ctx.sessionManager.getBranch();
 		const sessionId = ctx.sessionManager.getSessionId();
+		this.retireSatisfiedOrStalePending(entries, sessionId);
 		const latestMarkerId = findLatestContextMarkerId(entries, sessionId);
 		if (this.sessionId !== sessionId || this.restoredMarkerId !== latestMarkerId) {
 			this.restore(entries, sessionId);
 		}
 	}
 
+	/**
+	 * Drop a pending rollover only for durable reasons: the target window marker
+	 * is now persisted in this session, or the session changed. A queued marker
+	 * visible in an in-memory message list is not durable evidence.
+	 */
+	private retireSatisfiedOrStalePending(
+		entries: readonly SessionEntry[],
+		sessionId: string | undefined,
+	): void {
+		const pending = this.pendingRollover;
+		if (!pending) return;
+		if (pending.sessionId !== undefined && pending.sessionId !== sessionId) {
+			this.pendingRollover = undefined;
+			return;
+		}
+		if (hasPersistedWindowBoundary(entries, sessionId, pending.targetWindowId)) {
+			this.pendingRollover = undefined;
+		}
+	}
+
 	ensureInitialized(pi: ExtensionAPI, ctx: ExtensionContext, active: boolean): void {
 		if (!active) return;
-		this.restore(ctx.sessionManager.getBranch(), ctx.sessionManager.getSessionId());
+		this.synchronize(ctx);
 		if (this.identity) return;
 		const windowId = randomUUID();
 		this.sendWindowMessage(
@@ -155,7 +199,8 @@ export class CodexContextWindowManager {
 			this.budget.reset();
 			this.trimPendingWindowId = undefined;
 		}
-		this.rolloverPending = false;
+		// Projection observes the request view, never durable session state. A
+		// queued rollover marker must not clear the duplicate guard here.
 		const projected = boundaryIndex < 0 ? [...messages] : [...messages.slice(boundaryIndex)];
 		return mode === "remote" ? projectEncryptedToolResults(projected) : projected;
 	}
@@ -166,11 +211,26 @@ export class CodexContextWindowManager {
 		options: StartContextWindowOptions,
 	): Promise<boolean> {
 		this.synchronize(ctx);
-		if (this.rolloverPending) return false;
+		// A same-session rollover whose target marker is not persisted yet is
+		// still in flight: report it instead of scheduling a second window.
+		if (this.hasPendingRollover(ctx)) return false;
 		if (options.signal?.aborted) throw new Error("Remote context rollover was aborted");
-		this.rolloverPending = true;
+		const current = this.identity;
+		const liveSessionId = ctx.sessionManager.getSessionId();
+		const currentWindowId = randomUUID();
+		const next: ContextWindowIdentity = current
+			? {
+				firstWindowId: current.firstWindowId,
+				currentWindowId,
+				previousWindowId: current.currentWindowId,
+				windowNumber: current.windowNumber + 1,
+			}
+			: { firstWindowId: currentWindowId, currentWindowId, windowNumber: 0 };
+		this.pendingRollover = { sessionId: liveSessionId, targetWindowId: currentWindowId };
 		try {
-			const current = this.identity;
+			const checkpoint = current
+				? findLatestNotesCheckpointSinceBoundary(ctx.sessionManager.getBranch(), liveSessionId)
+				: undefined;
 			let threadHint: string | undefined;
 			if (current) {
 				try {
@@ -180,19 +240,10 @@ export class CodexContextWindowManager {
 				}
 			}
 			if (options.signal?.aborted) throw new Error("Remote context rollover was aborted");
-			const currentWindowId = randomUUID();
-			const next: ContextWindowIdentity = current
-				? {
-					firstWindowId: current.firstWindowId,
-					currentWindowId,
-					previousWindowId: current.currentWindowId,
-					windowNumber: current.windowNumber + 1,
-				}
-				: { firstWindowId: currentWindowId, currentWindowId, windowNumber: 0 };
-			this.sendWindowMessage(pi, ctx, next, options, threadHint);
+			this.sendWindowMessage(pi, ctx, next, options, threadHint, checkpoint);
 			return true;
 		} catch (error) {
-			this.rolloverPending = false;
+			this.pendingRollover = undefined;
 			throw error;
 		}
 	}
@@ -226,11 +277,30 @@ export class CodexContextWindowManager {
 		return this.budget.remaining(ctx, this.identity, contextTokens);
 	}
 
-	/** True when a notes checkpoint succeeded in the current window (after the latest boundary). */
+	/**
+	 * True when a notes checkpoint succeeded in the current window (after the
+	 * latest boundary). The scan always uses the live session id: a cached id can
+	 * belong to a session Pi already navigated away from, which would filter the
+	 * current window's marker and result out as foreign.
+	 */
 	hasNotesCheckpointSinceBoundary(
 		ctx: Pick<ExtensionContext, "sessionManager">,
 	): boolean {
-		return findNotesCheckpointSinceBoundary(ctx.sessionManager.getBranch(), this.sessionId);
+		return findNotesCheckpointSinceBoundary(
+			ctx.sessionManager.getBranch(),
+			ctx.sessionManager.getSessionId(),
+		);
+	}
+
+	/**
+	 * True while a rollover scheduled for the current session is awaiting its
+	 * persisted target marker. Call `synchronize()` first so a marker that has
+	 * already been persisted or a session switch retires the guard.
+	 */
+	hasPendingRollover(ctx: Pick<ExtensionContext, "sessionManager">): boolean {
+		const pending = this.pendingRollover;
+		if (!pending) return false;
+		return pending.sessionId === undefined || pending.sessionId === ctx.sessionManager.getSessionId();
 	}
 
 	prepareCompaction(
@@ -289,10 +359,11 @@ export class CodexContextWindowManager {
 		identity: ContextWindowIdentity,
 		options: StartContextWindowOptions,
 		threadHint?: string,
+		checkpoint?: NotesCheckpointReceipt,
 	): void {
 		sendContextWindowMessage(
 			pi,
-			renderContextWindowMessage(identity, threadHint),
+			renderContextWindowMessage(identity, threadHint, checkpoint),
 			"window",
 			identity,
 			{ triggerTurn: options.triggerTurn, sessionId: ctx.sessionManager.getSessionId() },
@@ -302,9 +373,9 @@ export class CodexContextWindowManager {
 		this.sessionId = ctx.sessionManager.getSessionId();
 		this.restoredMarkerId = undefined;
 		this.trimPendingWindowId = options.trimPreviousWindow ? identity.currentWindowId : undefined;
-		// sendMessage has accepted the marker synchronously; clear only the
-		// in-flight guard so a later turn can roll over again.
-		this.rolloverPending = false;
+		// sendMessage() acceptance is not persistence. The pending rollover stays
+		// armed until synchronize() observes this target window in the persisted
+		// branch (or the session changes).
 	}
 }
 
@@ -329,20 +400,7 @@ export function hasAssistantUsageSinceWindowBoundary(
 	entries: readonly SessionEntry[],
 	sessionId?: string,
 ): boolean {
-	let boundaryIndex = -1;
-	for (let index = entries.length - 1; index >= 0; index -= 1) {
-		const entry = entries[index]!;
-		if (entry.type !== "custom_message" || entry.customType !== CODEX_CONTEXT_WINDOW_MESSAGE_TYPE) continue;
-		if (!couldBelongToSession(entry.details, sessionId)) continue;
-		if (!isCodexContextManagementMessageDetails(entry.details)) {
-			throw new Error("Malformed persisted Codex context-window message");
-		}
-		if (!matchesSession(entry.details.sessionId, sessionId)) continue;
-		if (entry.details.contextManagement.kind === "window") {
-			boundaryIndex = index;
-			break;
-		}
-	}
+	const boundaryIndex = findLatestWindowBoundaryIndex(entries, sessionId);
 	if (boundaryIndex < 0) return false;
 	for (let index = boundaryIndex + 1; index < entries.length; index += 1) {
 		const entry = entries[index]!;
@@ -363,6 +421,46 @@ export function hasAssistantUsageSinceWindowBoundary(
 }
 
 /**
+ * Return the most recent successful notes write after the latest window
+ * boundary. The receipt is derived from persisted session entries so it
+ * survives restarts and can be used for an explicit rollover handoff.
+ */
+export function findLatestNotesCheckpointSinceBoundary(
+	entries: readonly SessionEntry[],
+	sessionId?: string,
+): NotesCheckpointReceipt | undefined {
+	const boundaryIndex = findLatestWindowBoundaryIndex(entries, sessionId);
+	if (boundaryIndex < 0) return undefined;
+	const checkpointCalls = new Map<string, NotesCheckpointReceipt>();
+	let latest: NotesCheckpointReceipt | undefined;
+	for (let index = boundaryIndex + 1; index < entries.length; index += 1) {
+		const entry = entries[index]!;
+		if (entry.type !== "message") continue;
+		const message = entry.message;
+		if (message.role === "assistant") {
+			const parts = Array.isArray(message.content) ? message.content : [];
+			for (const part of parts) {
+				if (!isRecord(part) || part.type !== "toolCall" || part.name !== "notes") continue;
+				const args = isRecord(part.arguments) ? part.arguments : undefined;
+				const action = typeof args?.action === "string" ? args.action : "";
+				const path = isNonEmptyString(args?.path) ? args.path : undefined;
+				if (isNonEmptyString(part.id) && path !== undefined && NOTES_CHECKPOINT_ACTIONS.has(action)) {
+					checkpointCalls.set(part.id, { path, toolCallId: part.id });
+				}
+			}
+			continue;
+		}
+		if (message.role !== "toolResult" || message.toolName !== "notes") continue;
+		const receipt = checkpointCalls.get(message.toolCallId);
+		if (!receipt) continue;
+		checkpointCalls.delete(message.toolCallId);
+		if (message.isError !== false || !isSuccessfulHistoryNotesToolResult(message.details)) continue;
+		latest = receipt;
+	}
+	return latest;
+}
+
+/**
  * Whether the branch contains a successful notes append/write result after the
  * latest window boundary. Reads and failed writes never count as checkpoints.
  */
@@ -370,7 +468,13 @@ export function findNotesCheckpointSinceBoundary(
 	entries: readonly SessionEntry[],
 	sessionId?: string,
 ): boolean {
-	let boundaryIndex = -1;
+	return findLatestNotesCheckpointSinceBoundary(entries, sessionId) !== undefined;
+}
+
+function findLatestWindowBoundaryIndex(
+	entries: readonly SessionEntry[],
+	sessionId?: string,
+): number {
 	for (let index = entries.length - 1; index >= 0; index -= 1) {
 		const entry = entries[index]!;
 		if (entry.type !== "custom_message" || entry.customType !== CODEX_CONTEXT_WINDOW_MESSAGE_TYPE) continue;
@@ -379,42 +483,9 @@ export function findNotesCheckpointSinceBoundary(
 			throw new Error("Malformed persisted Codex context-window message");
 		}
 		if (!matchesSession(entry.details.sessionId, sessionId)) continue;
-		if (entry.details.contextManagement.kind === "window") {
-			boundaryIndex = index;
-			break;
-		}
+		if (entry.details.contextManagement.kind === "window") return index;
 	}
-	if (boundaryIndex < 0) return false;
-	const checkpointCalls = new Set<string>();
-	for (let index = boundaryIndex + 1; index < entries.length; index += 1) {
-		const entry = entries[index]!;
-		if (entry.type !== "message") continue;
-		const message = entry.message;
-		if (message.role === "assistant") {
-			const parts = Array.isArray(message.content) ? message.content : [];
-			for (const part of parts) {
-				if (!isRecord(part) || part.type !== "toolCall") continue;
-				// Match by call id only; the provider-side namespace rewrite never
-				// affects the names persisted in the Pi session branch.
-				if (part.name !== "notes") continue;
-				const args = isRecord(part.arguments) ? part.arguments : undefined;
-				const action = typeof args?.action === "string" ? args.action : "";
-				if (typeof part.id === "string" && NOTES_CHECKPOINT_ACTIONS.has(action)) {
-					checkpointCalls.add(part.id);
-				}
-			}
-			continue;
-		}
-		if (message.role === "toolResult" && checkpointCalls.has(message.toolCallId)) {
-			if (message.isError) {
-				checkpointCalls.delete(message.toolCallId);
-				continue;
-			}
-			const details = message.details;
-			if (isRecord(details) && isRecord(details.codexHistoryNotes)) return true;
-		}
-	}
-	return false;
+	return -1;
 }
 
 export function findLatestWindowBoundaryEntry(
@@ -432,6 +503,26 @@ export function findLatestWindowBoundaryEntry(
 		if (entry.details.contextManagement.kind === "window") return entry as WindowBoundaryEntry;
 	}
 	return undefined;
+}
+
+/**
+ * Whether this exact window boundary is already persisted for the session.
+ * Only durable entries count; a queued/visible marker does not.
+ */
+function hasPersistedWindowBoundary(
+	entries: readonly SessionEntry[],
+	sessionId: string | undefined,
+	windowId: string,
+): boolean {
+	for (const entry of entries) {
+		if (entry.type !== "custom_message" || entry.customType !== CODEX_CONTEXT_WINDOW_MESSAGE_TYPE) continue;
+		if (!couldBelongToSession(entry.details, sessionId)) continue;
+		if (!isCodexContextManagementMessageDetails(entry.details)) continue;
+		if (!matchesSession(entry.details.sessionId, sessionId)) continue;
+		const details = entry.details.contextManagement;
+		if (details.kind === "window" && details.currentWindowId === windowId) return true;
+	}
+	return false;
 }
 
 function findLatestContextMarkerId(

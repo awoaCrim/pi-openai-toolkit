@@ -45,6 +45,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(false);
 		expect(loaded.config.compaction.contextManagement).toBe("off");
 		expect(loaded.config.compaction.remoteCompactModel).toBeUndefined();
+		expect(loaded.config.compaction.remoteV2ContextSource).toBe("legacy");
 		expect(loaded.config.compaction.nativeFallback).toEqual({ ...DEFAULT_NATIVE_FALLBACK_CONFIG });
 		expect(loaded.config.compaction).not.toHaveProperty("autoCompaction");
 		expect(loaded.config.compaction.responsesApis).toEqual([
@@ -72,6 +73,7 @@ describe("loadToolkitConfig", () => {
 					contextManagement: "remote",
 					allowCompactionContinuityBreak: true,
 					remoteCompactModel: " uwoacrimson/gpt-5.6-luna ",
+					remoteV2ContextSource: " legacy ",
 					nativeFallback: {
 						enabled: true,
 						model: " google/gemini-2.5-flash ",
@@ -120,6 +122,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.contextManagement).toBe("remote");
 		expect(loaded.config.compaction).not.toHaveProperty("codexGatewayModels");
 		expect(loaded.config.compaction.remoteCompactModel).toBe("uwoacrimson/gpt-5.6-luna");
+		expect(loaded.config.compaction.remoteV2ContextSource).toBe("legacy");
 		expect(loaded.config.compaction.nativeFallback).toEqual({
 			enabled: true,
 			model: "google/gemini-2.5-flash",
@@ -283,6 +286,7 @@ describe("loadToolkitConfig", () => {
 				compaction: {
 					enabled: "yes",
 					allowCompactionContinuityBreak: "yes",
+					remoteV2ContextSource: "raw",
 					remoteCompactModel: { provider: "uwoacrimson" },
 					nativeFallback: {
 						enabled: "yes",
@@ -317,6 +321,7 @@ describe("loadToolkitConfig", () => {
 
 		expect(loaded.config.compaction.enabled).toBe(true);
 		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(false);
+		expect(loaded.config.compaction.remoteV2ContextSource).toBe("legacy");
 		expect(loaded.config.compaction.remoteCompactModel).toBeUndefined();
 		expect(loaded.config.compaction.nativeFallback).toEqual({ ...DEFAULT_NATIVE_FALLBACK_CONFIG });
 		expect(loaded.config.compaction).not.toHaveProperty("autoCompaction");
@@ -478,4 +483,59 @@ test("retired autoCompaction configuration is ignored without rewriting user set
 	expect(loaded.config.compaction).not.toHaveProperty("autoCompaction");
 	expect(loaded.warnings).toEqual(["Ignoring compaction.autoCompaction: unknown field."]);
 	expect(fs.readFileSync(configPath, "utf8")).toBe(content);
+});
+
+test("webSearch routes parse with exact precedence fields and migration warnings", () => {
+	const configPath = writeTempConfig(
+		JSON.stringify({
+			webSearch: {
+				models: [" provider/model "],
+				defaultRoute: "hosted",
+				routes: {
+					" provider/model ": "local",
+					"uwoacrimson/gpt-6-astra": "standalone-alpha",
+				},
+			},
+		}),
+	);
+	const loaded = loadToolkitConfig(configPath);
+
+	expect(loaded.config.webSearch).toEqual({
+		enabled: true,
+		models: ["provider/model"],
+		defaultRoute: "hosted",
+		routes: {
+			"provider/model": "local",
+			"uwoacrimson/gpt-6-astra": "standalone-alpha",
+		},
+	});
+	expect(loaded.warnings).toEqual([
+		"webSearch.defaultRoute overrides legacy webSearch.models for models without an exact webSearch.routes entry.",
+		"webSearch.routes.provider/model overrides the legacy webSearch.models entry for the same exact model.",
+	]);
+});
+
+test("webSearch route fields reject malformed values without guessing a route", () => {
+	const configPath = writeTempConfig(
+		JSON.stringify({
+			webSearch: {
+				defaultRoute: "remote",
+				routes: {
+					bad: "local",
+					"provider/*": "hosted",
+					"provider/model": "remote",
+				},
+			},
+		}),
+	);
+	const loaded = loadToolkitConfig(configPath);
+
+	expect(loaded.config.webSearch.defaultRoute).toBeUndefined();
+	expect(loaded.config.webSearch.routes).toEqual({});
+	expect(loaded.warnings).toEqual([
+		"Ignoring webSearch.defaultRoute: expected one of local, hosted, standalone-alpha.",
+		"Ignoring webSearch.routes.bad: expected an exact \"provider/model-id\" key.",
+		"Ignoring webSearch.routes.provider/*: expected an exact \"provider/model-id\" key.",
+		"Ignoring webSearch.routes.provider/model: expected one of local, hosted, standalone-alpha.",
+	]);
 });

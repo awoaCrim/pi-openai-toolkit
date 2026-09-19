@@ -58,16 +58,13 @@ export const NOTES_PARAMETERS = Type.Object({
 
 export interface NewContextDetails { started: boolean; }
 
-export const NEW_CONTEXT_PARAMETERS = Type.Object({
-	force: Type.Optional(Type.Boolean({
-	description: "Roll over even without a successful notes checkpoint in this window. Discards unsaved working state.",
-})),
-}, { additionalProperties: false });
+export const NEW_CONTEXT_PARAMETERS = Type.Object({}, { additionalProperties: false });
 
 export const NEW_CONTEXT_CHECKPOINT_REQUIRED_MESSAGE =
-	"new_context refused: no successful notes checkpoint in this window. "
-	+ "Save the active request, decisions, progress and next steps with notes append_to_file or write_file, then retry. "
-	+ "Pass force=true only when the user explicitly accepts losing unsaved working state.";
+	"new_context refused: no persisted successful notes checkpoint in the current context window. "
+	+ "Write the active request, decisions, progress and next steps with notes append_to_file or write_file, "
+	+ "wait until that notes result is persisted, then retry new_context in a later tool turn. "
+	+ "Do not pass force arguments and do not repeat new_context while a rollover is already scheduled.";
 export interface ContextRemainingDetails {
 	remainingTokens?: number;
 	windowId?: string;
@@ -93,14 +90,25 @@ export function createContextManagementTools(
 	const newContext: ToolDefinition<typeof NEW_CONTEXT_PARAMETERS, NewContextDetails> = {
 		name: "new_context",
 		label: "new_context",
-		description: "Start a new remote Codex context window without generating a conversation summary. Requires a successful notes checkpoint in the current window unless force is set.",
+		description: "Start a new remote Codex context window without generating a conversation summary. Requires a persisted successful notes checkpoint in the current window.",
 		parameters: NEW_CONTEXT_PARAMETERS,
 		promptSnippet: "Start a new remote Codex context window without summarizing history.",
-		promptGuidelines: ["Checkpoint active work in notes before calling new_context; no conversation summary carries over. A successful notes append/write in this window is required unless the user explicitly accepts discarding unsaved state (force=true)."],
+		promptGuidelines: [
+			"Before this new_context call, checkpoint active work in notes; only a persisted successful notes append/write in the current window unlocks this rollover, and no conversation summary carries over.",
+			"A successful new_context completes one context switch. In the next window, read the checkpoint receipt first when present, then resume the active user task; do not immediately create another checkpoint or call new_context as part of that handoff.",
+			"Wait for the notes tool result before calling new_context; an in-flight or failed write is not a checkpoint. If new_context reports that a rollover is already scheduled, do not call it again in the same window.",
+		],
 		executionMode: "sequential",
-		async execute(_id, params, signal, _update, ctx) {
+		async execute(_id, _params, signal, _update, ctx) {
 			await assertActive(ctx);
-			if (!params.force && !manager.hasNotesCheckpointSinceBoundary(ctx)) {
+			manager.synchronize(ctx);
+			if (manager.hasPendingRollover(ctx)) {
+				return {
+					content: [{ type: "text", text: "A new context window is already scheduled." }],
+					details: { started: false },
+				};
+			}
+			if (!manager.hasNotesCheckpointSinceBoundary(ctx)) {
 				throw new Error(NEW_CONTEXT_CHECKPOINT_REQUIRED_MESSAGE);
 			}
 			const started = await manager.startNewWindow(pi, ctx, {
@@ -109,7 +117,12 @@ export function createContextManagementTools(
 				trimPreviousWindow: true,
 			});
 			return {
-				content: [{ type: "text", text: started ? "A new context window will start without summarizing conversation history." : "A new context window is already scheduled." }],
+				content: [{
+					type: "text",
+					text: started
+						? "Context switch scheduled successfully. In the next context window, read the checkpoint receipt first when present, then resume the active user task; do not immediately create another checkpoint or call new_context."
+						: "A new context window is already scheduled.",
+				}],
 				details: { started },
 			};
 		},
@@ -153,7 +166,8 @@ export function createContextManagementTools(
 		parameters: NOTES_PARAMETERS,
 		promptSnippet: "Read and checkpoint remote Codex notes across context windows.",
 		promptGuidelines: [
-			"Before calling new_context, checkpoint the current turn's active work (unfinished tasks, decisions, open questions, references) into notes with append_to_file or write_file so it survives the window change.",
+			"Before calling new_context, checkpoint the current turn's active work (unfinished tasks, decisions, open questions, references) into notes with append_to_file or write_file so it survives the window change; wait for that result to be persisted before calling new_context.",
+			"After a successful new_context handoff, read the checkpoint receipt first when present and resume the active user task; do not immediately create another checkpoint or call new_context unless a later rollover is actually needed.",
 			"When a large task spans multiple context windows, keep a running note per line of work and read it at the start of each new window; append new state instead of replacing it unless the note is stale.",
 			"Prefer read_file or search_contents for looking things up; reserve write_file for explicit rewrite/clear and append_to_file for incremental state.",
 			"Keep note text concise and self-contained: it may be read later without the rest of the conversation, so include identifiers and verbatim key decisions, not hearsay summaries.",
@@ -175,12 +189,9 @@ export class ContextManagementToolController {
 		parameters: unknown;
 		promptGuidelines?: string[];
 	}>();
-	private readonly ownedNames = new Set<string>();
-	private readonly baselineNames = new Set<string>();
 	private registered = false;
 	private registrationChecked = false;
 	private registrationValid = false;
-	private baselineCaptured = false;
 
 	constructor(private readonly pi: ExtensionAPI) {}
 
@@ -238,44 +249,22 @@ export class ContextManagementToolController {
 		} catch {
 			this.registrationValid = false;
 		}
-		if (!this.registrationValid) this.ownedNames.clear();
 		return this.registrationValid;
 	}
 
-	private captureBaseline(): boolean {
-		if (this.baselineCaptured) return true;
-		try {
-			const api = this.pi as ExtensionAPI & { getActiveTools?: () => string[] };
-			if (typeof api.getActiveTools !== "function") return false;
-			this.baselineNames.clear();
-			for (const name of api.getActiveTools()) this.baselineNames.add(name);
-			this.baselineCaptured = true;
-			return true;
-		} catch {
-			return false;
-		}
-	}
-
 	sync(active: boolean): boolean {
-		if (!this.verifyRegistration() || !this.captureBaseline()) return false;
+		if (!this.verifyRegistration()) return false;
 		const api = this.pi as ExtensionAPI & { getActiveTools?: () => string[]; setActiveTools?: (names: string[]) => void };
 		if (typeof api.getActiveTools !== "function" || typeof api.setActiveTools !== "function") return false;
 		try {
 			const current = api.getActiveTools();
-			if (active) {
-				const next = [...current];
-				for (const name of this.registeredNames) {
-					if (!next.includes(name) && !this.baselineNames.has(name)) {
-						next.push(name);
-						this.ownedNames.add(name);
-					}
-				}
-				if (next.length !== current.length) api.setActiveTools(next);
-				return true;
-			}
-			const next = current.filter((name) => !this.ownedNames.has(name));
+			// Pi may activate a newly registered tool before the first sync. Once
+			// registration is verified, every registered name belongs to this
+			// controller: active models get all four, inactive models get none.
+			const next = active
+				? [...current, ...[...this.registeredNames].filter((name) => !current.includes(name))]
+				: current.filter((name) => !this.registeredNames.has(name));
 			if (next.length !== current.length) api.setActiveTools(next);
-			this.ownedNames.clear();
 			return true;
 		} catch {
 			return false;
@@ -284,8 +273,6 @@ export class ContextManagementToolController {
 
 	reset(): void {
 		this.sync(false);
-		this.baselineNames.clear();
-		this.baselineCaptured = false;
 	}
 	get isRegistered(): boolean { return this.registrationValid; }
 }

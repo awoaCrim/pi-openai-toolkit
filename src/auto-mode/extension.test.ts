@@ -10,6 +10,7 @@ import { registerAutoModeExtension } from "./extension";
 import { buildClassifierPrompt, reviewerSystemPrompt } from "./prompt";
 import { transcriptFromEntries } from "./transcript";
 import type { ReviewOutcome } from "./types";
+import type { ToolReviewDisplayState, ToolReviewRendererBridge } from "./tool-review-tui";
 
 type Handler = (event: any, ctx: any) => unknown;
 
@@ -52,6 +53,15 @@ function assistantEntry(id: string, text: string) {
 	return { type: "message", id, message: { role: "assistant", content: [{ type: "text", text }] } };
 }
 
+function createNoopToolReviewRenderer(): ToolReviewRendererBridge {
+	return {
+		supported: true,
+		setTheme: () => undefined,
+		setState: () => undefined,
+		clear: () => undefined,
+	};
+}
+
 function createHarness(options: {
 	autoMode?: Partial<AutoModeConfig>;
 	flagValue?: boolean;
@@ -60,8 +70,12 @@ function createHarness(options: {
 	hasUI?: boolean;
 	classifierText?: string;
 	sessionEntries?: unknown[];
+	/** Hold the blocking reviewer open so TUI activity can be observed in-flight. */
+	reviewBarrier?: Promise<void>;
 	/** Successive verdicts, for tests that need a sequence such as deny-allow-deny. */
 	outcomes?: ReviewOutcome[];
+	/** Optional renderer seam used to assert per-tool review state transitions. */
+	toolReviewRenderer?: ToolReviewRendererBridge;
 } = {}) {
 	const autoMode = configWith(options.autoMode);
 	const handlers = new Map<string, Handler[]>();
@@ -70,6 +84,7 @@ function createHarness(options: {
 	const entries: Array<{ type: string; data: any }> = [];
 	const notifications: Array<{ message: string; level?: string }> = [];
 	const statuses: Array<string | undefined> = [];
+	const workingMessages: Array<string | undefined> = [];
 	const reviewCalls: Array<Record<string, unknown>> = [];
 	const classifierCalls: Array<Record<string, unknown>> = [];
 
@@ -96,6 +111,7 @@ function createHarness(options: {
 	};
 
 	const ctx = {
+		mode: "tui",
 		hasUI: options.hasUI ?? true,
 		cwd: "/project",
 		model: { provider: "uwoacrimson", api: "openai-responses", id: "gpt-5.6-luna" },
@@ -117,6 +133,7 @@ function createHarness(options: {
 		},
 		ui: {
 			setStatus: (_key: string, text: string | undefined) => statuses.push(text),
+			setWorkingMessage: (message?: string) => workingMessages.push(message),
 			notify: (message: string, level?: string) => notifications.push({ message, level }),
 			confirm: async () => options.confirmed ?? false,
 		},
@@ -124,6 +141,7 @@ function createHarness(options: {
 
 	const requestReview = async (params: Record<string, unknown>): Promise<ReviewOutcome> => {
 		reviewCalls.push(params);
+		if (options.reviewBarrier) await options.reviewBarrier;
 		if (sequence && sequence.length > 1) return sequence.shift()!;
 		return sequence?.[0] ?? outcome;
 	};
@@ -139,7 +157,12 @@ function createHarness(options: {
 		warnings: [],
 	});
 
-	registerAutoModeExtension(pi as never, loadConfig as never, requestReview as never);
+	registerAutoModeExtension(
+		pi as never,
+		loadConfig as never,
+		requestReview as never,
+		() => options.toolReviewRenderer ?? createNoopToolReviewRenderer(),
+	);
 
 	const fire = (event: string, handlerEvent: unknown = {}, handlerCtx = ctx) =>
 		handlers.get(event)?.[0]?.(handlerEvent, handlerCtx);
@@ -153,12 +176,14 @@ function createHarness(options: {
 
 	return {
 		pi,
+		toolReviewRenderer: options.toolReviewRenderer,
 		ctx,
 		handlers,
 		commands,
 		entries,
 		notifications,
 		statuses,
+		workingMessages,
 		reviewCalls,
 		classifierCalls,
 		autoMode,
@@ -186,11 +211,12 @@ describe("auto mode extension registration", () => {
 
 	test("engaging at session start is synchronous and makes no provider call", async () => {
 		const harness = createHarness({ autoMode: allowlisted, flagValue: true });
-		const result = harness.fire("session_start");
+		const result = harness.fire("session_start", { type: "session_start", reason: "startup" });
 		expect(result).toBeUndefined();
 		expect(harness.reviewCalls).toHaveLength(0);
 		expect(harness.classifierCalls).toHaveLength(0);
 		expect(harness.statuses.at(-1)).toContain("auto-review");
+		expect(harness.notifications.at(-1)?.message).toContain("Auto mode on");
 
 		await harness.fire("tool_call", bashCall);
 		expect(harness.reviewCalls).toHaveLength(1);
@@ -211,15 +237,106 @@ describe("auto mode extension registration", () => {
 		harness.fire("session_start");
 		expect(harness.statuses.at(-1)).toBeUndefined();
 	});
+
+	test("falls back to the footer when the tool renderer seam is unavailable", () => {
+		const renderer: ToolReviewRendererBridge = {
+			supported: false,
+			reason: "test renderer unavailable",
+			setTheme: () => undefined,
+			setState: () => undefined,
+			clear: () => undefined,
+		};
+		const harness = createHarness({ autoMode: allowlisted, flagValue: true, toolReviewRenderer: renderer });
+		harness.fire("session_start", { type: "session_start", reason: "startup" });
+
+		expect(harness.notifications.some((notice) => notice.message.includes("using the footer status"))).toBe(true);
+		expect(harness.statuses.at(-1)).toContain("(footer only)");
+	});
 });
 
 describe("auto mode tool gate", () => {
-	test("read-only tools bypass the reviewer by default", async () => {
-		const harness = createHarness({ autoMode: allowlisted, flagValue: true });
+	test("shows TUI activity while the reviewer is running and restores the idle status", async () => {
+		let release!: () => void;
+		const reviewBarrier = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const harness = createHarness({ autoMode: allowlisted, flagValue: true, reviewBarrier });
 		harness.fire("session_start");
-		const result = await harness.fire("tool_call", { toolName: "read", toolCallId: "c", input: { path: "a.ts" } });
+
+		const pending = harness.fire("tool_call", bashCall);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(harness.statuses.at(-1)).toBe("auto-review: reviewing bash");
+		expect(harness.workingMessages.at(-1)).toBe("Auto mode: reviewing bash");
+
+		release();
+		await pending;
+		expect(harness.statuses.at(-1)).toBe("auto-review: bash, write, edit");
+		expect(harness.workingMessages.at(-1)).toBeUndefined();
+	});
+
+	test("keeps the review lifecycle on the corresponding tool block", async () => {
+		const history: Array<{ toolCallId: string; state: ToolReviewDisplayState }> = [];
+		const renderer: ToolReviewRendererBridge = {
+			supported: true,
+			setTheme: () => undefined,
+			setState: (toolCallId, state) => history.push({ toolCallId, state }),
+			clear: () => undefined,
+		};
+		const harness = createHarness({ autoMode: allowlisted, flagValue: true, toolReviewRenderer: renderer });
+		harness.fire("session_start");
+
+		await harness.fire("tool_call", bashCall);
+
+		expect(history.filter((entry) => entry.toolCallId === "c1").map((entry) => entry.state.phase)).toEqual([
+			"reviewing",
+			"allowed",
+		]);
+		expect(history.at(-1)?.state).toMatchObject({
+			phase: "allowed",
+			toolName: "bash",
+			source: "reviewer",
+		});
+	});
+
+	test("keeps a denial result on the blocked tool block", async () => {
+		const states = new Map<string, ToolReviewDisplayState>();
+		const renderer: ToolReviewRendererBridge = {
+			supported: true,
+			setTheme: () => undefined,
+			setState: (toolCallId, state) => states.set(toolCallId, state),
+			clear: () => states.clear(),
+		};
+		const harness = createHarness({
+			autoMode: allowlisted,
+			flagValue: true,
+			outcome: denyVerdict("writes outside the project"),
+			toolReviewRenderer: renderer,
+		});
+		harness.fire("session_start");
+
+		await harness.fire("tool_call", bashCall);
+
+		expect(states.get("c1")).toMatchObject({ phase: "denied", toolName: "bash" });
+	});
+
+	test("read-only tools bypass the reviewer but show a not-reviewed block state", async () => {
+		const states = new Map<string, ToolReviewDisplayState>();
+		const renderer: ToolReviewRendererBridge = {
+			supported: true,
+			setTheme: () => undefined,
+			setState: (toolCallId, state) => states.set(toolCallId, state),
+			clear: () => states.clear(),
+		};
+		const harness = createHarness({ autoMode: allowlisted, flagValue: true, toolReviewRenderer: renderer });
+		harness.fire("session_start");
+		const result = await harness.fire("tool_call", { toolName: "read", toolCallId: "read-1", input: { path: "a.ts" } });
 		expect(result).toBeUndefined();
 		expect(harness.reviewCalls).toHaveLength(0);
+		expect(states.get("read-1")).toMatchObject({
+			phase: "skipped",
+			toolName: "read",
+			detail: "outside the configured gate",
+		});
 	});
 
 	test("an allow verdict runs the tool and records the risk axes", async () => {

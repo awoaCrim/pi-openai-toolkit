@@ -1,7 +1,14 @@
 import type { Api, Model, ProviderHeaders } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { mergeProviderHeaders } from "../provider-headers";
-import { CODEX_CLIENT_VERSION } from "../responses-headers";
+import {
+	CODEX_AFFINITY_SCOPE,
+	CODEX_CLIENT_VERSION,
+	CODEX_GATEWAY_ORIGINATOR,
+	buildCodexCliUserAgent,
+	filterCodexGatewayHeaders,
+} from "../responses-headers";
+export { CODEX_AFFINITY_SCOPE } from "../responses-headers";
 import { normalizeBaseUrl } from "../runtime";
 import { isExactModelAllowed } from "../model-scope";
 import {
@@ -13,12 +20,9 @@ import {
 const CODEX_PROVIDER = "openai-codex";
 const CODEX_API = "openai-codex-responses";
 const GATEWAY_API = "openai-responses";
-const CODEX_TOOL_ORIGINATOR = "codex_cli_rs";
-const CODEX_GATEWAY_ORIGINATOR = "codex_cli_rs";
+const CODEX_TOOL_ORIGINATOR = CODEX_GATEWAY_ORIGINATOR;
 const CODEX_TOOL_VERSION = "0.0.0";
 const CODEX_SESSION_ID_MAX_LENGTH = 64;
-
-export const CODEX_AFFINITY_SCOPE = "codex-session-v1";
 
 export const CODEX_CONTEXT_PROVIDER_ERROR =
 	"Remote Context management requires a configured Codex-compatible backend";
@@ -103,9 +107,7 @@ function accountIdFromToken(token: string): string | undefined {
 }
 
 function userAgent(version: string): string {
-	const platform = typeof process !== "undefined" ? process.platform : "unknown";
-	const arch = typeof process !== "undefined" ? process.arch : "unknown";
-	return `codex_cli_rs/${version} (${platform}; ${arch})`;
+	return buildCodexCliUserAgent(version);
 }
 
 function clampSessionId(value: string | undefined): string | undefined {
@@ -117,17 +119,12 @@ function clampSessionId(value: string | undefined): string | undefined {
 		: chars.slice(0, CODEX_SESSION_ID_MAX_LENGTH).join("");
 }
 
-function removeSensitiveGatewayHeaders(headers: ProviderHeaders): Record<string, string> {
-	const result: Record<string, string> = {};
-	for (const [name, value] of Object.entries(headers)) {
-		if (typeof value !== "string") continue;
-		const lower = name.toLowerCase();
-		if (lower === "authorization" || lower === "cookie" || lower === "chatgpt-account-id" || lower === "x-api-key") {
-			continue;
-		}
-		result[name] = value;
+function resolveContextSessionId(ctx: ExtensionContext): string | undefined {
+	try {
+		return clampSessionId(ctx.sessionManager.getSessionId());
+	} catch {
+		return undefined;
 	}
-	return result;
 }
 
 export type CodexContextProviderHeaderOptions = {
@@ -164,7 +161,7 @@ export function codexContextProviderHeaders(
 	const sessionId = clampSessionId(options.sessionId);
 	if (sessionId) {
 		headers.set("Session-Id", sessionId);
-		headers.set("X-Client-Request-Id", options.clientRequestId?.trim() || sessionId);
+		headers.set("X-Client-Request-Id", clampSessionId(options.clientRequestId) ?? sessionId);
 	}
 	headers.set("content-type", "application/json");
 	return headers;
@@ -208,6 +205,9 @@ export async function resolveCodexContextProvider(
 	if (!rawBaseUrl) return { ok: false, reason: "missing-base-url", ...descriptor };
 
 	if (isGateway) {
+		if (!resolveContextSessionId(ctx)) {
+			return { ok: false, reason: "missing-session-id", ...descriptor, baseUrl: rawBaseUrl };
+		}
 		const apiKey = bearerToken(auth.apiKey) ?? bearerToken(headerValue(auth.headers, "authorization"));
 		if (!apiKey) return { ok: false, reason: "missing-api-key", ...descriptor, baseUrl: rawBaseUrl };
 		return {
@@ -220,7 +220,7 @@ export async function resolveCodexContextProvider(
 				model: model.id,
 				baseUrl: rawBaseUrl,
 				apiKey,
-				headers: removeSensitiveGatewayHeaders(mergeProviderHeaders(model.headers, auth.headers)),
+				headers: filterCodexGatewayHeaders(mergeProviderHeaders(model.headers, auth.headers)),
 			},
 		};
 	}

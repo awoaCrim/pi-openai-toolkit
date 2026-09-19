@@ -17,6 +17,12 @@ export type ContextWindowIdentity = {
 	windowNumber: number;
 };
 
+/** Persisted-session evidence identifying the note that can restore a rollover. */
+export type NotesCheckpointReceipt = {
+	path: string;
+	toolCallId: string;
+};
+
 export type CodexContextManagementMessageDetails = {
 	protocol: typeof CONTEXT_MANAGEMENT_PROTOCOL;
 	id: string;
@@ -44,6 +50,7 @@ export type RemoteContextFailureReason =
 	| "missing-api-key"
 	| "missing-account-id"
 	| "missing-base-url"
+	| "missing-session-id"
 	| "invalid-account-token"
 	| "backend-timeout"
 	| "aborted"

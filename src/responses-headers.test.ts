@@ -14,12 +14,18 @@ function codexJwt(accountId: string): string {
 	return `${header}.${payload}.signature`;
 }
 
-function runtimeFor(api: string, apiKey: string, sessionId?: string): ResponsesHeaderRuntime {
+function runtimeFor(
+	api: string,
+	apiKey: string,
+	sessionId?: string,
+	overrides: Partial<ResponsesHeaderRuntime> = {},
+): ResponsesHeaderRuntime {
 	return {
 		api,
 		apiKey,
 		sessionId,
 		currentModel: {},
+		...overrides,
 	};
 }
 
@@ -46,6 +52,39 @@ test("codex affinity headers are omitted without a session id", () => {
 	expect(headers.get("version")).toBe(CODEX_CLIENT_VERSION);
 	expect(headers.get("session-id")).toBeNull();
 	expect(headers.get("x-client-request-id")).toBeNull();
+});
+
+test("gateway synthetic requests carry bare model affinity and replace inherited credentials", () => {
+	const headers = buildResponsesRequestHeaders(
+		runtimeFor(
+			"openai-responses",
+			"newapi-key",
+			"sess-42",
+			{
+				headers: {
+					authorization: "Bearer inherited-oauth",
+					"chatgpt-account-id": "inherited-account",
+					cookie: "inherited-cookie",
+					"x-api-key": "inherited-key",
+					"x-management-key": "inherited-management-key",
+				},
+				codexAffinity: { model: "gpt-5.6-luna", scope: "codex-session-v1" },
+			},
+		),
+		{ accept: "text/event-stream" },
+	);
+
+	expect(headers.get("authorization")).toBe("Bearer newapi-key");
+	expect(headers.get("chatgpt-account-id")).toBeNull();
+	expect(headers.get("cookie")).toBeNull();
+	expect(headers.get("x-api-key")).toBeNull();
+	expect(headers.get("x-management-key")).toBeNull();
+	expect(headers.get("originator")).toBe("codex_cli_rs");
+	expect(headers.get("version")).toBe(CODEX_CLIENT_VERSION);
+	expect(headers.get("x-codex-affinity-scope")).toBe("codex-session-v1");
+	expect(headers.get("x-codex-model")).toBe("gpt-5.6-luna");
+	expect(headers.get("session-id")).toBe("sess-42");
+	expect(headers.get("x-client-request-id")).toBe("sess-42");
 });
 
 test("session ids are clamped to the prompt-cache key limit", () => {

@@ -62,4 +62,26 @@ describe("appendWebSearchPrompt", () => {
 			}),
 		).toBe(base);
 	});
+
+	test("replaces stale route guidance instead of accumulating hosted and standalone sections", () => {
+		const hosted = appendWebSearchPrompt({
+			model,
+			config: enabled,
+			systemPrompt: "Base prompt",
+		});
+		const standalone = appendWebSearchPrompt({
+			model,
+			config: { enabled: true, models: [], defaultRoute: "standalone-alpha" },
+			systemPrompt: hosted,
+		});
+		expect(standalone.match(/<!-- pi-openai-toolkit:web-search -->/g)).toHaveLength(1);
+		expect(standalone).toContain("`web.run`");
+		expect(standalone).not.toContain("The hosted `web_search` tool");
+		const removed = appendWebSearchPrompt({
+			model,
+			config: { ...enabled, enabled: false },
+			systemPrompt: standalone,
+		});
+		expect(removed).toBe("Base prompt");
+	});
 });

@@ -1,5 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
-import { callHistoryNotesBackend, executeHistoryNotesTool, HISTORY_ENDPOINTS, NOTES_ENDPOINTS } from "./history-notes";
+import {
+	callHistoryNotesBackend,
+	executeHistoryNotesTool,
+	loadHistoryNotesThreadHint,
+	HISTORY_ENDPOINTS,
+	NOTES_ENDPOINTS,
+} from "./history-notes";
 
 const originalFetch = globalThis.fetch;
 const model = {
@@ -76,6 +82,30 @@ test("returns encrypted output as an opaque top-level tool result", async () => 
 	const result = await executeHistoryNotesTool("history", "list_windows", { action: "list_windows" }, ctx);
 	expect(result.content).toEqual([{ type: "text", text: "history operation completed" }]);
 	expect(result.details?.codexHistoryNotes).toEqual({ encrypted_output: "opaque-value", extra: "kept" });
+});
+
+test("rejects semantically failed notes writes even when HTTP succeeds", async () => {
+	for (const action of ["append_to_file", "write_file"] as const) {
+		for (const responseBody of [
+			{ ok: false, output: "write rejected" },
+			{ success: false, output: "write rejected" },
+		]) {
+			globalThis.fetch = async () => new Response(JSON.stringify(responseBody), { status: 200 });
+			await expect(
+				executeHistoryNotesTool("notes", action, { action, path: "/active-task.md", text: "state" }, ctx),
+			).rejects.toThrow("Remote notes write was rejected");
+		}
+	}
+});
+
+test("ignores a rejected thread hint body even when HTTP succeeds", async () => {
+	for (const responseBody of [
+		{ ok: false, text: "not a valid hint" },
+		{ success: false, text: "not a valid hint" },
+	]) {
+		globalThis.fetch = async () => new Response(JSON.stringify(responseBody), { status: 200 });
+		expect(await loadHistoryNotesThreadHint(ctx)).toBeUndefined();
+	}
 });
 
 test("rejects an empty successful response as invalid protocol data", async () => {

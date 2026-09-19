@@ -151,4 +151,25 @@ describe("synthetic producer cache eligibility", () => {
 		expect(getCompactionRequestExtras(identity, { api: "openai-responses", compat: { supportsExplicitPromptCacheMode: true, supportsLongCacheRetention: false } }))
 			.toEqual({ prompt_cache_options: { mode: "explicit" } });
 	});
+
+	test("can exclude all Web Search implementations from standalone compact extras", () => {
+		rememberRequestContext(
+			{
+				model: identity.model,
+				input: [],
+				tools: [
+					{ type: "function", name: "web.run" },
+					{ type: "function", name: "web_search" },
+					{ type: "web_search" },
+					{ type: "web_search_preview" },
+					{ type: "function", name: "read" },
+				],
+			},
+			identity,
+			{ excludeWebSearchTools: true },
+		);
+		expect(getCompactionRequestExtras(identity)).toEqual({
+			tools: [{ type: "function", name: "read" }],
+		});
+	});
 });
