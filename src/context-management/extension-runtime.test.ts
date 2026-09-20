@@ -405,9 +405,9 @@ test("a non-covered gateway model never writes a window boundary or warns on ses
 	} as never;
 	await handlers.get("session_start")?.({} as never, ctx);
 
-	// Regression: tools.sync(false) also returns true; activation must key off
-	// the resolved model, not the sync success flag, or every gateway model
-	// receives a codex-context-window boundary message.
+	// Regression: inactive models still synchronize the tool set successfully;
+	// activation must key off the resolved model, not the sync result, or every
+	// gateway model receives a codex-context-window boundary message.
 	expect(sentMessages.filter((message) => message.customType === "codex-context-window")).toEqual([]);
 	expect(active).toEqual(["read"]);
 	expect(notices).toEqual([]);
@@ -513,4 +513,96 @@ test("switching into a covered model mid-session initializes the window lifecycl
 	await handlers.get("model_select")?.({ model: solModel, previousModel: model, source: "set" } as never, statefulContext(model));
 	expect(markerCount).toBe(1);
 	expect(active).toEqual(["read"]);
+});
+
+test("context tools activate on the first turn when Pi rejects the session_start read", async () => {
+	const handlers = new Map<string, (event: never, ctx: never) => unknown>();
+	const registeredTools: Array<{ name: string; description: string; parameters: unknown; promptGuidelines?: string[] }> = [];
+	const sentMessages: Array<{ customType?: string }> = [];
+	const notices: string[] = [];
+	let active = ["read"];
+	let registrationReads = 0;
+	const pi = {
+		on: (name: string, handler: (event: never, ctx: never) => unknown) => handlers.set(name, handler),
+		registerTool: (tool: { name: string; description: string; parameters: unknown; promptGuidelines?: string[] }) => { registeredTools.push(tool); },
+		getAllTools: () => {
+			if (registrationReads++ === 0) throw new Error("This extension ctx is stale after session replacement or reload.");
+			return registeredTools;
+		},
+		getActiveTools: () => active,
+		setActiveTools: (names: string[]) => { active = names; },
+		sendMessage: (message: { customType?: string }) => { sentMessages.push(message); return true; },
+	} as unknown as ExtensionAPI;
+	extension(pi, {
+		loadConfig: () => ({
+			config: {
+				...DEFAULT_TOOLKIT_CONFIG,
+				compaction: { ...DEFAULT_COMPACTION_CONFIG, contextManagement: "remote", artifactRoot: "/tmp" },
+			},
+			warnings: [],
+		}),
+	} as never);
+
+	const ctx = {
+		...makeContext([], model),
+		hasUI: true,
+		ui: { notify: (message: string) => notices.push(message) },
+	} as never;
+	await handlers.get("session_start")?.({} as never, ctx);
+
+	// Regression: Pi 0.86 can reject the registration read while a session
+	// replacement is still binding. That was cached as a permanent name conflict,
+	// which left the four context tools unexposed for the rest of the process.
+	expect(active).toEqual(["read"]);
+	expect(registrationReads).toBe(1);
+	expect(notices.filter((notice) => notice.includes("tool-name-conflict"))).toEqual([]);
+	expect(notices.filter((notice) => notice.includes("codex-context-unavailable"))).toEqual([]);
+	expect(sentMessages.filter((message) => message.customType === "codex-context-window")).toEqual([]);
+	await handlers.get("before_agent_start")?.({ prompt: "continue", systemPromptOptions: {} } as never, ctx);
+
+	expect(active).toEqual(["read", "new_context", "get_context_remaining", "history", "notes"]);
+	// A late activation must open the window lifecycle too, or the request rewrite
+	// sends no window metadata and the backend never ingests the turns.
+	expect(sentMessages.filter((message) => message.customType === "codex-context-window")).toHaveLength(1);
+});
+
+test("late activation fails closed when the context window cannot initialize", async () => {
+	const handlers = new Map<string, (event: never, ctx: never) => unknown>();
+	const registeredTools: Array<{ name: string; description: string; parameters: unknown; promptGuidelines?: string[] }> = [];
+	const notices: string[] = [];
+	let active = ["read"];
+	let registrationReads = 0;
+	const pi = {
+		on: (name: string, handler: (event: never, ctx: never) => unknown) => handlers.set(name, handler),
+		registerTool: (tool: { name: string; description: string; parameters: unknown; promptGuidelines?: string[] }) => { registeredTools.push(tool); },
+		getAllTools: () => {
+			if (registrationReads++ === 0) throw new Error("This extension ctx is stale after session replacement or reload.");
+			return registeredTools;
+		},
+		getActiveTools: () => active,
+		setActiveTools: (names: string[]) => { active = names; },
+		sendMessage: () => { throw new Error("window message rejected"); },
+	} as unknown as ExtensionAPI;
+	extension(pi, {
+		loadConfig: () => ({
+			config: {
+				...DEFAULT_TOOLKIT_CONFIG,
+				compaction: { ...DEFAULT_COMPACTION_CONFIG, contextManagement: "remote", artifactRoot: "/tmp" },
+			},
+			warnings: [],
+		}),
+	} as never);
+
+	const ctx = {
+		...makeContext([], model),
+		hasUI: true,
+		ui: { notify: (message: string) => notices.push(message) },
+	} as never;
+	await handlers.get("session_start")?.({} as never, ctx);
+	expect(active).toEqual(["read"]);
+	expect(notices.filter((notice) => notice.includes("malformed-window-state"))).toEqual([]);
+
+	await handlers.get("before_agent_start")?.({ prompt: "continue", systemPromptOptions: {} } as never, ctx);
+	expect(active).toEqual(["read"]);
+	expect(notices.filter((notice) => notice.includes("malformed-window-state"))).toHaveLength(1);
 });

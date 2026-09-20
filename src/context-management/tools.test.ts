@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+	ContextManagementToolController,
 	createContextManagementTools,
 	NEW_CONTEXT_CHECKPOINT_REQUIRED_MESSAGE,
 	NEW_CONTEXT_PARAMETERS,
@@ -157,4 +158,112 @@ test("new_context is still gated when remote context is inactive", async () => {
 	await expect(
 		tools.newContext.execute("t1", {}, undefined, undefined, makeCtx(branch)),
 	).rejects.toThrow("remote-context-inactive");
+});
+
+type PublishedTool = {
+	name: string;
+	description: string;
+	parameters: unknown;
+	promptGuidelines?: string[];
+};
+
+function controllerHarness(publish: (registered: PublishedTool[]) => PublishedTool[] = (tools) => tools) {
+	const registered: PublishedTool[] = [];
+	let active = ["read"];
+	let bound = true;
+	const pi = {
+		registerTool: (tool: PublishedTool) => { registered.push(tool); },
+		getAllTools: () => {
+			if (!bound) throw new Error("This extension ctx is stale after session replacement or reload.");
+			return publish(registered.map((tool) => ({ ...tool })));
+		},
+		getActiveTools: () => active,
+		setActiveTools: (names: string[]) => { active = names; },
+	} as unknown as ExtensionAPI;
+	const controller = new ContextManagementToolController(pi);
+	const registeredTools = controller.register(
+		createContextManagementTools(pi, new CodexContextWindowManager(async () => undefined), () => true),
+	);
+	return {
+		controller,
+		bind: () => { bound = true; },
+		unbind: () => { bound = false; },
+		active: () => active,
+		registeredTools,
+	};
+}
+
+test("a stale Pi runtime read does not permanently disable the context tools", () => {
+	const harness = controllerHarness();
+	harness.unbind();
+	expect(harness.registeredTools).toBe(true);
+
+	// Pi 0.86 rejects action methods after a session replacement or reload. That
+	// must cost one sync, not the whole session.
+	expect(harness.controller.sync(true)).toEqual({ synced: false, registrationState: "unverified" });
+	expect(harness.controller.registrationState).toBe("unverified");
+	expect(harness.active()).toEqual(["read"]);
+
+	harness.bind();
+	expect(harness.controller.sync(true)).toEqual({ synced: true, registrationState: "verified" });
+	expect(harness.controller.registrationState).toBe("verified");
+	expect(harness.active()).toEqual(["read", "new_context", "get_context_remaining", "history", "notes"]);
+});
+
+test("a runtime wrapper around the same definitions keeps the context tools active", () => {
+	// Pi may return fresh ToolInfo wrappers. The published schema and guidance
+	// remain exact, so a wrapper is still the registered definition.
+	const harness = controllerHarness((tools) => tools.map((tool) => ({ ...tool })));
+
+	expect(harness.controller.sync(true)).toEqual({ synced: true, registrationState: "verified" });
+	expect(harness.controller.registrationState).toBe("verified");
+});
+
+test("a same-name definition with an extra schema field stays a conflict", () => {
+	const harness = controllerHarness((tools) => tools.map((tool) => {
+		if (tool.name !== "history") return tool;
+		const parameters = tool.parameters as Record<string, unknown>;
+		const properties = parameters.properties as Record<string, unknown>;
+		return {
+			...tool,
+			parameters: {
+				...parameters,
+				properties: { ...properties, foreign_option: { type: "string" } },
+			},
+		};
+	}));
+
+	expect(harness.controller.sync(true)).toEqual({ synced: false, registrationState: "conflict" });
+	expect(harness.active()).toEqual(["read"]);
+});
+
+test("another definition under a context tool name stays a permanent conflict", () => {
+	const harness = controllerHarness((tools) => tools.map((tool) =>
+		tool.name === "history" ? { ...tool, description: "owned by another extension" } : tool,
+	));
+
+	expect(harness.controller.sync(true)).toEqual({ synced: false, registrationState: "conflict" });
+	expect(harness.controller.registrationState).toBe("conflict");
+	// Retrying must not silently take the name back over the other extension.
+	expect(harness.controller.sync(true)).toEqual({ synced: false, registrationState: "conflict" });
+	expect(harness.controller.registrationState).toBe("conflict");
+	expect(harness.active()).toEqual(["read"]);
+});
+
+test("tools the runtime has not published yet remain pending", () => {
+	const harness = controllerHarness(() => []);
+
+	expect(harness.controller.sync(true)).toEqual({ synced: false, registrationState: "unverified" });
+	expect(harness.controller.registrationState).toBe("unverified");
+	expect(harness.active()).toEqual(["read"]);
+});
+
+test("a same-name definition with extra prompt guidance stays a conflict", () => {
+	const harness = controllerHarness((tools) => tools.map((tool) => ({
+		...tool,
+		promptGuidelines: tool.promptGuidelines ? [...tool.promptGuidelines, "foreign guidance"] : ["foreign guidance"],
+	})));
+
+	expect(harness.controller.registrationState).toBe("conflict");
+	expect(harness.controller.sync(true)).toEqual({ synced: false, registrationState: "conflict" });
 });

@@ -375,6 +375,7 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 		setActiveTools: (names: string[]) => {
 			activeTools = [...names];
 		},
+		sendMessage: () => undefined,
 	} as never, {
 		loadConfig: () => ({
 			config: {

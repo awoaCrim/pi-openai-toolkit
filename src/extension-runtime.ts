@@ -17,7 +17,10 @@ import {
 import { routeContextNamespaceToolMessage } from "./context-management/namespace-tools";
 import { loadHistoryNotesThreadHint } from "./context-management/history-notes";
 import { CodexContextWindowManager } from "./context-management/window-manager";
-import { registerContextManagementTools } from "./context-management/tools";
+import {
+	registerContextManagementTools,
+	type ContextToolRegistrationState,
+} from "./context-management/tools";
 import { writeDebugArtifact, writeReplayFailureArtifact } from "./debug";
 import {
 	COMPACTION_CHECKPOINT_PROVENANCE_UNAVAILABLE,
@@ -87,6 +90,13 @@ type RemoteContextActive = (
 	config: CompactionConfig,
 	model?: ExtensionContext["model"],
 ) => Promise<boolean>;
+
+type ContextToolSyncOutcome = {
+	eligible: boolean;
+	toolsSynced: boolean;
+	registrationState: ContextToolRegistrationState;
+	windowInitialized: boolean;
+};
 
 type ResponsesCompactOutcome =
 	| { outcome: "success"; compaction: CompactionResult<NativeCompactionDetails> }
@@ -1015,28 +1025,60 @@ export default function registerCompactionExtension(
 		piContextHookPatch: overrides.piContextHookPatch ?? piContextHookPatch,
 	};
 	let tools!: ReturnType<typeof registerContextManagementTools>;
+	let contextWindowReady = false;
+	const isContextRuntimeActive = async (
+		ctx: ExtensionContext,
+		config: CompactionConfig,
+		model = ctx.model,
+	): Promise<boolean> =>
+		contextWindowReady && tools.isRegistered && await isRemoteContextActive(ctx, config, model);
 	tools = registerContextManagementTools(
 		pi,
 		contextWindows,
 		async (ctx) => {
 			const config = dependencies.loadConfig().config.compaction;
-			return tools.isRegistered && await isRemoteContextActive(ctx, config);
+			return isContextRuntimeActive(ctx, config);
 		},
 		() => dependencies.loadConfig().config.compaction.gatewayContextModels,
 	);
-	const remoteContextActive: RemoteContextActive = async (ctx, config, model = ctx.model) =>
-		tools.isRegistered && await isRemoteContextActive(ctx, config, model);
-	const syncTools = async (ctx: ExtensionContext, model = ctx.model): Promise<boolean> => {
+	const remoteContextActive: RemoteContextActive = isContextRuntimeActive;
+	const syncTools = async (
+		ctx: ExtensionContext,
+		model = ctx.model,
+		options: { notifyWindowFailure?: boolean } = {},
+	): Promise<ContextToolSyncOutcome> => {
+		// Until this call proves otherwise, do not let a previous session/window
+		// identity make a failed activation look usable.
+		contextWindowReady = false;
 		const config = dependencies.loadConfig().config.compaction;
-		const active = await isRemoteContextActive(ctx, config, model);
-		// sync() reports whether the tool-set update succeeded; an inactive model
-		// syncs fine and returns true. The activation decision must use `active`
-		// itself, or non-covered models would receive a window boundary.
-		const synced = tools.sync(active);
-		return active && synced;
+		const eligible = await isRemoteContextActive(ctx, config, model);
+		const toolSync = tools.sync(eligible);
+		const outcome: ContextToolSyncOutcome = {
+			eligible,
+			toolsSynced: toolSync.synced,
+			registrationState: toolSync.registrationState,
+			windowInitialized: false,
+		};
+		if (!eligible || !toolSync.synced) return outcome;
+		// Activation can succeed after `session_start` missed it, because Pi 0.86 may
+		// reject the registration read while a session replacement is still binding.
+		// The window lifecycle has to open on that later activation too, or requests
+		// carry no window metadata and the backend never ingests the turns.
+		try {
+			contextWindows.ensureInitialized(pi, ctx, true);
+			contextWindowReady = true;
+			return { ...outcome, windowInitialized: true };
+		} catch {
+			// Do not leave tools exposed while the request path has no valid window
+			// identity. The next lifecycle hook may retry once Pi is usable again.
+			tools.sync(false);
+			if (options.notifyWindowFailure) notifyRemoteContextFailure(ctx, "malformed-window-state");
+			return outcome;
+		}
 	};
 	pi.on("session_start", async (_event, ctx) => {
-		const active = await syncTools(ctx);
+		const syncOutcome = await syncTools(ctx, ctx.model, { notifyWindowFailure: true });
+		const active = syncOutcome.eligible && syncOutcome.toolsSynced && syncOutcome.windowInitialized;
 		const { config: toolkitConfig, source, warnings } = dependencies.loadConfig();
 		const config = toolkitConfig.compaction;
 		if (!config.enabled) return;
@@ -1044,16 +1086,16 @@ export default function registerCompactionExtension(
 		let activationReason: string | undefined;
 		// Only models the built-in Remote Context coverage targets may activate or
 		// warn; everything else silently runs Pi's normal compaction path.
-		if (config.contextManagement === "remote" && isCodexContextModel(ctx.model, config)) {
-			if (active) {
-				try {
-					contextWindows.ensureInitialized(pi, ctx, true);
-				} catch {
-					notifyRemoteContextFailure(ctx, "malformed-window-state");
-				}
-			} else if (!tools.isRegistered) {
+		if (config.contextManagement === "remote" && isCodexContextModel(ctx.model, config) && !active) {
+			if (syncOutcome.registrationState === "conflict") {
 				activationReason = "tool-name-conflict";
 				notifyRemoteContextFailure(ctx, activationReason);
+			} else if (syncOutcome.registrationState === "unverified" || !syncOutcome.toolsSynced) {
+				// Transient: the runtime has not published or accepted our tools yet. A
+				// later before_agent_start re-verifies, so do not report provider failure.
+				activationReason = "tool-registration-pending";
+			} else if (syncOutcome.eligible && !syncOutcome.windowInitialized) {
+				activationReason = "malformed-window-state";
 			} else {
 				const remoteResolution = await resolveCodexContextProvider(ctx, ctx.model, config.gatewayContextModels);
 				activationReason = remoteResolution.ok ? "codex-context-unavailable" : remoteResolution.reason;
@@ -1099,25 +1141,20 @@ export default function registerCompactionExtension(
 	pi.on("session_before_compact", (event, ctx) => handleSessionBeforeCompact(event, ctx, dependencies, remoteContextActive));
 	pi.on("session_compact", (event, _ctx) => contextWindows.recordCompaction(event.compactionEntry.details));
 	pi.on("session_shutdown", () => {
+		contextWindowReady = false;
 		contextWindows.reset();
 		tools.reset();
 	});
 	pi.on("model_select", async (event, ctx) => {
-		const active = await syncTools(ctx, event.model);
 		// Switching into a covered model mid-session must open the window
 		// lifecycle immediately: without an identity the request rewrite skips
 		// window metadata, the backend never ingests those turns, and the first
 		// new_context would trim pre-switch history that no history can recover.
-		// ensureInitialized is idempotent when a window already exists.
-		if (!active) return;
-		try {
-			contextWindows.ensureInitialized(pi, ctx, true);
-		} catch {
-			notifyRemoteContextFailure(ctx, "malformed-window-state");
-		}
+		// syncTools() activates and initializes the window when the model is covered.
+		await syncTools(ctx, event.model, { notifyWindowFailure: true });
 	});
 	pi.on("before_agent_start", async (_event, ctx) => {
-		await syncTools(ctx);
+		await syncTools(ctx, ctx.model, { notifyWindowFailure: true });
 	});
 	pi.on("before_provider_request", (event, ctx) => handleBeforeProviderRequest(event, ctx, dependencies.loadConfig, contextWindows, remoteContextActive));
 	pi.on("before_provider_headers", async (event, ctx) => {
