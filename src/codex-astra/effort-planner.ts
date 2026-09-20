@@ -138,7 +138,7 @@ export function planStableEffort(
 		return { input: next, result: { effort: requested, spliced: 0 } };
 	}
 	if (state.currentEffort !== requested) {
-		const last = next[next.length - 1];
+		const last = input[input.length - 1];
 		const index = last && last.role === "user" ? next.length - 1 : next.length;
 		const existing = state.transitions.find((transition) => transition.index === index);
 		if (existing) {
