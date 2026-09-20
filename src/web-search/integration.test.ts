@@ -24,12 +24,18 @@ const identity = {
 afterEach(() => clearRequestContextCache());
 
 describe("Compaction and Web Search integration", () => {
-	test("package does not publish deleted extension entrypoints", () => {
+	test("package publishes the current extension entrypoints without deleted ones", () => {
 		const packageJson = JSON.parse(
 			fs.readFileSync(path.resolve(import.meta.dir, "../..", "package.json"), "utf8"),
 		) as { pi?: { extensions?: string[] }; files?: string[] };
 
-		expect(packageJson.pi?.extensions ?? []).toEqual([]);
+		expect(packageJson.pi?.extensions).toEqual([
+			"./src/extension-runtime.ts",
+			"./src/web-search/extension.ts",
+			"./src/image-generation/extension.ts",
+			"./src/auto-mode/extension.ts",
+			"./src/codex-astra/extension.ts",
+		]);
 		expect(packageJson.files ?? []).not.toContain("extensions/compaction.ts");
 		expect(packageJson.files ?? []).not.toContain("extensions/web-search.ts");
 		expect(packageJson.files ?? []).not.toContain("extensions/image-generation.ts");

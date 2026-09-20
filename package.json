@@ -1,6 +1,6 @@
 {
   "name": "pi-openai-toolkit",
-  "version": "0.14.11",
+  "version": "0.14.12",
   "private": false,
   "type": "module",
   "engines": {
@@ -32,6 +32,15 @@
     "codex",
     "responses"
   ],
+  "pi": {
+    "extensions": [
+      "./src/extension-runtime.ts",
+      "./src/web-search/extension.ts",
+      "./src/image-generation/extension.ts",
+      "./src/auto-mode/extension.ts",
+      "./src/codex-astra/extension.ts"
+    ]
+  },
   "files": [
     "src/compact-client.ts",
     "src/compaction-projection.ts",
