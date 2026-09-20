@@ -77,6 +77,11 @@ export const NEW_CONTEXT_CHECKPOINT_REQUIRED_MESSAGE =
 	+ "Write the active request, decisions, progress and next steps with notes append_to_file or write_file, "
 	+ "wait until that notes result is persisted, then retry new_context in a later tool turn. "
 	+ "Do not pass force arguments and do not repeat new_context while a rollover is already scheduled.";
+
+export const NEW_CONTEXT_COOLDOWN_MESSAGE =
+	"new_context refused: this window was entered by a context switch and has not run any substantive "
+	+ "tool yet. Read the checkpoint receipt with notes read_file, continue the active task with real "
+	+ "tools, and call new_context only once this window has produced tool activity.";
 export interface ContextRemainingDetails {
 	remainingTokens?: number;
 	windowId?: string;
@@ -117,6 +122,12 @@ export function createContextManagementTools(
 			if (manager.hasPendingRollover(ctx)) {
 				return {
 					content: [{ type: "text", text: "A new context window is already scheduled." }],
+					details: { started: false },
+				};
+			}
+			if (!manager.canRolloverFromCurrentWindow(ctx)) {
+				return {
+					content: [{ type: "text", text: NEW_CONTEXT_COOLDOWN_MESSAGE }],
 					details: { started: false },
 				};
 			}

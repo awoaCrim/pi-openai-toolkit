@@ -9,6 +9,7 @@ import type {
 	SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { ContextWindowBudget, type ContextRemaining } from "./window-budget";
+import type { WindowBulkReport } from "./window-bulk";
 import {
 	rewriteEncryptedToolOutputs,
 	rewriteWindowHeaders,
@@ -18,6 +19,7 @@ import {
 	CONTEXT_WINDOW_COMPACTION_STRATEGY,
 	CONTEXT_WINDOW_COMPACTION_SUMMARY,
 	isContextWindowBoundary,
+	preserveSystemHead,
 	renderContextWindowMessage,
 	sendContextWindowMessage,
 } from "./messages";
@@ -73,6 +75,10 @@ export class CodexContextWindowManager {
 	private readonly budget = new ContextWindowBudget();
 	private pendingRollover: PendingRollover | undefined;
 	private trimPendingWindowId: string | undefined;
+	private readonly projectionDiagnostics = new Set<string>();
+	private lastKnownSystemHead: AgentMessage | undefined;
+	private bulkReport: WindowBulkReport | undefined;
+	private bulkSurfacedKey: string | undefined;
 	private readonly loadThreadHint: ThreadHintLoader;
 
 	constructor(loadThreadHint?: ThreadHintLoader) {
@@ -82,11 +88,51 @@ export class CodexContextWindowManager {
 	reset(): void {
 		this.resetWindowState();
 		this.pendingRollover = undefined;
+		this.projectionDiagnostics.clear();
+		this.lastKnownSystemHead = undefined;
+		this.bulkReport = undefined;
+		this.bulkSurfacedKey = undefined;
 	}
 
 	currentIdentity(): ContextWindowIdentity | undefined {
 		return this.identity ? { ...this.identity } : undefined;
 	}
+	/**
+	 * Whether a rollover trim is queued for the next eligible compaction. A turn-end bulk
+	 * close-out is only worth a model call while that trim is still outstanding.
+	 */
+	hasPendingTrim(): boolean {
+		return this.trimPendingWindowId !== undefined;
+	}
+
+	/** Remember the latest measurement for this window; see `takeBulkCliff`. */
+	noteWindowBulk(report: WindowBulkReport | undefined, modelKey: string): void {
+		if (report) this.bulkReport = report;
+		else if (this.bulkKey(modelKey) === undefined) this.bulkReport = undefined;
+	}
+
+	/**
+	 * Drain the pending bulk-cliff notice for this window and model. The decision what to
+	 * do about it (warn, or compact before the next request) belongs to the runtime; this
+	 * only guarantees the same window and model is never surfaced twice.
+	 */
+	takeBulkCliff(modelKey: string): WindowBulkReport | undefined {
+		const report = this.bulkReport;
+		if (!report || !report.expanded) return undefined;
+		const key = this.bulkKey(modelKey);
+		if (key === undefined || this.bulkSurfacedKey === key) return undefined;
+		this.bulkSurfacedKey = key;
+		return report;
+	}
+
+	private bulkKey(modelKey: string): string | undefined {
+		// The report's own window id is authoritative: this notice exists precisely for the
+		// models that never open the window lifecycle, where `identity` stays undefined.
+		const windowId = this.bulkReport?.windowId ?? this.identity?.currentWindowId;
+		return windowId ? `${windowId}|${modelKey}` : undefined;
+	}
+
+
 
 	private resetWindowState(): void {
 		this.identity = undefined;
@@ -201,8 +247,40 @@ export class CodexContextWindowManager {
 		}
 		// Projection observes the request view, never durable session state. A
 		// queued rollover marker must not clear the duplicate guard here.
-		const projected = boundaryIndex < 0 ? [...messages] : [...messages.slice(boundaryIndex)];
-		return mode === "remote" ? projectEncryptedToolResults(projected) : projected;
+		const trimmed = boundaryIndex < 0 ? [...messages] : this.trimToWindow(messages, boundaryIndex);
+		return mode === "remote" ? projectEncryptedToolResults(trimmed) : trimmed;
+	}
+
+	/**
+	 * Trim everything before the window boundary while keeping Pi's prompt/tool head.
+	 *
+	 * When the head cannot be preserved the trim is refused and the full message list is
+	 * sent, because a window without tools silently degrades into a chat the model can
+	 * only narrate. Each refusal is reported once per window and reason.
+	 */
+	private trimToWindow(messages: readonly AgentMessage[], boundaryIndex: number): AgentMessage[] {
+		const repair = preserveSystemHead({ messages, boundaryIndex, fallbackHead: this.lastKnownSystemHead });
+		if (repair.head) this.lastKnownSystemHead = repair.head;
+		if (repair.shrinkRejected) {
+			this.recordProjectionDiagnostic(repair.lostToolNames);
+		}
+		return [...repair.messages];
+	}
+
+	private recordProjectionDiagnostic(lostToolNames: readonly string[]): void {
+		const key = `${this.identity?.currentWindowId ?? "unknown"}|${[...lostToolNames].sort().join(",")}`;
+		this.projectionDiagnostics.add(key);
+	}
+
+	/**
+	 * Drain the pending `tool-loadout-shrink` reports. Returns one entry per window and
+	 * lost-tool set, so a caller can surface the incident without flooding the UI.
+	 */
+	takeProjectionDiagnostics(): string[] {
+		if (this.projectionDiagnostics.size === 0) return [];
+		const pending = [...this.projectionDiagnostics];
+		this.projectionDiagnostics.clear();
+		return pending;
 	}
 
 	async startNewWindow(
@@ -303,6 +381,23 @@ export class CodexContextWindowManager {
 		return pending.sessionId === undefined || pending.sessionId === ctx.sessionManager.getSessionId();
 	}
 
+	/**
+	 * Whether a rollover may be scheduled from the current window.
+	 *
+	 * A window that was entered by a context switch has to do real work before it switches
+	 * again: without this guard a model can checkpoint and roll over on its very first turn,
+	 * which is how long sessions start looping between notes and new_context.
+	 */
+	canRolloverFromCurrentWindow(ctx: ExtensionContext): boolean {
+		if (!this.identity || this.identity.windowNumber === 0) return true;
+		// An exhausted window must always be able to escape: the budget fallback tells the
+		// model to checkpoint and switch, and refusing that would strand the session. An
+		// unmeasurable window keeps the guard, since nothing there is pushing for a switch.
+		const { remainingTokens } = this.remaining(ctx);
+		if (remainingTokens !== undefined && remainingTokens <= 0) return true;
+		return hasSubstantiveToolResultSinceBoundary(ctx.sessionManager.getBranch(), this.sessionId);
+	}
+
 	prepareCompaction(
 		event: SessionBeforeCompactEvent,
 	): { cancel: true } | { compaction: CompactionResult<ContextWindowCompactionDetails> } {
@@ -390,6 +485,34 @@ function identityFromDetails(details: CodexContextManagementMessageDetails): Con
 }
 
 const NOTES_CHECKPOINT_ACTIONS: ReadonlySet<string> = new Set(["append_to_file", "write_file"]);
+
+/** Tools that only move context around; they never count as work done in a window. */
+const CONTEXT_MANAGEMENT_TOOL_NAMES: ReadonlySet<string> = new Set([
+	"new_context",
+	"get_context_remaining",
+	"history",
+	"notes",
+]);
+
+/**
+ * Whether the current window produced a tool result from anything other than the
+ * context-handoff tools. Derived from persisted entries so it survives restarts.
+ */
+export function hasSubstantiveToolResultSinceBoundary(
+	entries: readonly SessionEntry[],
+	sessionId?: string,
+): boolean {
+	const boundaryIndex = findLatestWindowBoundaryIndex(entries, sessionId);
+	if (boundaryIndex < 0) return true;
+	for (let index = boundaryIndex + 1; index < entries.length; index += 1) {
+		const entry = entries[index]!;
+		if (entry.type !== "message") continue;
+		const message = entry.message as unknown as { role?: string; toolName?: string };
+		if (message.role !== "toolResult" || typeof message.toolName !== "string") continue;
+		if (!CONTEXT_MANAGEMENT_TOOL_NAMES.has(message.toolName)) return true;
+	}
+	return false;
+}
 
 /**
  * Whether the branch contains a successful assistant usage after the latest

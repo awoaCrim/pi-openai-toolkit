@@ -9,7 +9,17 @@ type FakeModel = {
 	provider: string;
 	id: string;
 	api?: string;
+	contextWindow?: number;
+	maxTokens?: number;
 };
+
+function hugeMessage(chars: number) {
+	return {
+		role: "user",
+		content: [{ type: "text", text: "x".repeat(chars) }],
+		timestamp: 1,
+	};
+}
 
 function createCtx(args: {
 	currentModel?: FakeModel;
@@ -348,5 +358,88 @@ describe("runNativeFallbackCompaction", () => {
 			reason: "empty-summary",
 			modelSpec: "google/gemini-2.5-flash",
 		});
+	});
+});
+
+describe("summarization size guard", () => {
+	test("estimateSummarizationRequest covers the conversation, the previous summary and the output", async () => {
+		const { estimateSummarizationRequest, fitsSummarizationRequest } = await loadNativeFallbackModule();
+		const preparation = {
+			...createEvent().preparation,
+			messagesToSummarize: [hugeMessage(40_000)],
+			turnPrefixMessages: [hugeMessage(4_000)],
+			previousSummary: "y".repeat(4_000),
+		};
+
+		const size = estimateSummarizationRequest(preparation as never, { contextWindow: 272_000, maxTokens: 32_768 });
+
+		// 40k + 4k characters plus a 1k summary, measured with pi's chars/4 estimator.
+		expect(size.inputTokens).toBeGreaterThanOrEqual(Math.ceil(45_000 / 4));
+		// pi caps the summary at min(floor(0.8 * reserveTokens), model.maxTokens).
+		expect(size.outputTokens).toBe(13_107);
+		expect(size.totalTokens).toBe(size.inputTokens + size.outputTokens);
+		const narrowOutput = estimateSummarizationRequest(preparation as never, { contextWindow: 272_000, maxTokens: 4_096 });
+		expect(narrowOutput.outputTokens).toBe(4_096);
+
+		expect(fitsSummarizationRequest(size, { contextWindow: 272_000 })).toBe(true);
+		expect(fitsSummarizationRequest(size, { contextWindow: 1_000 })).toBe(false);
+		// An unknown window is never guessed at.
+		expect(fitsSummarizationRequest(size, {})).toBe(true);
+	});
+
+	test("model-window-too-small is reported before the registry or the model is touched", async () => {
+		const { runNativeFallbackCompaction } = await loadNativeFallbackModule();
+		let compactCalls = 0;
+		let authCalls = 0;
+		const ctx = createCtx({
+			currentModel: { provider: "uwoacrimson", id: "deepseek-v4-flash-0731", contextWindow: 400_000 },
+			registryModels: [{ provider: "uwoacrimson", id: "gpt-5.6-luna", contextWindow: 272_000, maxTokens: 32_768 }],
+		});
+		(ctx.modelRegistry as never as { getApiKeyAndHeaders: unknown }).getApiKeyAndHeaders = async () => {
+			authCalls += 1;
+			return { ok: true, apiKey: "sk-fallback", headers: {}, env: {} };
+		};
+		const preparation = { ...createEvent().preparation, messagesToSummarize: [hugeMessage(1_100_000)] };
+
+		const result = await runNativeFallbackCompaction({
+			ctx,
+			event: { ...createEvent(), preparation } as never,
+			config: createConfig(withFallback({ model: "uwoacrimson/gpt-5.6-luna" })),
+			modelSpec: "uwoacrimson/gpt-5.6-luna",
+			compactFn: (async () => {
+				compactCalls += 1;
+				throw new Error("must not be called");
+			}) as never,
+		});
+
+		expect(result.ok).toBe(false);
+		if (result.ok) throw new Error("unreachable");
+		expect(result.reason).toBe("model-window-too-small");
+		expect(result.contextWindow).toBe(272_000);
+		expect(result.estimatedTokens).toBeGreaterThan(272_000);
+		expect(compactCalls).toBe(0);
+		expect(authCalls).toBe(0);
+	});
+
+	test("a fallback model with room to spare still runs unchanged", async () => {
+		const { runNativeFallbackCompaction } = await loadNativeFallbackModule();
+		let compactCalls = 0;
+
+		const result = await runNativeFallbackCompaction({
+			ctx: createCtx({
+				currentModel: { provider: "uwoacrimson", id: "deepseek-v4-flash-0731", contextWindow: 400_000 },
+				registryModels: [{ provider: "uwoacrimson", id: "gpt-5.6-luna", contextWindow: 272_000, maxTokens: 32_768 }],
+			}),
+			event: createEvent(),
+			config: createConfig(withFallback({ model: "uwoacrimson/gpt-5.6-luna" })),
+			modelSpec: "uwoacrimson/gpt-5.6-luna",
+			compactFn: (async () => {
+				compactCalls += 1;
+				return { summary: "ok", firstKeptEntryId: "entry-keep", tokensBefore: 1, details: {} };
+			}) as never,
+		});
+
+		expect(result.ok).toBe(true);
+		expect(compactCalls).toBe(1);
 	});
 });

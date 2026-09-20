@@ -1,5 +1,7 @@
 import {
 	compact,
+	DEFAULT_COMPACTION_SETTINGS,
+	estimateTokens,
 	type CompactionResult,
 	type ExtensionContext,
 	type SessionBeforeCompactEvent,
@@ -20,7 +22,9 @@ export type NativeFallbackFailureReason =
 	| "auth-failed"
 	| "aborted"
 	| "empty-summary"
-	| "compact-failed";
+	| "compact-failed"
+	/** The configured summary model cannot fit the request it would have to send. */
+	| "model-window-too-small";
 
 export type NativeFallbackResult =
 	| {
@@ -33,6 +37,8 @@ export type NativeFallbackResult =
 			reason: NativeFallbackFailureReason;
 			modelSpec?: string;
 			errorMessage?: string;
+			estimatedTokens?: number;
+			contextWindow?: number;
 	  };
 
 /** pi's exported native compact(); injectable for tests. */
@@ -51,6 +57,62 @@ function isAbortError(error: unknown): boolean {
 
 function toErrorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Output budget Pi gives the summary itself: `generateSummary` caps `maxTokens` at
+ * `min(floor(0.8 * reserveTokens), model.maxTokens)`.
+ */
+const SUMMARIZATION_OUTPUT_RESERVE_TOKENS = Math.floor(
+	DEFAULT_COMPACTION_SETTINGS.reserveTokens * 0.8,
+);
+
+/** Summarization instructions plus the `<conversation>` framing around the transcript. */
+const SUMMARIZATION_TEMPLATE_TOKENS = 1024;
+
+export type SummarizationRequestSize = {
+	inputTokens: number;
+	outputTokens: number;
+	totalTokens: number;
+};
+
+/**
+ * Size of the request Pi's `compact()` is about to send, measured the same way Pi
+ * measures context (the exported `estimateTokens`, a conservative chars/4).
+ *
+ * A session driven by a wide-window model (400k) produces a preparation that a narrower
+ * summary model (272k) cannot accept at all: the provider terminates the stream and the
+ * first manual `/compact` fails. Callers must not attempt that request; the estimate is
+ * deliberately an under-declaration of certainty, so a missing `contextWindow` skips the
+ * check instead of guessing.
+ */
+export function estimateSummarizationRequest(
+	preparation: SessionBeforeCompactEvent["preparation"],
+	model: { contextWindow?: number; maxTokens?: number },
+): SummarizationRequestSize {
+	const conversation = [
+		...(preparation.messagesToSummarize ?? []),
+		...(preparation.turnPrefixMessages ?? []),
+	];
+	let inputTokens = SUMMARIZATION_TEMPLATE_TOKENS;
+	for (const message of conversation) inputTokens += estimateTokens(message as never);
+	if (preparation.previousSummary) {
+		inputTokens += Math.ceil(String(preparation.previousSummary).length / 4);
+	}
+	const outputTokens = model.maxTokens && model.maxTokens > 0
+		? Math.min(SUMMARIZATION_OUTPUT_RESERVE_TOKENS, model.maxTokens)
+		: SUMMARIZATION_OUTPUT_RESERVE_TOKENS;
+	return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens };
+}
+
+/** Whether the summary model can accept this request at all; unknown windows always pass. */
+export function fitsSummarizationRequest(
+	size: SummarizationRequestSize,
+	model: { contextWindow?: number },
+): boolean {
+	const contextWindow = model.contextWindow;
+	if (typeof contextWindow !== "number" || contextWindow <= 0) return true;
+	return size.totalTokens <= contextWindow;
 }
 
 /**
@@ -99,6 +161,17 @@ export async function runNativeFallbackCompaction(args: {
 
 	if (ctx.model && ctx.model.provider === model.provider && ctx.model.id === model.id) {
 		return { ok: false, reason: "same-as-current-model", modelSpec: spec };
+	}
+
+	const size = estimateSummarizationRequest(event.preparation, model as { contextWindow?: number; maxTokens?: number });
+	if (!fitsSummarizationRequest(size, model as { contextWindow?: number })) {
+		return {
+			ok: false,
+			reason: "model-window-too-small",
+			modelSpec: spec,
+			estimatedTokens: size.totalTokens,
+			contextWindow: (model as { contextWindow?: number }).contextWindow,
+		};
 	}
 
 	let auth: ResolvedAuth;

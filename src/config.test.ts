@@ -44,6 +44,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.enabled).toBe(true);
 		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(false);
 		expect(loaded.config.compaction.contextManagement).toBe("off");
+		expect(loaded.config.compaction.leaveManagedMode).toBe("warn");
 		expect(loaded.config.compaction.remoteCompactModel).toBeUndefined();
 		expect(loaded.config.compaction.remoteV2ContextSource).toBe("legacy");
 		expect(loaded.config.compaction.nativeFallback).toEqual({ ...DEFAULT_NATIVE_FALLBACK_CONFIG });
@@ -71,6 +72,7 @@ describe("loadToolkitConfig", () => {
 				compaction: {
 					enabled: true,
 					contextManagement: "remote",
+					leaveManagedMode: " compact ",
 					allowCompactionContinuityBreak: true,
 					remoteCompactModel: " uwoacrimson/gpt-5.6-luna ",
 					remoteV2ContextSource: " legacy ",
@@ -120,6 +122,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.warnings).toEqual([]);
 		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(true);
 		expect(loaded.config.compaction.contextManagement).toBe("remote");
+		expect(loaded.config.compaction.leaveManagedMode).toBe("compact");
 		expect(loaded.config.compaction).not.toHaveProperty("codexGatewayModels");
 		expect(loaded.config.compaction.remoteCompactModel).toBe("uwoacrimson/gpt-5.6-luna");
 		expect(loaded.config.compaction.remoteV2ContextSource).toBe("legacy");
@@ -454,6 +457,18 @@ describe("loadToolkitConfig", () => {
 		expect(invalid.config.compaction.contextManagement).toBe("off");
 		expect(invalid.warnings).toEqual([
 			"Ignoring compaction.contextManagement: expected one of off, remote.",
+		]);
+	});
+
+	test("leaveManagedMode accepts trimmed warn/compact values and defaults on garbage", () => {
+		const compactPath = writeTempConfig(JSON.stringify({ compaction: { leaveManagedMode: " compact " } }));
+		expect(loadToolkitConfig(compactPath).config.compaction.leaveManagedMode).toBe("compact");
+
+		const invalidPath = writeTempConfig(JSON.stringify({ compaction: { leaveManagedMode: "auto" } }));
+		const invalid = loadToolkitConfig(invalidPath);
+		expect(invalid.config.compaction.leaveManagedMode).toBe("warn");
+		expect(invalid.warnings).toEqual([
+			"Ignoring compaction.leaveManagedMode: expected one of warn, compact.",
 		]);
 	});
 

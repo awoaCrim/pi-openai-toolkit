@@ -30,6 +30,7 @@ import {
 	type AutoModeGate,
 	type CompactionConfig,
 	type ContextManagementMode,
+	type LeaveManagedModePolicy,
 	type ImageGenerationConfig,
 	type RemoteV2ContextSource,
 	type LoadedToolkitConfig,
@@ -46,6 +47,7 @@ export const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 const TOP_LEVEL_FIELDS = new Set(["compaction", "webSearch", "imageGeneration", "autoMode"]);
 const COMPACTION_FIELDS = new Set([
 	"enabled",
+	"leaveManagedMode",
 	"contextManagement",
 	"allowCompactionContinuityBreak",
 	"remoteCompactModel",
@@ -134,6 +136,20 @@ function toBoolean(value: unknown, fieldPath: string, warnings: string[]): boole
 	if (value === undefined) return undefined;
 	if (typeof value === "boolean") return value;
 	warnings.push(`Ignoring ${fieldPath}: expected a boolean.`);
+	return undefined;
+}
+
+function toLeaveManagedMode(
+	value: unknown,
+	fieldPath: string,
+	warnings: string[],
+): LeaveManagedModePolicy | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value === "string") {
+		const normalized = value.trim();
+		if (normalized === "warn" || normalized === "compact") return normalized;
+	}
+	warnings.push(`Ignoring ${fieldPath}: expected one of warn, compact.`);
 	return undefined;
 }
 
@@ -379,6 +395,9 @@ function applyCompactionConfig(
 	resolved.contextManagement =
 		toContextManagementMode(raw.contextManagement, "compaction.contextManagement", warnings) ??
 		resolved.contextManagement;
+	resolved.leaveManagedMode =
+		toLeaveManagedMode(raw.leaveManagedMode, "compaction.leaveManagedMode", warnings) ??
+		resolved.leaveManagedMode;
 	resolved.allowCompactionContinuityBreak =
 		toBoolean(
 			raw.allowCompactionContinuityBreak,

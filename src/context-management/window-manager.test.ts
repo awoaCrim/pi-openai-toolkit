@@ -8,7 +8,11 @@ import {
 	findLatestNotesCheckpointSinceBoundary,
 	findNotesCheckpointSinceBoundary,
 } from "./window-manager";
-import { CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, CONTEXT_WINDOW_COMPACTION_SUMMARY } from "./messages";
+import {
+	CODEX_CONTEXT_WINDOW_MESSAGE_TYPE,
+	CONTEXT_WINDOW_COMPACTION_SUMMARY,
+	declaredToolNames,
+} from "./messages";
 
 const originalFetch = globalThis.fetch;
 
@@ -539,7 +543,9 @@ test("rollover arms a once-only trim that is consumed by the persisted boundary"
 	const manager = new CodexContextWindowManager(async () => undefined);
 	const ctx = fakeContext(() => branch as never);
 	manager.restore(branch as never, "session-1");
+	expect(manager.hasPendingTrim()).toBe(false);
 	expect(await manager.startNewWindow(fakePi(sent), ctx, { triggerTurn: true, trimPreviousWindow: true })).toBe(true);
+	expect(manager.hasPendingTrim()).toBe(true);
 	// The accepted marker is not persisted yet, so the trim cannot be consumed.
 	const pendingEvent = { reason: "threshold", branchEntries: branch, preparation: { firstKeptEntryId: "keep", tokensBefore: 50 } } as never;
 	expect(manager.prepareCompaction(pendingEvent)).toEqual({ cancel: true });
@@ -548,6 +554,7 @@ test("rollover arms a once-only trim that is consumed by the persisted boundary"
 	manager.synchronize(ctx);
 	const persistedEvent = { reason: "threshold", branchEntries: branch, preparation: { firstKeptEntryId: "keep", tokensBefore: 50 } } as never;
 	expect(manager.prepareCompaction(persistedEvent)).toMatchObject({ compaction: { summary: CONTEXT_WINDOW_COMPACTION_SUMMARY } });
+	expect(manager.hasPendingTrim()).toBe(false);
 	expect(manager.prepareCompaction(persistedEvent)).toEqual({ cancel: true });
 });
 
@@ -599,3 +606,132 @@ function notesResultWithDetailsRaw(id: string, result: unknown, isError: boolean
 		},
 	} as never;
 }
+
+function headMessage(toolNames: string[]): AgentMessage {
+	return {
+		role: "system",
+		content: "",
+		sections: { preamble: "prompt" },
+		toolsAdded: toolNames.map((name) => ({ name, description: name, parameters: {} })),
+		timestamp: 1,
+	} as unknown as AgentMessage;
+}
+
+function projectedWindowMarker(windowId: string, windowNumber: number): AgentMessage {
+	return {
+		role: "custom",
+		customType: CODEX_CONTEXT_WINDOW_MESSAGE_TYPE,
+		content: "window",
+		display: true,
+		details: {
+			protocol: 1,
+			id: `marker-${windowId}`,
+			sessionId: "session-1",
+			contextManagement: {
+				protocol: 1,
+				kind: "window",
+				firstWindowId: "w1",
+				currentWindowId: windowId,
+				windowNumber,
+			},
+		},
+		timestamp: 1,
+	} as unknown as AgentMessage;
+}
+
+test("trims the previous window while re-anchoring the prompt and tool head", () => {
+	const head = headMessage(["read", "bash"]);
+	const oldTurn = { role: "user", content: "before", timestamp: 2 } as unknown as AgentMessage;
+	const currentTurn = { role: "user", content: "after", timestamp: 3 } as unknown as AgentMessage;
+	const secondMarker = projectedWindowMarker("w2", 1);
+	const manager = new CodexContextWindowManager();
+
+	const projected = manager.project([head, projectedWindowMarker("w1", 0), oldTurn, secondMarker, currentTurn], "remote");
+
+	// Pi builds `params.tools` from transcript system messages only: without the rebuilt
+	// head the new window would be sent with no tools at all.
+	expect((projected[0] as unknown as { role?: string }).role).toBe("system");
+	expect(declaredToolNames(projected)).toEqual(["read", "bash"]);
+	expect(projected).toContain(secondMarker);
+	expect(projected).toContain(currentTurn);
+	expect(projected).not.toContain(oldTurn);
+	expect(manager.takeProjectionDiagnostics()).toEqual([]);
+});
+
+test("the inactive projection drops markers but keeps the head", () => {
+	const head = headMessage(["read"]);
+	const manager = new CodexContextWindowManager();
+	const turn = { role: "user", content: "keep", timestamp: 2 } as unknown as AgentMessage;
+
+	const projected = manager.project([head, projectedWindowMarker("w1", 0), turn], "off");
+
+	expect(projected).toEqual([head, turn]);
+});
+
+test("the manager remembers the head that a boundary compaction removed", () => {
+	const head = headMessage(["read", "bash"]);
+	const secondMarker = projectedWindowMarker("w2", 1);
+	const oldTurn = { role: "user", content: "before", timestamp: 2 } as unknown as AgentMessage;
+	const currentTurn = { role: "user", content: "after", timestamp: 3 } as unknown as AgentMessage;
+	const manager = new CodexContextWindowManager();
+
+	manager.project([head, projectedWindowMarker("w1", 0), oldTurn, secondMarker, currentTurn], "remote");
+
+	// Pi's branch after the boundary compaction starts at the marker: the entry that
+	// declared the tools is gone from the transcript entirely.
+	const compacted = manager.project([secondMarker, currentTurn], "remote");
+
+	expect((compacted[0] as unknown as { role?: string }).role).toBe("system");
+	expect(declaredToolNames(compacted)).toEqual(["read", "bash"]);
+	expect(compacted).toContain(currentTurn);
+});
+
+function bulkReport(overrides: Partial<WindowBulkReport> = {}): WindowBulkReport {
+	return {
+		windowId: "w9",
+		unmanagedTokens: 400_000,
+		managedTokens: 20_000,
+		targetContextWindow: 272_000,
+		expanded: true,
+		overBudget: true,
+		...overrides,
+	};
+}
+
+test("a bulk cliff is surfaced once per window and model", () => {
+	const head = headMessage(["read"]);
+	const first = projectedWindowMarker("w1", 0);
+	const second = projectedWindowMarker("w2", 1);
+	const turn = { role: "user", content: "work", timestamp: 2 } as unknown as AgentMessage;
+	const manager = new CodexContextWindowManager();
+	manager.project([head, first, turn, second, turn], "remote");
+
+	const report = bulkReport();
+	manager.noteWindowBulk(report, "uwoacrimson/gpt-5.6-luna");
+
+	expect(manager.takeBulkCliff("uwoacrimson/gpt-5.6-luna")).toBe(report);
+	expect(manager.takeBulkCliff("uwoacrimson/gpt-5.6-luna")).toBeUndefined();
+	// The same retirement seen by a different model is a different decision.
+	expect(manager.takeBulkCliff("uwoacrimson/deepseek-v4-flash-0731")).toBe(report);
+	expect(manager.takeBulkCliff("uwoacrimson/deepseek-v4-flash-0731")).toBeUndefined();
+
+	// A new window re-arms the notice, and a reset forgets it entirely.
+	manager.noteWindowBulk(bulkReport({ expanded: false }), "uwoacrimson/gpt-5.6-luna");
+	expect(manager.takeBulkCliff("uwoacrimson/gpt-5.6-luna")).toBeUndefined();
+	manager.project([head, second, turn], "remote");
+	manager.noteWindowBulk(report, "uwoacrimson/gpt-5.6-luna");
+	manager.reset();
+	expect(manager.takeBulkCliff("uwoacrimson/gpt-5.6-luna")).toBeUndefined();
+});
+
+test("the notice survives a model that never opened the window lifecycle", () => {
+	// An uncovered model never initializes a window identity, and that is exactly the
+	// session the cliff exists for: it must still be surfaced, once per model.
+	const manager = new CodexContextWindowManager();
+	const report = bulkReport();
+	manager.noteWindowBulk(report, "uwoacrimson/Qwen3.8-Flash");
+
+	expect(manager.takeBulkCliff("uwoacrimson/Qwen3.8-Flash")).toBe(report);
+	expect(manager.takeBulkCliff("uwoacrimson/Qwen3.8-Flash")).toBeUndefined();
+	expect(manager.takeBulkCliff("uwoacrimson/gpt-5.6-luna")).toBe(report);
+});

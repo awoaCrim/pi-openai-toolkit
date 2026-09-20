@@ -212,6 +212,7 @@ standalone 路由属于实验性的 CPA/Codex 网关协议，不是稳定的公�
 | `compaction.gatewayContextModels` | `[]` | 允许使用远程上下文的网关模型。 |
 | `compaction.remoteCompactModel` | 未设置 | 仅用于 v2 压缩请求的可选模型。 |
 | `compaction.remoteV2ContextSource` | `"legacy"` | 保留原来的原始 session/branch 输入路径。设置为 `"pi-context-hook"` 后才启用 Pi 的有序 context hook projection。检查点与模式绑定。 |
+| `compaction.leaveManagedMode` | `"warn"` | 会话即将把整份持久 transcript（而不只是当前远程窗口）交给某个模型时的处理方式。`"warn"` 每个窗口与模型只提示一次；`"compact"` 在退役历史还超过该模型上下文窗口 80% 时额外先执行一次压缩——发生在切换模型时，或发生在仍排队着换窗裁剪的轮次结束时。print（`-p`）模式与没有排队裁剪的轮次只做提示，因为那种位置上的压缩无法跑完。 |
 | `compaction.contextReminderThresholdPercent` | `5` | 每个窗口触发一次提醒的剩余预算百分比。设置为 `0` 会关闭提醒和窗口耗尽兜底。 |
 | `webSearch.enabled` | `true` | 工具包联网搜索路由的总开关。设为 `false` 时不选择任何工具包路由。 |
 | `webSearch.defaultRoute` | 未设置 | 默认路由：`local`、`hosted` 或 `standalone-alpha`。未设置时保留旧版行为。 |

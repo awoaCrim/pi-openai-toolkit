@@ -74,8 +74,16 @@ export type NativeFallbackConfig = {
 	thinkingLevel: ThinkingLevel;
 };
 
+/** How the toolkit reacts when leaving remote context management would re-expand the transcript. */
+export type LeaveManagedModePolicy = "warn" | "compact";
+
 export type CompactionConfig = {
 	enabled: boolean;
+	/**
+	 * What to do when the session is about to hand a model the whole durable transcript
+	 * instead of its remote window: warn, or compact the retired windows away first.
+	 */
+	leaveManagedMode: LeaveManagedModePolicy;
 	/** Optional Codex Remote Context management. Disabled by default for compatibility. */
 	contextManagement: ContextManagementMode;
 	/**
@@ -565,6 +573,7 @@ export const DEFAULT_COMPACTION_CONFIG: CompactionConfig = {
 	nativeFallback: { ...DEFAULT_NATIVE_FALLBACK_CONFIG },
 	responsesApis: [...RESPONSES_COMPACT_CAPABLE_APIS],
 	gatewayContextModels: [],
+	leaveManagedMode: "warn",
 	contextReminderThresholdPercent: 5,
 	notifyOnLoad: false,
 	debug: false,

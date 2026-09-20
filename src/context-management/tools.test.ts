@@ -267,3 +267,79 @@ test("a same-name definition with extra prompt guidance stays a conflict", () =>
 	expect(harness.controller.registrationState).toBe("conflict");
 	expect(harness.controller.sync(true)).toEqual({ synced: false, registrationState: "conflict" });
 });
+
+function switchedWindowMarker(): never {
+	return {
+		type: "custom_message", id: "entry-switch", parentId: null, timestamp: "2026-09-07T00:00:00.000Z",
+		customType: CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, content: "window", display: true,
+		details: {
+			protocol: 1, id: "m-switch", sessionId: "session-1",
+			contextManagement: { protocol: 1, kind: "window", firstWindowId: "w1", currentWindowId: "w2", windowNumber: 1 },
+		},
+	} as never;
+}
+
+const bashResultEntry = {
+	type: "message", id: "res-bash", parentId: null, timestamp: "2026-09-07T00:00:03.000Z",
+	message: {
+		role: "toolResult", toolCallId: "tc-bash", toolName: "bash", isError: false,
+		content: [{ type: "text", text: "done" }],
+	},
+};
+
+test("a window entered by rollover must do real work before rolling over again", async () => {
+	const idleBranch = [switchedWindowMarker(), notesCallEntry, notesOkEntry] as never[];
+	const manager = new CodexContextWindowManager(async () => undefined);
+	manager.restore(idleBranch, "session-1");
+	const tools = createContextManagementTools(activePi, manager, () => true);
+
+	const refused = await tools.newContext.execute("t1", {}, undefined, undefined, makeCtx(idleBranch));
+
+	expect(refused.details).toEqual({ started: false });
+	expect(refused.content[0]?.text).toContain("has not run any substantive tool");
+
+	const workedBranch = [switchedWindowMarker(), notesCallEntry, notesOkEntry, bashResultEntry] as never[];
+	const workedCtx = makeCtx(workedBranch);
+	manager.synchronize(workedCtx);
+
+	const allowed = await tools.newContext.execute("t2", {}, undefined, undefined, workedCtx);
+
+	expect(allowed.details).toEqual({ started: true });
+});
+
+test("the first window can still roll over without any tool activity", async () => {
+	const branch = [
+		{
+			type: "custom_message", id: "entry-first", parentId: null, timestamp: "2026-09-07T00:00:00.000Z",
+			customType: CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, content: "window", display: true,
+			details: {
+				protocol: 1, id: "m-first", sessionId: "session-1",
+				contextManagement: { protocol: 1, kind: "window", firstWindowId: "w1", currentWindowId: "w1", windowNumber: 0 },
+			},
+		},
+		notesCallEntry,
+		notesOkEntry,
+	] as never[];
+	const manager = new CodexContextWindowManager(async () => undefined);
+	manager.restore(branch, "session-1");
+	const tools = createContextManagementTools(activePi, manager, () => true);
+
+	const started = await tools.newContext.execute("t1", {}, undefined, undefined, makeCtx(branch));
+
+	expect(started.details).toEqual({ started: true });
+});
+
+test("an exhausted switched window can still escape through new_context", async () => {
+	const branch = [switchedWindowMarker(), notesCallEntry, notesOkEntry] as never[];
+	const manager = new CodexContextWindowManager(async () => undefined);
+	manager.restore(branch, "session-1");
+	const tools = createContextManagementTools(activePi, manager, () => true);
+	const exhaustedCtx = {
+		...makeCtx(branch),
+		getContextUsage: () => ({ tokens: 100_000, contextWindow: 100_000 }),
+	} as never;
+
+	const started = await tools.newContext.execute("t1", {}, undefined, undefined, exhaustedCtx);
+
+	expect(started.details).toEqual({ started: true });
+});

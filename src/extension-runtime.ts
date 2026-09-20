@@ -18,6 +18,12 @@ import { routeContextNamespaceToolMessage } from "./context-management/namespace
 import { loadHistoryNotesThreadHint } from "./context-management/history-notes";
 import { CodexContextWindowManager } from "./context-management/window-manager";
 import {
+	BULK_CLIFF_RATIO,
+	decideBulkCliffAction,
+	decideBulkCloseOut,
+	evaluateWindowBulk,
+} from "./context-management/window-bulk";
+import {
 	registerContextManagementTools,
 	type ContextToolRegistrationState,
 } from "./context-management/tools";
@@ -170,6 +176,34 @@ function isCodexContextModel(
 function notifyRemoteContextFailure(ctx: ExtensionContext, reason: string): void {
 	if (ctx.hasUI) {
 		ctx.ui.notify(`${COMPACTION_EXTENSION_ID}: Remote Context management inactive (${reason})`, "warning");
+	}
+}
+
+/**
+ * Surface every window trim that had to be refused to keep the tool loadout intact.
+ *
+ * The refusal itself is safe: the model keeps the previous turns instead of losing its
+ * tools. It is still a continuity incident, so it is recorded once per window and reason
+ * instead of being allowed to pass silently.
+ */
+function reportProjectionDiagnostics(
+	contextWindows: CodexContextWindowManager,
+	config: CompactionConfig,
+	ctx: ExtensionContext,
+): void {
+	const diagnostics = contextWindows.takeProjectionDiagnostics();
+	if (diagnostics.length === 0) return;
+	writeDebugArtifact(
+		"compaction-event",
+		{ event: "context.projection.tool_loadout_shrink", diagnostics },
+		config,
+		ctx,
+	);
+	if (ctx.hasUI) {
+		ctx.ui.notify(
+			`${COMPACTION_EXTENSION_ID}: kept previous context to preserve tools (${diagnostics.join("; ")})`,
+			"warning",
+		);
 	}
 }
 
@@ -669,6 +703,8 @@ async function handleSessionBeforeCompact(
 			reason: fallback.reason,
 			modelSpec: fallback.modelSpec,
 			errorMessage: fallback.errorMessage,
+			...(fallback.estimatedTokens === undefined ? {} : { estimatedTokens: fallback.estimatedTokens }),
+			...(fallback.contextWindow === undefined ? {} : { contextWindow: fallback.contextWindow }),
 		},
 		config,
 		ctx,
@@ -679,7 +715,15 @@ async function handleSessionBeforeCompact(
 		fallback.reason === "disabled" ||
 		fallback.reason === "no-model-configured" ||
 		fallback.reason === "same-as-current-model";
-	if (!intentionalSkip) {
+	if (fallback.reason === "model-window-too-small") {
+		// The configured summary model is narrower than the request Pi would send for it.
+		// Skipping is the success path here: pi's current model gets one chance instead of
+		// the provider terminating the oversized summary.
+		notifyWarning(
+			ctx,
+			`compaction summary model "${fallback.modelSpec}" cannot fit ~${fallback.estimatedTokens} tokens in its ${fallback.contextWindow} window; compacting with the current model instead`,
+		);
+	} else if (!intentionalSkip) {
 		notifyWarning(
 			ctx,
 			`compaction model "${fallback.modelSpec}" unusable (${fallback.reason}${fallback.errorMessage ? `: ${fallback.errorMessage}` : ""}); using pi's default compaction`,
@@ -688,6 +732,74 @@ async function handleSessionBeforeCompact(
 
 	// Branch 3: pi's default native compaction with the current model.
 	return undefined;
+}
+
+/**
+ * Surface (and optionally close) the gap between the durable transcript and the remote window.
+ *
+ * Remote context management retires previous windows in the request projection, so a covered
+ * model never notices that the branch still carries every one of them. Switching to a model
+ * without remote context - or resuming such a session - hands that whole pile to the provider
+ * at once, and the first manual `/compact` then has to summarize it. Runs once per agent turn,
+ * never per request, and only once per window and model so the notice cannot become a nag.
+ */
+async function handleWindowBulk(
+	ctx: ExtensionContext,
+	contextWindows: CodexContextWindowManager,
+	loadConfig: typeof loadToolkitConfig,
+	trigger: "model-switch" | "turn-end",
+): Promise<void> {
+	const { config: config } = loadConfig();
+	const compaction = config.compaction;
+	if (!compaction.enabled || compaction.contextManagement !== "remote") return;
+	if (!ctx.model) return;
+
+	const modelKey = `${ctx.model.provider}/${ctx.model.id}`;
+	const report = evaluateWindowBulk(ctx);
+	if (!report) return;
+	contextWindows.noteWindowBulk(report, modelKey);
+	const cliff = contextWindows.takeBulkCliff(modelKey);
+	if (!cliff) return;
+	const action = decideBulkCloseOut({
+		action: decideBulkCliffAction(cliff, compaction.leaveManagedMode),
+		mode: ctx.mode,
+		trigger,
+		hasPendingTrim: contextWindows.hasPendingTrim(),
+	});
+	if (action === "ignore") return;
+
+	writeDebugArtifact(
+		"compaction-event",
+		{
+			event: `window-bulk.${action}`,
+			trigger,
+			policy: compaction.leaveManagedMode,
+			model: modelKey,
+			unmanagedTokens: cliff.unmanagedTokens,
+			managedTokens: cliff.managedTokens,
+			targetContextWindow: cliff.targetContextWindow,
+			overBudget: cliff.overBudget,
+		},
+		compaction,
+		ctx,
+	);
+
+	const gap = `${cliff.unmanagedTokens.toLocaleString()} tokens of retired windows are still in this session's transcript, while remote context management has been sending ${cliff.managedTokens.toLocaleString()}`;
+	if (action === "warn") {
+		notifyWarning(
+			ctx,
+			`${gap} to ${modelKey}${cliff.overBudget ? `, past ${Math.round(BULK_CLIFF_RATIO * 100)}% of its window` : ""}. Checkpoint with notes and run /compact (or new_context) before continuing on a model without remote context, or set compaction.leaveManagedMode="compact" to do it automatically.`,
+		);
+		return;
+	}
+
+	notifyWarning(ctx, `${gap} to ${modelKey}, past ${Math.round(BULK_CLIFF_RATIO * 100)}% of its window; compacting the retired windows first.`);
+	if (typeof ctx.compact !== "function") return;
+	ctx.compact({
+		onError: (error: Error) => {
+			notifyWarning(ctx, `automatic boundary compaction failed: ${error.message}`);
+		},
+	});
 }
 
 async function handleContextInternal(
@@ -726,6 +838,7 @@ async function handleContextInternal(
 					config.contextReminderThresholdPercent,
 				);
 				const projected = contextWindows.project(event.messages, "remote");
+				reportProjectionDiagnostics(contextWindows, config, ctx);
 				return projected.length === event.messages.length && projected.every((message, index) => message === event.messages[index])
 					? undefined
 					: { messages: projected };
@@ -1145,6 +1258,11 @@ export default function registerCompactionExtension(
 		contextWindows.reset();
 		tools.reset();
 	});
+	pi.on("agent_settled", async (_event, ctx) => {
+		// Idle: no retry, compaction, or queued continuation is left running, so this is the
+		// only safe place to spend a model call on the user's behalf.
+		await handleWindowBulk(ctx, contextWindows, dependencies.loadConfig, "turn-end");
+	});
 	pi.on("model_select", async (event, ctx) => {
 		// Switching into a covered model mid-session must open the window
 		// lifecycle immediately: without an identity the request rewrite skips
@@ -1152,6 +1270,9 @@ export default function registerCompactionExtension(
 		// new_context would trim pre-switch history that no history can recover.
 		// syncTools() activates and initializes the window when the model is covered.
 		await syncTools(ctx, event.model, { notifyWindowFailure: true });
+		// The switch itself is the moment the durable transcript changes consumer, and the
+		// session is idle here, so the close-out must happen now rather than mid-turn.
+		await handleWindowBulk(ctx, contextWindows, dependencies.loadConfig, "model-switch");
 	});
 	pi.on("before_agent_start", async (_event, ctx) => {
 		await syncTools(ctx, ctx.model, { notifyWindowFailure: true });

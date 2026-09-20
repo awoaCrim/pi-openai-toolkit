@@ -212,6 +212,7 @@ The config file is `~/.pi/agent/extensions/pi-openai-toolkit/config.json`. Unkno
 | `compaction.gatewayContextModels` | `[]` | Gateway models allowed to use Remote Context. |
 | `compaction.remoteCompactModel` | unset | Optional model used only for a v2 compaction request. |
 | `compaction.remoteV2ContextSource` | `"legacy"` | Preserve the original raw session/branch input path. Set `"pi-context-hook"` to opt into Pi's ordered context-hook projection. Checkpoints are mode-specific. |
+| `compaction.leaveManagedMode` | `"warn"` | What to do when a session is about to hand a model the whole durable transcript instead of its remote window. `"warn"` notices once per window and model; `"compact"` additionally runs a compaction when the retired history also passes 80% of that model's context window - on a model switch, or at the end of a turn that still has a queued rollover trim. Print (`-p`) runs and turns without a queued trim stay at the warning, because a compaction started there cannot finish. |
 | `compaction.contextReminderThresholdPercent` | `5` | Remaining budget percentage for the once-per-window reminder. `0` disables the reminder and exhausted-window fallback. |
 | `webSearch.enabled` | `true` | Total switch for the toolkit's Web Search route selection. `false` selects no toolkit route. |
 | `webSearch.defaultRoute` | unset | Default route: `local`, `hosted`, or `standalone-alpha`. Unset preserves legacy behavior. |
