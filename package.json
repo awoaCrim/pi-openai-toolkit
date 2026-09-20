@@ -1,6 +1,6 @@
 {
   "name": "pi-openai-toolkit",
-  "version": "0.14.12",
+  "version": "0.14.13",
   "private": false,
   "type": "module",
   "engines": {
@@ -54,6 +54,7 @@
     "src/context-management/messages.ts",
     "src/context-management/window-budget.ts",
     "src/context-management/window-request.ts",
+    "src/context-management/window-bulk.ts",
     "src/context-management/window-manager.ts",
     "src/context-management/codex-provider.ts",
     "src/context-management/history-notes.ts",
