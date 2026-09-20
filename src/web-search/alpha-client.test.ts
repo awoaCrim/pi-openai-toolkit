@@ -41,7 +41,7 @@ function fetchOnce(response: Response, seen: Array<{ input: string; init?: Reque
 	};
 }
 
-describe("standalone web.run protocol", () => {
+describe("standalone web_run protocol", () => {
 	test("exposes nullable optional command fields and no required top-level properties", () => {
 		expect(STANDALONE_WEB_RUN_PARAMETERS.required).toBeUndefined();
 		for (const name of [

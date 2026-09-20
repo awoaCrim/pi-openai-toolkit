@@ -4,7 +4,7 @@ import type { WebSearchConfig, WebSearchRoute } from "../types";
 export const WEB_SEARCH_CAPABLE_APIS = ["openai-responses", "openai-codex-responses"] as const;
 export const WEB_SEARCH_SOURCE_INCLUDE = "web_search_call.action.sources";
 export const WEB_SEARCH_PROMPT_MARKER = "<!-- pi-openai-toolkit:web-search -->";
-export const WEB_RUN_TOOL_NAME = "web.run";
+export const WEB_RUN_TOOL_NAME = "web_run";
 export const LOCAL_WEB_SEARCH_TOOL_NAME = "web_search";
 
 export type WebSearchCapableApi = (typeof WEB_SEARCH_CAPABLE_APIS)[number];

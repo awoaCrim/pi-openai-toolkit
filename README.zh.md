@@ -13,7 +13,7 @@
 | --- | --- |
 | Codex 远程上下文 | 切换到新上下文窗口，并通过 `history` 按需检索较早窗口。 |
 | 远程压缩 v2 | 使用服务端返回的加密检查点继续符合条件的 Responses 会话。 |
-| 联网搜索路由 | 按精确模型路由选择本地 `pi-web-access`、Responses 托管 `web_search` 或 CPA standalone `web.run`。 |
+| 联网搜索路由 | 按精确模型路由选择本地 `pi-web-access`、Responses 托管 `web_search` 或 CPA standalone `web_run`。 |
 | 图像生成 | 生成图片，或根据明确传入的本地参考图片进行编辑。 |
 | 工具调用审查 | 在指定范围的工具调用执行前，由审查模型判断是否允许执行。 |
 
@@ -153,7 +153,7 @@ pi --model my-gateway/gpt-5.6-luna
 
 路由选择是精确且确定的：`routes[provider/model-id]` 优先于 `defaultRoute`，`defaultRoute` 优先于旧版 `models` 列表。不支持通配符、模糊模型匹配、按模型名称猜能力、路由间 fallback 或重试。无效的路由值或模型键会告警后忽略，不会猜测路由；新旧字段重叠时会给出迁移告警。`enabled: false` 会释放工具包的工具所有权，并关闭工具包选择的全部三条路径。
 
-- **`local`** 保留已经安装的 `pi-web-access` `web_search` 工具。如果它原本没有激活，工具包不会替你激活；同时不会添加托管 provider 工具或 `web.run`。
+- **`local`** 保留已经安装的 `pi-web-access` `web_search` 工具。如果它原本没有激活，工具包不会替你激活；同时不会添加托管 provider 工具或 `web_run`。
 - **`hosted`** 移除名为 `web_search` 的本地 function，并注入原生 Responses `{ "type": "web_search" }` 工具和来源标注。旧版配置仍然有效：
 
   ```json
@@ -165,7 +165,7 @@ pi --model my-gateway/gpt-5.6-luna
   ```
 
   没有配置新路由字段时，只有精确命中该列表、且 API 属于现有 Responses 系列（`openai-responses` 或 `openai-codex-responses`）的模型会使用托管搜索。
-- **`standalone-alpha`** 暴露一个 sequential 的 `web.run` 工具，并向 provider 相对的 `/alpha/search` 端点发送一次隔离的 `POST` 请求。例如基础地址是 `https://gateway.example/v1` 时，请求地址是 `https://gateway.example/v1/alpha/search`，不会变成 Responses 端点。支持的命令族包括 `search_query`、`image_query`、`open`、`click`、`find`、`screenshot`、`finance`、`weather`、`sports` 和 `time`；`response_length` 用于调整请求的结果长度。
+- **`standalone-alpha`** 暴露一个 sequential 的 `web_run` 工具，并向 provider 相对的 `/alpha/search` 端点发送一次隔离的 `POST` 请求。例如基础地址是 `https://gateway.example/v1` 时，请求地址是 `https://gateway.example/v1/alpha/search`，不会变成 Responses 端点。支持的命令族包括 `search_query`、`image_query`、`open`、`click`、`find`、`screenshot`、`finance`、`weather`、`sports` 和 `time`；`response_length` 用于调整请求的结果长度。
 
 standalone 路由属于实验性的 CPA/Codex 网关协议，不是稳定的公开 OpenAI Responses 端点。网关/provider 必须提供 `/alpha/search`、启用 `alpha-search` 能力，并支持 standalone web search（Codex provider 通常以 `supports_standalone_web_search = true` 表示）。请求会复用 Pi 当前模型、认证、provider headers、会话标识及 Codex/gateway affinity，不会切换当前模型。MVP 发送受边界限制的命令 envelope，而不是完整会话 transcript；`ref_id` 后续操作依赖 provider 的会话/引用处理；每次工具调用最多发送一次请求；配置无效、路由不可用、取消、超时、非 2xx、响应畸形或超限时都会 fail closed。
 

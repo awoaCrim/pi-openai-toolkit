@@ -158,7 +158,7 @@ describe("synthetic producer cache eligibility", () => {
 				model: identity.model,
 				input: [],
 				tools: [
-					{ type: "function", name: "web.run" },
+					{ type: "function", name: "web_run" },
 					{ type: "function", name: "web_search" },
 					{ type: "web_search" },
 					{ type: "web_search_preview" },

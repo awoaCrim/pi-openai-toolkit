@@ -1,4 +1,5 @@
 import type { ResponsesCompatibleRequestPayload } from "./runtime";
+import { LOCAL_WEB_SEARCH_TOOL_NAME, WEB_RUN_TOOL_NAME } from "./web-search/types";
 
 /**
  * Explicit allowlist of fields mirrored from the latest live Responses request.
@@ -44,7 +45,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isWebSearchTool(value: unknown): boolean {
 	if (!isRecord(value)) return false;
 	if (value.type === "web_search" || value.type === "web_search_preview") return true;
-	return value.type === "function" && (value.name === "web_search" || value.name === "web.run");
+	return value.type === "function" && (value.name === LOCAL_WEB_SEARCH_TOOL_NAME || value.name === WEB_RUN_TOOL_NAME);
 }
 
 function sameIdentity(cachedIdentity: RequestContextIdentity, current: RequestContextIdentity): boolean {

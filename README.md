@@ -13,7 +13,7 @@ Add Codex context windows, Responses compaction, hosted tools, and reviewed tool
 | --- | --- |
 | Codex Remote Context | Start a new context window and retrieve earlier windows with `history`. |
 | Remote Compaction v2 | Continue an eligible Responses session with an encrypted server checkpoint. |
-| Web Search routes | Choose local `pi-web-access`, hosted Responses `web_search`, or CPA standalone `web.run` per exact model route. |
+| Web Search routes | Choose local `pi-web-access`, hosted Responses `web_search`, or CPA standalone `web_run` per exact model route. |
 | Image generation | Generate images or edit explicitly supplied local reference images. |
 | Tool-call review | Ask a reviewer model whether selected tool calls may run. |
 
@@ -153,7 +153,7 @@ Web Search has three mutually exclusive routes. Configure one global default and
 
 Route selection is exact and deterministic: `routes[provider/model-id]` wins over `defaultRoute`; `defaultRoute` wins over the legacy `models` list. There is no wildcard, fuzzy model matching, capability guessing, fallback, or retry between routes. Invalid route values/keys are ignored with warnings rather than guessed, and overlapping new/legacy fields produce migration warnings. `enabled: false` releases toolkit ownership and disables all three toolkit-selected paths.
 
-- **`local`** keeps the already-installed `pi-web-access` `web_search` tool. The toolkit does not activate it when it was not active, and it does not add a hosted provider tool or `web.run`.
+- **`local`** keeps the already-installed `pi-web-access` `web_search` tool. The toolkit does not activate it when it was not active, and it does not add a hosted provider tool or `web_run`.
 - **`hosted`** removes the local function named `web_search` and injects the native Responses `{ "type": "web_search" }` tool plus source annotations. The legacy configuration remains valid:
 
   ```json
@@ -165,7 +165,7 @@ Route selection is exact and deterministic: `routes[provider/model-id]` wins ove
   ```
 
   With no new route fields, only models in this exact list and the existing Responses-family APIs (`openai-responses` or `openai-codex-responses`) use hosted search.
-- **`standalone-alpha`** exposes one sequential `web.run` tool and sends one isolated `POST` request to the provider-relative `/alpha/search` endpoint. A base URL such as `https://gateway.example/v1` therefore receives `https://gateway.example/v1/alpha/search`, not a Responses endpoint. Supported command families are `search_query`, `image_query`, `open`, `click`, `find`, `screenshot`, `finance`, `weather`, `sports`, and `time`; `response_length` controls the requested result size.
+- **`standalone-alpha`** exposes one sequential `web_run` tool and sends one isolated `POST` request to the provider-relative `/alpha/search` endpoint. A base URL such as `https://gateway.example/v1` therefore receives `https://gateway.example/v1/alpha/search`, not a Responses endpoint. Supported command families are `search_query`, `image_query`, `open`, `click`, `find`, `screenshot`, `finance`, `weather`, `sports`, and `time`; `response_length` controls the requested result size.
 
 The standalone route is an experimental CPA/Codex gateway protocol, not a stable public OpenAI Responses endpoint. The gateway/provider must expose `/alpha/search`, enable its `alpha-search` capability, and support standalone web search (Codex providers commonly expose this as `supports_standalone_web_search = true`). The request reuses Pi's current model, authentication, provider headers, session identity, and Codex/gateway affinity; it does not change the active model. The MVP sends the bounded command envelope rather than the full conversation transcript, relies on provider session/reference handling for `ref_id` follow-ups, makes at most one request per tool call, and fails closed on invalid configuration, unavailable routes, cancellation, timeout, non-2xx, malformed, or oversized responses.
 

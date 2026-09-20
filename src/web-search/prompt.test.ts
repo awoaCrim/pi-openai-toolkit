@@ -75,7 +75,7 @@ describe("appendWebSearchPrompt", () => {
 			systemPrompt: hosted,
 		});
 		expect(standalone.match(/<!-- pi-openai-toolkit:web-search -->/g)).toHaveLength(1);
-		expect(standalone).toContain("`web.run`");
+		expect(standalone).toContain("`web_run`");
 		expect(standalone).not.toContain("The hosted `web_search` tool");
 		const removed = appendWebSearchPrompt({
 			model,

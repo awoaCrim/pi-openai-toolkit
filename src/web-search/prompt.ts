@@ -1,6 +1,7 @@
 import type { WebSearchConfig } from "../types";
 import {
 	resolveWebSearchRoute,
+	WEB_RUN_TOOL_NAME,
 	WEB_SEARCH_PROMPT_MARKER,
 	type WebSearchModel,
 } from "./types";
@@ -18,7 +19,7 @@ The local \`web_search\` tool is available for this model. Use it when current o
 export const STANDALONE_ALPHA_WEB_SEARCH_PROMPT_SECTION = `${WEB_SEARCH_PROMPT_MARKER}
 ## Web Search
 
-The \`web.run\` tool is available for this model. It is a sequential local wrapper backed by CPA/Codex standalone search at the provider's \`/alpha/search\` endpoint. It supports \`search_query\`, \`image_query\`, \`open\`, \`click\`, \`find\`, \`screenshot\`, \`finance\`, \`weather\`, \`sports\`, and \`time\`. Use it for current or online information, preserve reference ids when following results, and cite the returned sources.`;
+The \`${WEB_RUN_TOOL_NAME}\` tool is available for this model. It is a sequential local wrapper backed by CPA/Codex standalone search at the provider's \`/alpha/search\` endpoint. It supports \`search_query\`, \`image_query\`, \`open\`, \`click\`, \`find\`, \`screenshot\`, \`finance\`, \`weather\`, \`sports\`, and \`time\`. Use it for current or online information, preserve reference ids when following results, and cite the returned sources.`;
 
 function removeToolkitWebSearchPrompt(systemPrompt: string): string {
 	const markerIndex = systemPrompt.indexOf(WEB_SEARCH_PROMPT_MARKER);
