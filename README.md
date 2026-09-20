@@ -201,12 +201,25 @@ Allow a model and reviewer in `autoMode`:
 
 Use `/auto on` in the session, or start Pi with `--auto`. The TUI shows an activation notice and temporarily changes the working indicator to `Auto mode: reviewing <tool>` while a gated call is being reviewed; the footer keeps the active gate visible. On Pi versions that expose the compatible tool renderer, each tool block in Auto Mode also gets a bottom line: reviewed calls show states such as `allowed by reviewer · low risk · authorization medium` or `denied · <reason>`, while calls outside the configured gate show `not reviewed · outside the configured gate`. If that renderer seam is unavailable, the extension warns once and keeps the footer-only status. The default `side-effect` gate reviews `bash`, `write`, `edit`, and configured extra tools. Set `gate` to `"all"` when every tool call needs review. A reviewer timeout does not approve a call.
 
+### Control Astra reasoning-effort updates
+
+By default, the toolkit preserves Pi's selected request-level reasoning effort. To opt into cache-preserving updates for `gpt-6-astra` on an `openai-responses` API, set this top-level field in the toolkit's `config.json`:
+
+```json
+{
+  "reasoning_effort_override": true
+}
+```
+
+Only enable this when the gateway supports `configuration_update`. The first request establishes a baseline; later effort changes are carried in `input` update items while top-level `reasoning.effort` remains at that baseline. When omitted or `false`, or when the API is not `openai-responses` (including `openai-codex-responses`), the toolkit leaves Pi's selected top-level effort unchanged. The existing Astra model restriction still applies. The flag is read for each request; a disabled request or model switch clears old baselines. This setting belongs to the toolkit, not Codex's `config.toml`.
+
 ## Common configuration
 
 The config file is `~/.pi/agent/extensions/pi-openai-toolkit/config.json`. Unknown keys are ignored with a warning. Most model lists use exact `provider/model-id` strings, not globs; `imageGeneration.models` is an exception and contains bare nested image-generation model IDs.
 
 | Key | Default | Use |
 | --- | --- | --- |
+| `reasoning_effort_override` | `false` | Opt into Astra `configuration_update` items only on `openai-responses`; otherwise preserve Pi's selected top-level effort. |
 | `compaction.enabled` | `true` | Master switch for compaction. |
 | `compaction.contextManagement` | `"off"` | Enables Codex Remote Context when set to `"remote"`. |
 | `compaction.gatewayContextModels` | `[]` | Gateway models allowed to use Remote Context. |

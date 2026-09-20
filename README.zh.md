@@ -201,12 +201,25 @@ standalone 路由属于实验性的 CPA/Codex 网关协议，不是稳定的公�
 
 在会话中使用 `/auto on`，也可以用 `--auto` 启动 Pi。TUI 会显示自动模式已开启的提示；每次审查受控工具时，工作指示器会临时显示 `Auto mode: reviewing <tool>`，底部状态栏会保留当前审查范围。在支持兼容 tool renderer 的 Pi 版本中，自动模式下每个工具块底部都会显示一行状态：已审查的调用会显示 `allowed by reviewer · low risk · authorization medium` 或 `denied · <reason>`，不在当前审查范围内的调用会显示 `not reviewed · outside the configured gate`。如果当前 Pi 没有这个 renderer seam，扩展会告警一次并继续使用底部状态栏提示。默认的 `side-effect` 审查范围覆盖 `bash`、`write`、`edit` 和额外配置的工具。如果需要审查所有工具调用，将 `gate` 设置为 `"all"`。审查超时不会自动放行调用。
 
+### 控制 Astra 思考档位更新
+
+默认保留 Pi 在请求顶层设置的思考档位。如果网关支持 `configuration_update`，可以在插件 `config.json` 的顶层添加：
+
+```json
+{
+  "reasoning_effort_override": true
+}
+```
+
+只有开启此选项、模型为 `gpt-6-astra` 且 API 为 `openai-responses` 时，才启用保留缓存的改写：首个请求建立基准，后续档位变化写入 `input` 中的更新项，顶层 `reasoning.effort` 保持基准值。未配置、设为 `false` 或 API 不匹配（包括 `openai-codex-responses`）时，插件保留 Pi 选择的顶层档位。每次请求都会读取开关；关闭状态下的请求或切换模型会清除旧基准。此设置属于插件，不读取 Codex 的 `config.toml`。
+
 ## 常用配置
 
 配置文件为 `~/.pi/agent/extensions/pi-openai-toolkit/config.json`。未知键会告警后忽略。大多数模型列表必须使用精确的 `provider/model-id` 字符串，不支持通配符；`imageGeneration.models` 是例外，填写嵌套生图工具使用的裸模型 ID。
 
 | 配置项 | 默认值 | 用途 |
 | --- | --- | --- |
+| `reasoning_effort_override` | `false` | 仅对 `openai-responses` 的 Astra 模型启用 `configuration_update`；否则保留 Pi 选择的顶层思考档位。 |
 | `compaction.enabled` | `true` | 压缩功能总开关。 |
 | `compaction.contextManagement` | `"off"` | 设置为 `"remote"` 后启用 Codex 远程上下文。 |
 | `compaction.gatewayContextModels` | `[]` | 允许使用远程上下文的网关模型。 |

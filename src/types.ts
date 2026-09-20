@@ -201,6 +201,8 @@ export const BREAKER_WINDOW_MIN = 1;
 export const BREAKER_WINDOW_MAX = 200;
 
 export type ToolkitConfig = {
+	/** Opt into Astra configuration_update items on openai-responses. */
+	reasoning_effort_override: boolean;
 	compaction: CompactionConfig;
 	webSearch: WebSearchConfig;
 	imageGeneration: ImageGenerationConfig;
@@ -612,6 +614,7 @@ export const DEFAULT_AUTO_MODE_CONFIG: AutoModeConfig = {
 };
 
 export const DEFAULT_TOOLKIT_CONFIG: ToolkitConfig = {
+	reasoning_effort_override: false,
 	compaction: DEFAULT_COMPACTION_CONFIG,
 	webSearch: DEFAULT_WEB_SEARCH_CONFIG,
 	imageGeneration: DEFAULT_IMAGE_GENERATION_CONFIG,

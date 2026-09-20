@@ -43,7 +43,7 @@ import { MAX_IMAGE_MODEL_ID_CHARS } from "./image-generation/types";
 export const CONFIG_DIR = path.join(os.homedir(), ".pi", "agent", "extensions", TOOLKIT_ID);
 export const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 
-const TOP_LEVEL_FIELDS = new Set(["compaction", "webSearch", "imageGeneration", "autoMode"]);
+const TOP_LEVEL_FIELDS = new Set(["compaction", "webSearch", "imageGeneration", "autoMode", "reasoning_effort_override"]);
 const COMPACTION_FIELDS = new Set([
 	"enabled",
 	"contextManagement",
@@ -320,6 +320,7 @@ function toReviewerTimeoutMs(value: unknown, fieldPath: string, warnings: string
 
 function cloneDefaults(): ToolkitConfig {
 	return {
+		reasoning_effort_override: DEFAULT_TOOLKIT_CONFIG.reasoning_effort_override,
 		compaction: {
 			...DEFAULT_COMPACTION_CONFIG,
 			nativeFallback: { ...DEFAULT_NATIVE_FALLBACK_CONFIG },
@@ -671,6 +672,9 @@ export function loadToolkitConfig(configPath: string = CONFIG_PATH): LoadedToolk
 	if (raw) {
 		source = configPath;
 		warnUnknownFields(raw, TOP_LEVEL_FIELDS, "", warnings);
+		resolved.reasoning_effort_override =
+			toBoolean(raw.reasoning_effort_override, "reasoning_effort_override", warnings) ??
+			resolved.reasoning_effort_override;
 
 		if (raw.compaction !== undefined) {
 			if (isRecord(raw.compaction)) {

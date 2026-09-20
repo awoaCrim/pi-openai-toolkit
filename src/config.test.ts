@@ -29,6 +29,21 @@ afterEach(() => {
 });
 
 describe("loadToolkitConfig", () => {
+	for (const value of [true, false]) {
+		test(`reads top-level reasoning_effort_override=${value}`, () => {
+			const loaded = loadToolkitConfig(writeTempConfig(JSON.stringify({ reasoning_effort_override: value })));
+			expect(loaded.config.reasoning_effort_override).toBe(value);
+			expect(loaded.warnings).toEqual([]);
+		});
+	}
+
+	for (const value of ["true", 1, null, {}]) {
+		test(`rejects invalid reasoning_effort_override=${JSON.stringify(value)}`, () => {
+			const loaded = loadToolkitConfig(writeTempConfig(JSON.stringify({ reasoning_effort_override: value })));
+			expect(loaded.config.reasoning_effort_override).toBe(false);
+			expect(loaded.warnings).toContain("Ignoring reasoning_effort_override: expected a boolean.");
+		});
+	}
 	test("uses the new canonical config path", () => {
 		expect(CONFIG_PATH).toBe(
 			path.join(os.homedir(), ".pi", "agent", "extensions", "pi-openai-toolkit", "config.json"),
@@ -41,6 +56,7 @@ describe("loadToolkitConfig", () => {
 
 		expect(loaded.source).toBeUndefined();
 		expect(loaded.warnings).toEqual([]);
+		expect(loaded.config.reasoning_effort_override).toBe(false);
 		expect(loaded.config.compaction.enabled).toBe(true);
 		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(false);
 		expect(loaded.config.compaction.contextManagement).toBe("off");

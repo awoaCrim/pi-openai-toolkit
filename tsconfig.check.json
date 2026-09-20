@@ -12,6 +12,8 @@
     "typeRoots": ["./node_modules/@types"]
   },
   "include": [
+    "src/codex-astra/extension.ts",
+    "src/codex-astra/effort-planner.ts",
     "src/compact-client.ts",
     "src/compaction-projection.ts",
     "src/pi-context-hook.ts",

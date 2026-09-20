@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { DEFAULT_TOOLKIT_CONFIG } from "../types";
 import { registerCodexAstraExtension } from "./extension";
 
 type Handler = (event: any, ctx: any) => unknown;
@@ -14,7 +15,7 @@ function codexModel(overrides: Record<string, unknown> = {}) {
 	};
 }
 
-function createHarness(options: { model?: unknown; sessionId?: string } = {}) {
+function createHarness(options: { model?: unknown; sessionId?: string; enabled?: boolean } = {}) {
 	const handlers = new Map<string, Handler[]>();
 	const pi = {
 		on: (event: string, handler: Handler) => {
@@ -25,18 +26,19 @@ function createHarness(options: { model?: unknown; sessionId?: string } = {}) {
 	} as any;
 
 	const ctx = {
-		model: options.model === undefined ? codexModel() : options.model,
+		model: options.model === undefined ? codexModel({ api: "openai-responses" }) : options.model,
 		sessionManager: {
 			getSessionId: () => options.sessionId ?? "sess-1",
 		},
 	};
 
-	registerCodexAstraExtension(pi);
+	const config = { ...DEFAULT_TOOLKIT_CONFIG, reasoning_effort_override: options.enabled ?? true };
+	registerCodexAstraExtension(pi, () => ({ config, warnings: [] }));
 
 	const fire = (event: string, e: any, c: any = ctx) =>
 		(handlers.get(event) ?? []).reduce<unknown>((payload, handler) => handler(e, c) ?? payload, undefined);
 
-	return { pi, ctx, handlers, fire };
+	return { pi, ctx, handlers, fire, config };
 }
 
 function requestPayload(effort: string, input: unknown[] = [{ role: "user", content: "hi" }]) {
@@ -44,7 +46,54 @@ function requestPayload(effort: string, input: unknown[] = [{ role: "user", cont
 }
 
 describe("codex astra extension wiring", () => {
-	test("astra models are activated silently by model id, other models pass through", () => {
+	for (const enabled of [false, true]) {
+		for (const api of ["openai-responses", "openai-codex-responses", "openai-completions"]) {
+			test(`medium to high respects enabled=${enabled}, api=${api}`, () => {
+				const { fire } = createHarness({ enabled, model: codexModel({ api }) });
+				fire("before_provider_request", { payload: requestPayload("medium") });
+				const selected = requestPayload("high", [
+					{ role: "user", content: "hi" },
+					{ role: "assistant", content: "reply" },
+					{ role: "user", content: "continue" },
+				]);
+				const snapshot = structuredClone(selected);
+				const outgoing = (fire("before_provider_request", { payload: selected }) ?? selected) as typeof selected;
+				const updates = outgoing.input.filter((item: any) => item.type === "configuration_update");
+				if (enabled && api === "openai-responses") {
+					expect(outgoing.reasoning.effort).toBe("medium");
+					expect(updates).toEqual([{ type: "configuration_update", reasoning: { effort: "high" } }]);
+				} else {
+					expect(outgoing).toBe(selected);
+					expect(outgoing.reasoning.effort).toBe("high");
+					expect(updates).toEqual([]);
+				}
+				expect(selected).toEqual(snapshot);
+			});
+		}
+	}
+
+	test("turning the flag off clears old baselines before it is enabled again", () => {
+		const { fire, config } = createHarness();
+		fire("before_provider_request", { payload: requestPayload("medium") });
+		expect((fire("before_provider_request", { payload: requestPayload("high") }) as any).reasoning.effort).toBe("medium");
+		config.reasoning_effort_override = false;
+		expect(fire("before_provider_request", { payload: requestPayload("high") })).toBeUndefined();
+		config.reasoning_effort_override = true;
+		expect(fire("before_provider_request", { payload: requestPayload("high") })).toBeUndefined();
+		const next = fire("before_provider_request", { payload: requestPayload("low") }) as any;
+		expect(next.reasoning.effort).toBe("high");
+		expect(next.input.filter((item: any) => item.type === "configuration_update")).toEqual([
+			{ type: "configuration_update", reasoning: { effort: "low" } },
+		]);
+	});
+
+	test("switching APIs retires an old Astra baseline", () => {
+		const { fire } = createHarness();
+		fire("before_provider_request", { payload: requestPayload("medium") });
+		fire("model_select", { model: codexModel() });
+		expect(fire("before_provider_request", { payload: requestPayload("high") })).toBeUndefined();
+	});
+	test("opted-in astra Responses models are rewritten, other models pass through", () => {
 		const { fire } = createHarness();
 		// Baseline request on the astra model: no rewrite needed yet.
 		expect(
@@ -108,7 +157,7 @@ describe("codex astra extension wiring", () => {
 		expect(fire("before_provider_request", { type: "before_provider_request", payload: foreign })).toBeUndefined();
 	});
 
-	test("openai-responses gateway astra models are rewritten too", () => {
+	test("opted-in openai-responses gateway astra models are rewritten", () => {
 		const { fire } = createHarness({
 			model: codexModel({ provider: "uwoacrimson", api: "openai-responses", id: "gpt-6-astra", baseUrl: "https://newapi.example/v1" }),
 		});
@@ -117,7 +166,7 @@ describe("codex astra extension wiring", () => {
 				type: "before_provider_request",
 				payload: { ...requestPayload("low"), model: "gpt-6-astra" },
 			}),
-		).toBeUndefined(); // baselines; same as codex family
+		).toBeUndefined(); // first request establishes the baseline
 		const changed = fire("before_provider_request", {
 			type: "before_provider_request",
 			payload: {
@@ -187,7 +236,7 @@ describe("codex astra extension wiring", () => {
 	});
 
 	test("headers hook adds the version gate to codex requests only", () => {
-		const { fire } = createHarness();
+		const { fire } = createHarness({ model: codexModel(), enabled: false });
 
 		const headers: Record<string, string | null> = { authorization: "Bearer x" };
 		fire("before_provider_headers", { type: "before_provider_headers", headers });

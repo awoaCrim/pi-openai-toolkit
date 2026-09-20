@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { loadToolkitConfig } from "../config";
 import { ASTRA_MODEL_ID } from "../types";
 import { CODEX_CLIENT_VERSION } from "../responses-headers";
 import {
@@ -52,7 +53,10 @@ function getSessionId(ctx: { sessionManager: { getSessionId(): string } }): stri
 	}
 }
 
-export function registerCodexAstraExtension(pi: ExtensionAPI): void {
+export function registerCodexAstraExtension(
+	pi: ExtensionAPI,
+	loadConfig: typeof loadToolkitConfig = loadToolkitConfig,
+): void {
 	const states = new Map<string, EffortControlState>();
 
 	// Switching or forking a session rebuilds the runtime and re-fires
@@ -61,18 +65,20 @@ export function registerCodexAstraExtension(pi: ExtensionAPI): void {
 		states.clear();
 	});
 
+	pi.on("model_select", () => {
+		states.clear();
+	});
+
 	pi.on("before_provider_request", (event, ctx) => {
 		try {
-			// Silent activation by design: the Astra compatibility layer exists only
-			// to keep `gpt-6-astra` working through the Codex backend gate, so it
-			// keys off the bare model id instead of an operator allowlist.
+			// Pi already encodes the selected thinking level in the payload.
+			// Only opt-in Astra Responses requests may pin it to a cache baseline.
+			const enabled = loadConfig().config.reasoning_effort_override;
 			const model = ctx.model;
-			// Both Responses wire families carry the same reasoning.effort prefix
-			// problem, and upstream OMP plans on both providers.
-			if (!model || (model.api !== "openai-codex-responses" && model.api !== "openai-responses")) {
+			if (!enabled || !model || model.api !== "openai-responses" || model.id !== ASTRA_MODEL_ID) {
+				states.clear();
 				return undefined;
 			}
-			if (model.id !== ASTRA_MODEL_ID) return undefined;
 
 			const payload = parseAstraPayload(event.payload);
 			// The payload must belong to the model the eligibility check just
@@ -83,7 +89,7 @@ export function registerCodexAstraExtension(pi: ExtensionAPI): void {
 			const sessionId = getSessionId(ctx);
 			const state = getEffortControlState(
 				states,
-				`${model.baseUrl ?? ""}\u0000${model.id}\u0000${sessionId ?? "no-session"}`,
+				`${model.provider}\u0000${model.api}\u0000${model.baseUrl ?? ""}\u0000${model.id}\u0000${sessionId ?? "no-session"}`,
 			);
 
 			// Idempotence: never plan on top of items a previous pass injected.
