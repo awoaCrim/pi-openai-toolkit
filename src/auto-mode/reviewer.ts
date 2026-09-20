@@ -1,4 +1,12 @@
-import type { Api, AssistantMessage, Context, Message, Model, Tool } from "@earendil-works/pi-ai";
+import type {
+	Api,
+	AssistantMessage,
+	Context,
+	Message,
+	Model,
+	Tool,
+	ToolCall,
+} from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { parseModelSpec } from "../runtime";
 import { backfillVerdictFields, buildReviewPrompt, reviewerSystemPrompt } from "./prompt";
@@ -93,11 +101,13 @@ function firstTextBlock(message: AssistantMessage): string {
 		.trim();
 }
 
-function toolCallBlocks(message: AssistantMessage) {
-	return message.content.filter(
-		(block): block is { type: "toolCall"; id: string; name: string; arguments: Record<string, unknown> } =>
-			block.type === "toolCall",
-	);
+/**
+ * Pi 0.85 typed tool-call arguments as `Record<string, any>` and Pi 0.86 tightened
+ * them to the public `JsonObject`. Narrow with Pi's exported `ToolCall` instead of a
+ * handwritten shape so the guard tracks whichever contract the installed Pi declares.
+ */
+function toolCallBlocks(message: AssistantMessage): ToolCall[] {
+	return message.content.filter((block): block is ToolCall => block.type === "toolCall");
 }
 
 type CompletionAttempt = {

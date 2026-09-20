@@ -16,7 +16,11 @@ try {
 	const { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore, InMemoryModelsStore } =
 		await import("@earendil-works/pi-ai");
 	const manifest = JSON.parse(await readFile(join(packageDir, "node_modules/@earendil-works/pi-coding-agent/package.json"), "utf8"));
-	if (manifest.version !== "0.85.1") throw new Error(`Unexpected local Pi version: ${manifest.version}`);
+	const packageManifest = JSON.parse(await readFile(join(packageDir, "package.json"), "utf8"));
+	const expectedPiVersion = packageManifest.devDependencies?.["@earendil-works/pi-coding-agent"];
+	if (manifest.version !== expectedPiVersion) {
+		throw new Error(`Unexpected local Pi version: ${manifest.version}; expected ${expectedPiVersion}`);
+	}
 	const modelRuntime = await ModelRuntime.create({
 		credentials: new InMemoryCredentialStore(), modelsStore: new InMemoryModelsStore(), modelsPath: null,
 		refreshOnCreate: false, allowModelNetwork: false,

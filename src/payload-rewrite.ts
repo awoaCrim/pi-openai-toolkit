@@ -337,7 +337,11 @@ export function removeNativeCompactionRetainedMessages(args: {
 	}
 	const firstKept = findEntryIndexByIdBeforeBoundary(args.branchEntries, args.compactionEntry.firstKeptEntryId, boundary);
 	if (firstKept === undefined) return { ok: false, reason: "first-kept-entry-not-found" };
-	const summary = structuredClone(sessionEntryToContextMessages(args.compactionEntry)[0]);
+	const summaryMessage = sessionEntryToContextMessages(args.compactionEntry).find(
+		(message) => message.role === "compactionSummary",
+	);
+	if (!summaryMessage) return { ok: false, reason: "compaction-summary-not-found" };
+	const summary = structuredClone(summaryMessage);
 	const summaryIndex = args.messages.findIndex((message) => areEquivalentValues(message, summary));
 	if (summaryIndex < 0) return { ok: false, reason: "compaction-summary-not-found" };
 	const retained = args.branchEntries
@@ -349,7 +353,13 @@ export function removeNativeCompactionRetainedMessages(args: {
 	// removed when present, while a missing or rewritten copy is left alone.
 	// Required user/assistant/tool messages keep the ordered, fail-closed
 	// matching contract.
-	const requiredRetained = retained.filter((message) => message.role !== "custom");
+	// Pi 0.86 promotes transcript system messages to the leading prompt when it
+	// rebuilds context after compaction. They can therefore appear before the
+	// compaction summary even when their session entry lies inside the retained
+	// span; keep them in place instead of treating that relocation as a mismatch.
+	const requiredRetained = retained.filter(
+		(message) => message.role !== "custom" && (message.role as string) !== "system",
+	);
 	const optionalRetained = retained.filter((message) => message.role === "custom");
 	const removed = new Set<number>();
 	let cursor = summaryIndex + 1;
@@ -388,7 +398,9 @@ export function serializeLiveTailToResponsesInput<TApi extends Api>(args: {
 	model: Model<TApi>;
 	entries: readonly SessionEntry[];
 }): ResponsesInputItem[] {
-	return serializeMessagesToResponsesInput(args.model, collectReplayMessages(args.entries));
+	return serializeMessagesToResponsesInput(args.model, collectReplayMessages(args.entries), {
+		firstSystemMessageIsUpdate: true,
+	});
 }
 
 function buildNativeReplaySegmentsInternal<TApi extends Api>(args: {

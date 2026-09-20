@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { Message, Model } from "@earendil-works/pi-ai";
-import { serializeMessagesToResponsesInput } from "./serializer";
-
+import {
+	serializeLlmMessagesToResponsesInput,
+	serializeMessagesToResponsesInput,
+} from "./serializer";
 const model: Model<"openai-responses"> = {
 	provider: "openai", api: "openai-responses", id: "gpt-6-astra", name: "GPT-6 Astra",
 	baseUrl: "https://offline.invalid/v1", reasoning: true, input: ["text"],
@@ -23,6 +25,19 @@ function result(index: number): Message {
 	return { role: "toolResult", toolCallId: calls[index].id, toolName: "read", isError: false,
 		content: [{ type: "text", text: `real-${index}` }], timestamp: 2 + index };
 }
+
+function systemMessage(
+	content: string | Array<{ type: "text"; text: string }>,
+	sections?: Record<string, string | null>,
+): Message {
+	return { role: "system", content, sections, timestamp: 3 } as unknown as Message;
+}
+
+const nonReasoningModel: Model<"openai-responses"> = { ...model, reasoning: false };
+const noDeveloperRoleModel: Model<"openai-responses"> = {
+	...model,
+	compat: { supportsDeveloperRole: false },
+};
 
 describe("Responses trailing tool pairing", () => {
 	for (const completed of [0, 1, 2]) {
@@ -48,5 +63,62 @@ describe("Responses trailing tool pairing", () => {
 		]) {
 			expect(serializeMessagesToResponsesInput(model, messages).some((item) => item.type === "function_call_output")).toBe(false);
 		}
+	});
+});
+
+describe("Responses system message serialization", () => {
+	test("serializes the leading system prompt as developer text with sections", () => {
+		const message = systemMessage("base\uD800", { rules: "rules", removed: null });
+		const before = structuredClone(message);
+		const input = serializeLlmMessagesToResponsesInput(model, [message]);
+
+		expect(input).toEqual([{ role: "developer", content: "base\n\nrules" }]);
+		expect(input.some((item) => item.type === "function_call_output")).toBe(false);
+		expect(message).toEqual(before);
+	});
+
+	test("renders later system updates as system text for non-reasoning models", () => {
+		const input = serializeLlmMessagesToResponsesInput(nonReasoningModel, [
+			systemMessage("base", { rules: "initial" }),
+			systemMessage("delta\uD800", { rules: "updated", old: null }),
+		]);
+
+		expect(input).toEqual([
+			{ role: "system", content: "base\n\ninitial" },
+			{
+				role: "system",
+				content:
+					'delta\n\nUpdated system prompt section "rules":\n\nupdated\n\nRemoved system prompt section "old".',
+			},
+		]);
+		expect(input.every((item) => item.type !== "function_call_output")).toBe(true);
+	});
+
+	test("renders the first message in a sliced post-compaction tail as a system update", () => {
+		const input = serializeLlmMessagesToResponsesInput(
+			nonReasoningModel,
+			[systemMessage("delta\uD800", { rules: "updated", old: null })],
+			{ firstSystemMessageIsUpdate: true },
+		);
+
+		expect(input).toEqual([
+			{
+				role: "system",
+				content:
+					'delta\n\nUpdated system prompt section "rules":\n\nupdated\n\nRemoved system prompt section "old".',
+			},
+		]);
+	});
+
+	test("uses system instead of developer when Responses compat disables the developer role", () => {
+		const input = serializeLlmMessagesToResponsesInput(noDeveloperRoleModel, [systemMessage("base")], {
+			includeInstructionsInInput: true,
+			instructions: "instructions",
+		});
+
+		expect(input).toEqual([
+			{ role: "system", content: "instructions" },
+			{ role: "system", content: "base" },
+		]);
 	});
 });

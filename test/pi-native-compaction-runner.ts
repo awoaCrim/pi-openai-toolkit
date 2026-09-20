@@ -13,7 +13,9 @@ try {
 	const { createAgentSession, DefaultResourceLoader, defineTool, ModelRuntime, SessionManager, SettingsManager } = await import("@earendil-works/pi-coding-agent");
 	const { fauxAssistantMessage, InMemoryCredentialStore, InMemoryModelsStore, Type } = await import("@earendil-works/pi-ai");
 	const manifest = JSON.parse(await readFile(join(packageDir, "node_modules/@earendil-works/pi-coding-agent/package.json"), "utf8"));
-	assert.equal(manifest.version, "0.85.1");
+	const packageManifest = JSON.parse(await readFile(join(packageDir, "package.json"), "utf8"));
+	const expectedPiVersion = packageManifest.devDependencies?.["@earendil-works/pi-coding-agent"];
+	assert.equal(manifest.version, expectedPiVersion, `Unexpected local Pi version: ${manifest.version}; expected ${expectedPiVersion}`);
 	const configDir = join(env.agentDir, "extensions/pi-openai-toolkit");
 	await mkdir(configDir, { recursive: true });
 	await writeFile(join(configDir, "config.json"), JSON.stringify({ compaction: { nativeFallback: { enabled: false } } }));

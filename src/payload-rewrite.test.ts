@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, expect, test } from "bun:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, type Model } from "@earendil-works/pi-ai";
 import { resolveLatestNativeCompactionEntry } from "./details-store";
-import { removeNativeCompactionRetainedMessages } from "./payload-rewrite";
+import { removeNativeCompactionRetainedMessages, serializeLiveTailToResponsesInput } from "./payload-rewrite";
 import {
 	createNativeCompactionDetails,
 	NATIVE_COMPACTION_FALLBACK_SUMMARY,
@@ -33,6 +33,12 @@ function removeRetained(
 	});
 }
 
+const liveTailModel: Model<"openai-responses"> = {
+	provider: "openai", api: "openai-responses", id: "gpt-6-astra", name: "GPT-6 Astra",
+	baseUrl: "https://offline.invalid/v1", reasoning: true, input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000,
+};
+
 describe("latest Pi retained context", () => {
 	test("removes only verified retained copies, preserves transient/new messages and is immutable", () => {
 		const args = fixture();
@@ -50,6 +56,66 @@ describe("latest Pi retained context", () => {
 			reason: "retained-context-mismatch",
 		});
 	});
+	test("ignores a Pi 0.86 leading system prompt moved before the summary", () => {
+		const manager = SessionManager.inMemory("C:/offline");
+		const firstKeptEntryId = manager.appendMessage({ role: "user", content: "old", timestamp: 1 });
+		manager.appendMessage(fauxAssistantMessage("old answer", { timestamp: 2 }));
+		manager.appendMessage({
+			role: "system",
+			content: "",
+			sections: { preamble: "structured prompt" },
+			toolsAdded: [],
+			timestamp: 3,
+		} as never);
+		const compactionId = manager.appendCompaction(
+			NATIVE_COMPACTION_FALLBACK_SUMMARY,
+			firstKeptEntryId,
+			100,
+			createNativeCompactionDetails({
+				provider: "openai",
+				api: "openai-responses",
+				model: "gpt-6-astra",
+				baseUrl: "https://offline.invalid/v1",
+				inputProvenance: NATIVE_COMPACTION_INPUT_PROVENANCE,
+				compactedWindow: [{ type: "compaction", encrypted_content: "opaque-system" }],
+			}),
+		);
+		manager.appendMessage({ role: "user", content: "new", timestamp: 4 });
+
+		const branchEntries = manager.getBranch();
+		const compactionEntry = branchEntries.find((entry) => entry.id === compactionId);
+		assert(compactionEntry?.type === "compaction");
+		const messages = manager.buildSessionContext().messages;
+		const promotedSystem = messages.find((message) => (message.role as string) === "system");
+		assert(promotedSystem);
+		const promotedSystemShape = promotedSystem as unknown as { sections?: Record<string, string | null> };
+		promotedSystemShape.sections = { preamble: "mutated after context rebuild" };
+		const result = removeRetained({ messages, branchEntries, compactionEntry });
+
+		assert(result.ok);
+		expect(result.messages.map((message) => message.role)).toEqual(["system", "compactionSummary", "user"]);
+		expect(result.messages[0]).toEqual(promotedSystem);
+	});
+
+	test("serializes a first live-tail system message as an update", () => {
+		const manager = SessionManager.inMemory("C:/offline");
+		manager.appendMessage({
+			role: "system",
+			content: "delta",
+			sections: { rules: "updated", old: null },
+			toolsAdded: [],
+			timestamp: 1,
+		} as never);
+
+		expect(serializeLiveTailToResponsesInput({ model: liveTailModel, entries: manager.getBranch() })).toEqual([
+			{
+				role: "developer",
+				content:
+					'delta\n\nUpdated system prompt section "rules":\n\nupdated\n\nRemoved system prompt section "old".',
+			},
+		]);
+	});
+
 	test("rejects replay from a legacy opaque checkpoint without input provenance", () => {
 		const args = fixture();
 		assert(args.compactionEntry.details);

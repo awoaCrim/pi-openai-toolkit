@@ -301,6 +301,7 @@ async function runResponsesNativeCompact(
 				...serializeMessagesToResponsesInput(
 					compactor.currentModel,
 					[...projection.messages.slice(summaryIndex + 1)],
+					{ firstSystemMessageIsUpdate: true },
 				),
 			];
 			request = {

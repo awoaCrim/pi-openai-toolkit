@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ToolCall } from "@earendil-works/pi-ai";
 import { parseReviewVerdict, requestToolReview, type EvidenceTool, type ReviewerRegistry } from "./reviewer";
 import { buildReviewPrompt, reviewerSystemPrompt } from "./prompt";
 import { MAX_REVIEW_INPUT_CHARS, MAX_REVIEW_REASON_CHARS } from "./types";
@@ -35,7 +35,11 @@ function assistantMessage(
 	} as AssistantMessage;
 }
 
-function toolCall(name: string, args: Record<string, unknown>, id = `tc-${Math.random().toString(36).slice(2)}`) {
+function toolCall(
+	name: string,
+	args: ToolCall["arguments"],
+	id = `tc-${Math.random().toString(36).slice(2)}`,
+): ToolCall {
 	return { type: "toolCall", id, name, arguments: args };
 }
 
@@ -281,6 +285,7 @@ describe("requestToolReview evidence loop", () => {
 
 		expect(outcome).toMatchObject({ kind: "allow", evidenceRounds: 1 });
 		expect(tool.invocations).toHaveLength(1);
+		expect(tool.invocations[0]?.[0]).toEqual({ path: "deploy.sh" });
 		expect(harness.calls).toBe(2);
 
 		const second = harness.contexts[1] as { messages: Array<{ role: string; content?: unknown }> };
