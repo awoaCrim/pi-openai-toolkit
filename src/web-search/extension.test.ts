@@ -443,6 +443,86 @@ describe("standalone-alpha route round-trips", () => {
 });
 
 describe("standalone-alpha Web Search route", () => {
+	for (const tools of [undefined, [], [ROUTE_READ_TOOL_FIXTURE]]) {
+		test(`host-filtered web_run permits ordinary requests with ${tools === undefined ? "omitted" : tools.length} tools`, async () => {
+			const harness = createStandaloneHarness({ webSearch: { defaultRoute: "standalone-alpha" } });
+			// Pi applies --tools/--exclude-tools/--no-tools before publishing its
+			// registry. Registration succeeds, but excluded tools are not listed.
+			harness.pi.getAllTools = () => [];
+			harness.handlers.get("session_start")!({}, harness.ctx);
+			const configSnapshot = structuredClone(harness.config);
+			const payload = { model: harness.ctx.model.id, input: [], ...(tools ? { tools } : {}) };
+			const snapshot = structuredClone(payload);
+
+			expect(harness.handlers.get("before_agent_start")!({ systemPrompt: "Base" }, harness.ctx)).toBeUndefined();
+			expect(harness.handlers.get("before_provider_request")!({ payload }, harness.ctx)).toBeUndefined();
+			expect(harness.getAborted()).toBe(0);
+			expect(payload).toEqual(snapshot);
+			expect(harness.getActiveTools()).toEqual(["read"]);
+			expect(harness.config).toEqual(configSnapshot);
+			for (const toolName of ["web_run", "web_search"]) {
+				expect(harness.handlers.get("tool_call")!({ toolName }, harness.ctx)).toMatchObject({ block: true });
+			}
+			await expect(harness.registered[0].execute("excluded", { search_query: [{ q: "blocked" }] }, undefined, undefined, harness.ctx))
+				.rejects.toThrow(/not registered/);
+			expect(harness.searchCalls).toHaveLength(0);
+		});
+	}
+
+	test("host-filtered web_run removes stale search schemas and guidance without fallback", () => {
+		const harness = createStandaloneHarness({
+			activeTools: ["read", "web_search"], webSearch: { defaultRoute: "standalone-alpha" },
+		});
+		harness.handlers.get("session_start")!({}, harness.ctx);
+		const prompt = harness.handlers.get("before_agent_start")!({ systemPrompt: "Base" }, harness.ctx) as { systemPrompt: string };
+		expect(prompt.systemPrompt).toContain("The `web_run` tool is available");
+		harness.pi.getAllTools = () => [];
+		const payload = createRouteCyclePayload();
+		const snapshot = structuredClone(payload);
+		expect(harness.handlers.get("before_agent_start")!(prompt, harness.ctx)).toEqual({ systemPrompt: "Base" });
+		expect(harness.handlers.get("before_provider_request")!({ payload }, harness.ctx)).toEqual({
+			...payload, tools: [ROUTE_READ_TOOL_FIXTURE], include: ["reasoning.encrypted_content"],
+		});
+		expect(payload).toEqual(snapshot);
+		expect(harness.getActiveTools()).toEqual(["read"]);
+		expect(harness.getAborted()).toBe(0);
+		expect(harness.searchCalls).toHaveLength(0);
+	});
+
+	test("host filtering is rechecked without changing configuration or registering extra tools", () => {
+		const harness = createStandaloneHarness({ webSearch: { defaultRoute: "standalone-alpha" } });
+		harness.pi.getAllTools = () => [];
+		harness.handlers.get("session_start")!({}, harness.ctx);
+		expect(harness.getActiveTools()).toEqual(["read"]);
+		harness.pi.getAllTools = () => harness.registered;
+		harness.handlers.get("model_select")!({ model: harness.ctx.model }, harness.ctx);
+		expect(harness.getActiveTools()).toEqual(["read", "web_run"]);
+		expect(harness.registered).toHaveLength(1);
+		expect(harness.config.webSearch.defaultRoute).toBe("standalone-alpha");
+	});
+
+	test("an unreadable or conflicting registry is not treated as host exclusion", () => {
+		for (const getAllTools of [
+			() => { throw new Error("unbound API"); },
+			() => [{ name: "web_run", description: "third-party", parameters: {} }],
+		]) {
+			const harness = createStandaloneHarness({ webSearch: { defaultRoute: "standalone-alpha" } });
+			harness.pi.getAllTools = getAllTools;
+			expect(() => harness.handlers.get("before_provider_request")!({
+				payload: { input: [], tools: [ROUTE_READ_TOOL_FIXTURE] },
+			}, harness.ctx)).toThrow(/not registered/);
+			expect(harness.getAborted()).toBe(1);
+		}
+	});
+
+	test("a published web_run missing from the payload still fails closed", () => {
+		const harness = createStandaloneHarness({ webSearch: { defaultRoute: "standalone-alpha" } });
+		expect(() => harness.handlers.get("before_provider_request")!({
+			payload: { input: [], tools: [ROUTE_READ_TOOL_FIXTURE] },
+		}, harness.ctx)).toThrow(/requires the registered web_run/);
+		expect(harness.getAborted()).toBe(1);
+	});
+
 	test("registered standalone function keeps a provider-valid name through dispatch", async () => {
 		const harness = createStandaloneHarness({ webSearch: { defaultRoute: "standalone-alpha" } });
 		harness.handlers.get("session_start")!({}, harness.ctx);
@@ -653,6 +733,12 @@ describe("standalone-alpha Web Search route", () => {
 		expect(active).toEqual(["read"]);
 		const guard = handlers.get("tool_call")!({ toolName: "web_run", toolCallId: "c", input: {} }, ctx) as { block: boolean };
 		expect(guard.block).toBe(true);
+		// A rejected registration must not be mistaken for host filtering, even
+		// when the conflicting definition is subsequently hidden from the catalog.
+		pi.getAllTools = () => [];
+		expect(() => handlers.get("before_provider_request")!({
+			payload: { input: [], tools: [ROUTE_READ_TOOL_FIXTURE] },
+		}, ctx)).toThrow(/not registered/);
 	});
 
 	test("web_run execution revalidates route and maps all commands before dispatch", async () => {

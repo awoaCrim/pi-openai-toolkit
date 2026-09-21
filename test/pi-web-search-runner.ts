@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import * as zlib from "node:zlib";
-import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, AgentSessionEvent, CreateAgentSessionOptions } from "@earendil-works/pi-coding-agent";
 import { createSmokeEnvironment } from "./pi-smoke-environment";
 
 const packageDir = resolve(import.meta.dirname, "..");
@@ -77,18 +77,22 @@ try {
 	const settingsManager = SettingsManager.inMemory({
 		transport: "sse", retry: { enabled: false, provider: { maxRetries: 0 } }, compaction: { enabled: false },
 	}, { projectTrusted: true });
-	const resourceLoader = new DefaultResourceLoader({
-		cwd: env.cwd, agentDir: env.agentDir, settingsManager,
-		additionalExtensionPaths: [join(packageDir, "src/web-search/extension.ts")],
-		noSkills: true, noPromptTemplates: true, noContextFiles: true, noThemes: true,
-		systemPromptOverride: () => "Follow the deterministic smoke instructions.",
-	});
-	await resourceLoader.reload();
-	assert.deepEqual(resourceLoader.getExtensions().errors, []);
-	const { session } = await createAgentSession({
-		cwd: env.cwd, agentDir: env.agentDir, modelRuntime, settingsManager, resourceLoader, model,
-		sessionManager: SessionManager.inMemory(env.cwd), noTools: "builtin",
-	});
+	type ToolSelection = Pick<CreateAgentSessionOptions, "tools" | "excludeTools" | "noTools">;
+	async function createSearchSession(selection: ToolSelection) {
+		const resourceLoader = new DefaultResourceLoader({
+			cwd: env.cwd, agentDir: env.agentDir, settingsManager,
+			additionalExtensionPaths: [join(packageDir, "src/web-search/extension.ts")],
+			noSkills: true, noPromptTemplates: true, noContextFiles: true, noThemes: true,
+			systemPromptOverride: () => "Follow the deterministic smoke instructions.",
+		});
+		await resourceLoader.reload();
+		assert.deepEqual(resourceLoader.getExtensions().errors, []);
+		return createAgentSession({
+			cwd: env.cwd, agentDir: env.agentDir, modelRuntime, settingsManager, resourceLoader, model,
+			sessionManager: SessionManager.inMemory(env.cwd), ...selection,
+		});
+	}
+	const { session } = await createSearchSession({ noTools: "builtin" });
 	const events: AgentSessionEvent[] = [];
 	const unsubscribe = session.subscribe((event) => events.push(event));
 	const deniedFetch = globalThis.fetch;
@@ -180,6 +184,69 @@ try {
 	} finally {
 		unsubscribe();
 		session.dispose();
+	}
+	const fixturePath = join(env.cwd, "read-only-fixture.txt");
+	await writeFile(fixturePath, "READ-ONLY-FIXTURE");
+	const restrictedCases: Array<{ selection: ToolSelection; expectedTools: string[] }> = [
+		{ selection: { tools: ["read", "grep", "find"] }, expectedTools: ["read", "grep", "find"] },
+		{ selection: { tools: ["read", "web_run"], excludeTools: ["web_run"] }, expectedTools: ["read"] },
+		{ selection: { noTools: "all" }, expectedTools: [] },
+		{ selection: { tools: [] }, expectedTools: [] },
+	];
+	for (const { selection, expectedTools } of restrictedCases) {
+		const { session: restricted } = await createSearchSession(selection);
+		let requests = 0;
+		let restrictedFailure: unknown;
+		globalThis.fetch = (async (input, init) => {
+			try {
+				const request = new Request(input, init);
+				if (request.method !== "POST" || request.url !== responsesUrl) return await deniedFetch(input, init);
+				const bytes = Buffer.from(await request.arrayBuffer());
+				const encoding = request.headers.get("content-encoding");
+				assert(encoding === null || encoding === "zstd");
+				const decoded = encoding === "zstd" ? zlib.zstdDecompressSync(bytes) : bytes;
+				const body = record(JSON.parse(decoded.toString("utf8")));
+				assert.equal(body.model, model.id);
+				assert(Array.isArray(body.tools) || body.tools === undefined);
+				const tools = ((body.tools ?? []) as unknown[]).map(record);
+				assert.deepEqual(tools.map((tool) => tool.name).sort(), [...expectedTools].sort());
+				assert(tools.every((tool) => tool.type === "function"), "no hosted search fallback");
+				assert(!JSON.stringify(body).includes("pi-openai-toolkit:web-search"), "excluded search must not be advertised");
+				requests++;
+				if (requests === 1 && expectedTools.includes("read")) {
+					return streamResponse([{
+						type: "function_call", id: "fc_read_only", call_id: "read_only", name: "read",
+						arguments: JSON.stringify({ path: fixturePath }),
+					}], "resp_read_only");
+				}
+				assert.equal(requests, expectedTools.length ? 2 : 1, "no retry or hidden follow-up");
+				if (expectedTools.includes("read")) {
+					assert(Array.isArray(body.input));
+					const results = body.input.map(record).filter((item) => item.type === "function_call_output");
+					assert.equal(results.length, 1);
+					assert.equal(results[0].call_id, "read_only");
+					assert.match(JSON.stringify(results[0].output), /READ-ONLY-FIXTURE/);
+				}
+				return textResponse("RESTRICTED-DONE");
+			} catch (error) {
+				restrictedFailure ??= error;
+				throw error;
+			}
+		}) as typeof fetch;
+		try {
+			assert(!restricted.getAllTools().some((tool) => tool.name === "web_run"));
+			await restricted.prompt(expectedTools.length ? "Read read-only-fixture.txt and report its contents." : "Reply without tools.");
+			if (restrictedFailure) throw restrictedFailure;
+			assertReply(restricted, "RESTRICTED-DONE");
+			assert.deepEqual(restricted.getActiveToolNames().sort(), [...expectedTools].sort());
+			assert.equal(requests, expectedTools.length ? 2 : 1);
+			const results = restricted.messages.filter((message) => message.role === "toolResult");
+			assert.deepEqual(results.map((result) => result.toolName), expectedTools.length ? ["read"] : []);
+			assert(results.every((result) => !result.isError));
+			env.assertNoNetwork();
+		} finally {
+			restricted.dispose();
+		}
 	}
 	process.stdout.write("OK\n");
 } finally {

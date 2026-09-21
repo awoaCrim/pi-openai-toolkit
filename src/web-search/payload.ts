@@ -49,8 +49,9 @@ function unavailableRouteTransform(
 function transformStandalonePayload(args: {
 	payload: JsonObject;
 	resolution: ReturnType<typeof resolveWebSearchRoute>;
+	standaloneToolExcluded?: boolean;
 }): WebSearchPayloadTransform {
-	const { payload, resolution } = args;
+	const { payload, resolution, standaloneToolExcluded = false } = args;
 	const toolsValue = payload.tools;
 	if (toolsValue !== undefined && !Array.isArray(toolsValue)) {
 		return {
@@ -77,6 +78,7 @@ function transformStandalonePayload(args: {
 	const normalizedTools = tools.filter((tool) => {
 		if (isLocalWebSearchFunction(tool) || isNativeWebSearchTool(tool)) return false;
 		if (!isStandaloneWebRunFunction(tool)) return true;
+		if (standaloneToolExcluded) return false;
 		standaloneToolCount += 1;
 		return standaloneToolCount === 1;
 	});
@@ -84,7 +86,7 @@ function transformStandalonePayload(args: {
 	const normalizedInclude = include.filter((item) => item !== WEB_SEARCH_SOURCE_INCLUDE);
 	const toolsChanged = normalizedTools.length !== tools.length;
 	const includeChanged = normalizedInclude.length !== include.length;
-	if (toolsValue !== undefined && !normalizedTools.some(isStandaloneWebRunFunction)) {
+	if (!standaloneToolExcluded && toolsValue !== undefined && !normalizedTools.some(isStandaloneWebRunFunction)) {
 		return {
 			payload,
 			outcome: "unavailable-route",
@@ -159,6 +161,8 @@ export function transformWebSearchPayload(args: {
 	model: WebSearchModel | undefined;
 	config: WebSearchConfig;
 	payload: unknown;
+	/** The host filtered a successfully registered web_run out of this session's tool catalog. */
+	standaloneToolExcluded?: boolean;
 }): WebSearchPayloadTransform {
 	const { model, config, payload } = args;
 	const resolution = resolveWebSearchRoute({ model, config });
@@ -195,7 +199,7 @@ export function transformWebSearchPayload(args: {
 				errorMessage: "Standalone Web Search requires an object provider payload.",
 			};
 		}
-		return transformStandalonePayload({ payload, resolution });
+		return transformStandalonePayload({ payload, resolution, standaloneToolExcluded: args.standaloneToolExcluded });
 	}
 
 	if (!isRecord(payload)) {

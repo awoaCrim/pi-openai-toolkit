@@ -294,10 +294,12 @@ function createWebRunTool(deps: WebRunExecutorDependencies): ToolDefinition<
 	};
 }
 
+type StandaloneRegistrationState = "verified" | "excluded" | "unavailable";
+
 function verifyStandaloneRegistration(
 	pi: ExtensionAPI,
 	definition: ToolDefinition<typeof STANDALONE_WEB_RUN_PARAMETERS, AlphaSearchDetails>,
-): boolean {
+): StandaloneRegistrationState {
 	try {
 		const api = pi as ExtensionAPI & {
 			getAllTools?: () => Array<{
@@ -307,14 +309,17 @@ function verifyStandaloneRegistration(
 				promptGuidelines?: string[];
 			}>;
 		};
-		if (typeof api.getAllTools !== "function") return false;
+		if (typeof api.getAllTools !== "function") return "unavailable";
 		const actual = api.getAllTools().find((tool) => tool.name === WEB_RUN_TOOL_NAME);
-		return actual !== undefined &&
-			actual.description === definition.description &&
+		// Pi publishes only tools permitted by --tools/--exclude-tools/--no-tools.
+		// After successful registration, an absent definition means this session
+		// cannot use search; it is not a reason to abort ordinary model requests.
+		if (actual === undefined) return "excluded";
+		return actual.description === definition.description &&
 			actual.parameters === definition.parameters &&
-			actual.promptGuidelines === definition.promptGuidelines;
+			actual.promptGuidelines === definition.promptGuidelines ? "verified" : "unavailable";
 	} catch {
-		return false;
+		return "unavailable";
 	}
 }
 
@@ -399,13 +404,17 @@ export function registerWebSearchExtension(
 		standaloneRegistrationSucceeded = false;
 	}
 
-	function standaloneReady(): boolean {
-		if (!standaloneRegistrationSucceeded || !canManageActiveTools(pi)) return false;
+	function standaloneRegistrationState(): StandaloneRegistrationState {
+		if (!standaloneRegistrationSucceeded || !canManageActiveTools(pi)) return "unavailable";
 		// Recheck on every lifecycle boundary so a later extension cannot replace
 		// the definition after startup and leave a stale active name executable.
 		// Do not use getAllTools() during extension loading; lifecycle callbacks
 		// are the first point where Pi's action methods are bound.
 		return verifyStandaloneRegistration(pi, standaloneTool);
+	}
+
+	function standaloneReady(): boolean {
+		return standaloneRegistrationState() === "verified";
 	}
 
 	function readConfig(model: WebSearchModel | undefined, ctx?: ExtensionContext): ResolvedToolkitConfig {
@@ -459,13 +468,15 @@ export function registerWebSearchExtension(
 		catch (error) { abortAndThrow(ctx, error instanceof Error ? error.message : "Invalid Web Search configuration."); }
 		const { config } = resolved;
 		const resolution = synchronizeResolved(ctx.model, resolved);
-		if (resolution.route === "standalone-alpha" && resolution.available && !standaloneReady()) {
+		const registration = standaloneRegistrationState();
+		if (resolution.route === "standalone-alpha" && resolution.available && registration === "unavailable") {
 			abortAndThrow(ctx, `${WEB_RUN_TOOL_NAME} is not registered by the toolkit; standalone Web Search request aborted.`);
 		}
 		const transformed = transformWebSearchPayload({
 			model: ctx.model,
 			config: config.webSearch,
 			payload: event.payload,
+			standaloneToolExcluded: registration === "excluded",
 		});
 		if (transformed.fatal) {
 			abortAndThrow(ctx, transformed.errorMessage ?? "Web Search route request aborted.");
