@@ -209,6 +209,7 @@ describe("auto mode extension registration", () => {
 		expect(harness.handlers.has("before_provider_request")).toBe(false);
 		expect(harness.handlers.has("tool_result")).toBe(true);
 		expect(harness.handlers.has("before_agent_start")).toBe(true);
+		expect(harness.handlers.has("message_start")).toBe(true);
 	});
 
 	test("engaging at session start is synchronous and makes no provider call", async () => {
@@ -481,8 +482,8 @@ describe("auto mode trajectory pre-scorer", () => {
 		classifier: { enabled: true, model: "uwoacrimson/gpt-5.6-sol", timeoutMs: 15_000, maxLag: 2 },
 	};
 
-	test("late classifications cannot survive mode, session, branch or shutdown invalidation", async () => {
-		for (const boundary of ["off", "session_start", "session_tree", "session_shutdown"]) {
+	test("late classifications cannot survive mode, session, delivery, branch or shutdown invalidation", async () => {
+		for (const boundary of ["off", "session_start", "message_start", "session_tree", "session_shutdown"]) {
 			let resolve!: (value: string) => void;
 			const response = new Promise<string>((done) => { resolve = done; });
 			const h = createHarness({ autoMode: { ...allowlisted, ...classifier }, flagValue: true, classifierResponses: [response] });
@@ -490,7 +491,10 @@ describe("auto mode trajectory pre-scorer", () => {
 			await h.fire("tool_call", bashCall);
 			h.fire("tool_result", bashCall);
 			if (boundary === "off") await h.runCommand("off");
-			else h.fire(boundary);
+			else if (boundary === "message_start") {
+				// Delivery invalidates even before persistence changes the authorization hash.
+				h.fire(boundary, { message: userEntry("u2", "add a regression test for the replay bug").message });
+			} else h.fire(boundary);
 			expect((h.classifierCalls[0]!.signal as AbortSignal).aborted).toBe(true);
 			resolve("low");
 			await h.flush();
@@ -501,7 +505,7 @@ describe("auto mode trajectory pre-scorer", () => {
 	});
 
 	test("obsolete settlement cannot clear the newer in-flight sample", async () => {
-		for (const rejectOld of [false, true]) {
+		for (const [boundary, rejectOld] of [["off", false], ["off", true], ["message_start", false], ["message_start", true]] as const) {
 			let resolveOld!: (value: string) => void;
 			let failOld!: (error: Error) => void;
 			let resolveNew!: (value: string) => void;
@@ -511,8 +515,13 @@ describe("auto mode trajectory pre-scorer", () => {
 			h.fire("session_start");
 			await h.fire("tool_call", bashCall);
 			h.fire("tool_result", bashCall);
-			await h.runCommand("off");
-			await h.runCommand("on");
+			if (boundary === "off") {
+				await h.runCommand("off");
+				await h.runCommand("on");
+			} else {
+				h.fire("message_start", { message: userEntry("u2", "add a regression test for the replay bug").message });
+			}
+			expect((h.classifierCalls[0]!.signal as AbortSignal).aborted).toBe(true);
 			h.fire("tool_result", bashCall);
 			expect(h.classifierCalls).toHaveLength(2);
 			if (rejectOld) failOld(new Error("old request failed")); else resolveOld("low");
@@ -524,6 +533,18 @@ describe("auto mode trajectory pre-scorer", () => {
 			await h.fire("tool_call", { ...bashCall, toolCallId: "next" });
 			expect(h.reviewCalls).toHaveLength(1);
 		}
+	});
+
+	test("user delivery clears a settled score even with identical authorization content", async () => {
+		const h = createHarness({ autoMode: { ...allowlisted, ...classifier }, flagValue: true });
+		h.fire("session_start");
+		await h.fire("tool_call", bashCall);
+		h.fire("tool_result", bashCall);
+		await h.flush();
+		// Keep the context entries unchanged to isolate delivery from fingerprint invalidation.
+		h.fire("message_start", { message: userEntry("u2", "add a regression test for the replay bug").message });
+		await h.fire("tool_call", { ...bashCall, toolCallId: "next" });
+		expect(h.reviewCalls).toHaveLength(2);
 	});
 
 	test("long appended restrictions and changed message boundaries invalidate cached authorization", async () => {
@@ -663,7 +684,7 @@ describe("auto mode rejection circuit breaker", () => {
 		expect(third.terminate).toBeUndefined();
 	});
 
-	test("before_agent_start clears the breaker for the next user request", async () => {
+	test("user delivery clears the breaker while other lifecycle events retain denials", async () => {
 		const harness = createHarness({
 			autoMode: { ...allowlisted, circuitBreaker: { consecutiveDenials: 2, recentDenials: 0, windowSize: 50 } },
 			flagValue: true,
@@ -677,10 +698,15 @@ describe("auto mode rejection circuit breaker", () => {
 		await harness.fire("tool_call", { ...bashCall, toolCallId: "c1" });
 
 		harness.fire("turn_start", { turnIndex: 1 });
+		harness.fire("before_agent_start");
+		harness.fire("input", { text: "queued request", streamingBehavior: "followUp" });
+		for (const role of ["assistant", "toolResult", "custom", "system"]) {
+			harness.fire("message_start", { message: { role } });
+		}
 		const tripped = (await harness.fire("tool_call", { ...bashCall, toolCallId: "c2" })) as { terminate?: boolean };
 		expect(tripped.terminate).toBe(true);
 
-		harness.fire("before_agent_start");
+		harness.fire("message_start", { message: userEntry("u2", "add a regression test for the replay bug").message });
 		const next = (await harness.fire("tool_call", { ...bashCall, toolCallId: "c3" })) as { terminate?: boolean };
 		expect(next.terminate).toBeUndefined();
 	});

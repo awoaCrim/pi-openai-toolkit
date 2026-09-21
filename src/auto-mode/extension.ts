@@ -466,10 +466,15 @@ export function registerAutoModeExtension(
 		updateStatus(ctx);
 	});
 
-	pi.on("before_agent_start", (_event, ctx) => {
-		// One user request spans multiple turn_start events (model responses).
+	pi.on("message_start", (event) => {
+		if (event.message.role !== "user") return;
+		// Pi delivers steer/followUp messages inside the running agent loop,
+		// without before_agent_start. Enqueueing alone is not a new request.
 		resetRejectionBreaker(breaker);
 		invalidateClassification();
+	});
+
+	pi.on("before_agent_start", (_event, ctx) => {
 		const { config } = loadConfig();
 		applyConfiguredGate(runtime, config.autoMode);
 		if (runtime.engaged && !isAutoModeEligible(ctx.model, config.autoMode)) {

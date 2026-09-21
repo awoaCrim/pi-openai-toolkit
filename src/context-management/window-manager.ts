@@ -73,6 +73,7 @@ export class CodexContextWindowManager {
 	private sessionId: string | undefined;
 	private restoredMarkerId: string | undefined;
 	private restoredCompactionId: string | undefined;
+	private branchStateInvalidated = false;
 	private readonly budget = new ContextWindowBudget();
 	private pendingRollover: PendingRollover | undefined;
 	private trimPendingWindowId: string | undefined;
@@ -140,6 +141,7 @@ export class CodexContextWindowManager {
 		this.sessionId = undefined;
 		this.restoredMarkerId = undefined;
 		this.restoredCompactionId = undefined;
+		this.branchStateInvalidated = false;
 		this.budget.reset();
 		this.trimPendingWindowId = undefined;
 	}
@@ -169,6 +171,9 @@ export class CodexContextWindowManager {
 			}
 			this.budget.restore(details.kind, details.currentWindowId);
 		}
+		// recordCompaction may invalidate the cache while replaying entries; the
+		// completed replay already reconciled those acknowledgments with this branch.
+		this.branchStateInvalidated = false;
 		this.retireSatisfiedOrStalePending(entries, sessionId);
 	}
 
@@ -187,7 +192,7 @@ export class CodexContextWindowManager {
 		}
 		// Hook-provided compactions may have no success callback. The persisted
 		// branch also detects navigation before/after a commit with the same marker.
-		if (this.sessionId !== sessionId || this.restoredMarkerId !== latestMarkerId || this.restoredCompactionId !== latestCompactionId) {
+		if (this.branchStateInvalidated || this.sessionId !== sessionId || this.restoredMarkerId !== latestMarkerId || this.restoredCompactionId !== latestCompactionId) {
 			this.restore(entries, sessionId);
 		}
 	}
@@ -432,7 +437,12 @@ export class CodexContextWindowManager {
 
 	recordCompaction(details: unknown): void {
 		if (!isContextWindowCompactionDetails(details)) return;
-		if (details.windowId === this.trimPendingWindowId) this.trimPendingWindowId = undefined;
+		if (this.trimPendingWindowId !== undefined && details.windowId === this.trimPendingWindowId) {
+			this.trimPendingWindowId = undefined;
+			// The callback supplies no branch identity. Force durable reconciliation
+			// even if navigation returns to the cached pre-commit branch before sync.
+			this.branchStateInvalidated = true;
+		}
 	}
 
 	createCompaction(event: SessionBeforeCompactEvent): CompactionResult<ContextWindowCompactionDetails> {
