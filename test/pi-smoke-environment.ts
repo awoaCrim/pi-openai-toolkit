@@ -1,10 +1,11 @@
+import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
-/** Call before dynamically importing Pi: config paths are captured at import time. */
+/** The parent sets HOME before spawning; call before dynamically importing Pi. */
 export async function createSmokeEnvironment() {
-	const root = await mkdtemp(join(tmpdir(), "pi-openai-toolkit-smoke-"));
+	const root = process.env.TOOLKIT_SMOKE_ROOT ?? await mkdtemp(join(tmpdir(), "pi-openai-toolkit-smoke-"));
 	const cwd = join(root, "project");
 	const home = join(root, "home");
 	const agentDir = join(home, ".pi", "agent");
@@ -14,6 +15,7 @@ export async function createSmokeEnvironment() {
 	process.env.APPDATA = join(home, "AppData", "Roaming");
 	process.env.LOCALAPPDATA = join(home, "AppData", "Local");
 	process.env.PI_CODING_AGENT_DIR = agentDir;
+	assert.equal(homedir(), home, "Smoke HOME was not isolated before startup; run through pi-smoke.test.ts");
 	const previousCwd = process.cwd();
 	process.chdir(cwd);
 	const originalFetch = globalThis.fetch;
