@@ -172,7 +172,7 @@ describe("transformWebSearchPayload", () => {
 				{ type: "function", name: "web_search" },
 				{ type: "web_search" },
 				{ type: "web_search_preview" },
-				{ type: "function", name: "web.run" },
+				{ type: "function", name: "web_run" },
 				{ type: "function", name: "read" },
 			],
 			include: [WEB_SEARCH_SOURCE_INCLUDE, "reasoning.encrypted_content"],
@@ -203,8 +203,8 @@ describe("transformWebSearchPayload", () => {
 			tools: [
 				{ type: "function", name: "web_search" },
 				{ type: "web_search_preview", search_context_size: "high" },
-				{ type: "function", name: "web.run" },
-				{ type: "function", name: "web.run", description: "duplicate" },
+				{ type: "function", name: "web_run" },
+				{ type: "function", name: "web_run", description: "duplicate" },
 				{ type: "function", name: "read" },
 			],
 			include: [WEB_SEARCH_SOURCE_INCLUDE, "reasoning.encrypted_content", WEB_SEARCH_SOURCE_INCLUDE],
@@ -219,7 +219,7 @@ describe("transformWebSearchPayload", () => {
 		expect(result).toMatchObject({ outcome: "removed-conflicting-tools", changed: true });
 		expect(result.payload).toEqual({
 			...payload,
-			tools: [{ type: "function", name: "web.run" }, { type: "function", name: "read" }],
+			tools: [{ type: "function", name: "web_run" }, { type: "function", name: "read" }],
 			include: ["reasoning.encrypted_content"],
 		});
 		expect(payload).toEqual(snapshot);

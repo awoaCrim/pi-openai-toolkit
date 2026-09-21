@@ -24,14 +24,14 @@ import {
 
 const registeredApis = new WeakSet<object>();
 
-const WEB_RUN_LABEL = "web.run";
+const WEB_RUN_LABEL = WEB_RUN_TOOL_NAME;
 const WEB_RUN_DESCRIPTION =
 	"Run sequential standalone Web Search commands through the provider's CPA/Codex alpha-search endpoint. " +
 	"Use only when the current Web Search route explicitly selects standalone-alpha.";
 const WEB_RUN_PROMPT_SNIPPET =
 	"Run search, image, page, finance, weather, sports, or time commands through CPA/Codex standalone Web Search.";
 const WEB_RUN_PROMPT_GUIDELINES = [
-	"Use web.run only when the configured Web Search route is standalone-alpha; do not assume it is available for an unconfigured model.",
+	`Use ${WEB_RUN_TOOL_NAME} only when the configured Web Search route is standalone-alpha; do not assume it is available for an unconfigured model.`,
 	"Choose exactly the command fields needed for the current request and preserve ref_id values for open, click, find, and screenshot follow-ups.",
 	"Supported commands are search_query, image_query, open, click, find, screenshot, finance, weather, sports, and time; response_length may tune the result size.",
 	"The route requires a CPA/Codex gateway that exposes /alpha/search and supports standalone web search; a failed request is not retried or redirected to another search implementation.",
@@ -224,13 +224,13 @@ export async function executeStandaloneWebRun(args: {
 	isRegistered?: () => boolean;
 }): Promise<{ text: string; details: AlphaSearchDetails }> {
 	const commands = normalizeStandaloneWebRunCommands(args.params);
-	if (args.signal?.aborted) throw new StandaloneWebRunError("web.run was cancelled.");
+	if (args.signal?.aborted) throw new StandaloneWebRunError(`${WEB_RUN_TOOL_NAME} was cancelled.`);
 
 	const loadConfig = args.loadConfig ?? loadToolkitConfig;
 	const resolveRuntime = args.resolveRuntime ?? resolveResponsesEnvironment;
 	const requestSearch = args.requestSearch ?? requestAlphaSearch;
 	if (args.isRegistered && !args.isRegistered()) {
-		throw new Error("web.run is not registered by the toolkit; standalone Web Search is unavailable.");
+		throw new Error(`${WEB_RUN_TOOL_NAME} is not registered by the toolkit; standalone Web Search is unavailable.`);
 	}
 
 	const { config } = loadConfig();
@@ -388,7 +388,7 @@ export function registerWebSearchExtension(
 			standaloneRegistrationSucceeded = true;
 			// Pi initially activates newly registered extension tools. Treat that
 			// activation as toolkit-owned rather than as a third-party preference;
-			// otherwise an unconfigured route would leak web.run into every prompt.
+			// otherwise an unconfigured route would leak web_run into every prompt.
 			states.webRun = { wasActiveBeforeOwnership: false, toolkitOwnsTool: true };
 		}
 	} catch {
@@ -461,7 +461,7 @@ export function registerWebSearchExtension(
 			standaloneReady(),
 		);
 		if (resolution.route === "standalone-alpha" && resolution.available && !standaloneReady()) {
-			abortAndThrow(ctx, "web.run is not registered by the toolkit; standalone Web Search request aborted.");
+			abortAndThrow(ctx, `${WEB_RUN_TOOL_NAME} is not registered by the toolkit; standalone Web Search request aborted.`);
 		}
 		const transformed = transformWebSearchPayload({
 			model: ctx.model,
@@ -506,7 +506,7 @@ export function registerWebSearchExtension(
 		}
 		return {
 			block: true,
-			reason: `${describeRouteFailure(resolution)} The web.run call was blocked instead of falling back.`,
+			reason: `${describeRouteFailure(resolution)} The ${WEB_RUN_TOOL_NAME} call was blocked instead of falling back.`,
 		};
 	});
 }

@@ -1,6 +1,7 @@
 import { StringEnum, Type, type Static } from "@earendil-works/pi-ai";
 import { buildResponsesRequestHeaders } from "../responses-headers";
 import { buildAlphaSearchUrl, type ResponsesRuntime } from "../runtime";
+import { WEB_RUN_TOOL_NAME } from "./types";
 
 export const MAX_ALPHA_ACTIONS = 8;
 export const MAX_ALPHA_COMMAND_CHARS = 4_096;
@@ -467,7 +468,7 @@ function normalizeTime(value: unknown, field: string): AlphaTimeOperation {
 }
 
 export function normalizeStandaloneWebRunCommands(value: unknown): StandaloneWebRunCommands {
-	if (!isRecord(value)) invalid("web.run", "expected an object");
+	if (!isRecord(value)) invalid(WEB_RUN_TOOL_NAME, "expected an object");
 	assertAllowedKeys(value, [
 		"search_query",
 		"image_query",
@@ -480,7 +481,7 @@ export function normalizeStandaloneWebRunCommands(value: unknown): StandaloneWeb
 		"sports",
 		"time",
 		"response_length",
-	], "web.run");
+	], WEB_RUN_TOOL_NAME);
 
 	const search_query = normalizeOperationArray(value.search_query, "search_query", normalizeSearchQuery);
 	const image_query = normalizeOperationArray(value.image_query, "image_query", normalizeSearchQuery);
@@ -495,7 +496,7 @@ export function normalizeStandaloneWebRunCommands(value: unknown): StandaloneWeb
 	const response_length = optionalEnum(value.response_length, "response_length", SEARCH_RESPONSE_LENGTHS);
 
 	if (!search_query && !image_query && !open && !click && !find && !screenshot && !finance && !weather && !sports && !time) {
-		invalid("web.run", "at least one search command is required");
+		invalid(WEB_RUN_TOOL_NAME, "at least one search command is required");
 	}
 	return {
 		...(search_query ? { search_query } : {}),
@@ -547,7 +548,7 @@ export function buildAlphaSearchRequest(args: {
 	};
 	const body = JSON.stringify(request);
 	if (utf8ByteLength(body) > MAX_ALPHA_REQUEST_BYTES) {
-		throw new StandaloneWebRunError("web.run request exceeds the 64 KiB limit.");
+		throw new StandaloneWebRunError(`${WEB_RUN_TOOL_NAME} request exceeds the 64 KiB limit.`);
 	}
 	return { request, body };
 }

@@ -90,7 +90,7 @@ function transformStandalonePayload(args: {
 			outcome: "unavailable-route",
 			changed: false,
 			fatal: resolution.source !== "legacy",
-			errorMessage: "Standalone Web Search requires the registered web.run tool in the provider payload.",
+			errorMessage: `Standalone Web Search requires the registered ${WEB_RUN_TOOL_NAME} tool in the provider payload.`,
 		};
 	}
 	if (!toolsChanged && !includeChanged) {

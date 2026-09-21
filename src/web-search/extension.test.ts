@@ -211,18 +211,47 @@ function createStandaloneHarness(args: {
 }
 
 describe("standalone-alpha Web Search route", () => {
+	test("registered standalone function keeps a provider-valid name through dispatch", async () => {
+		const harness = createStandaloneHarness({ webSearch: { defaultRoute: "standalone-alpha" } });
+		harness.handlers.get("session_start")!({}, harness.ctx);
+		expect(harness.registered).toHaveLength(1);
+		const tool = harness.registered[0];
+		expect(tool.name).toBe("web_run");
+		expect(tool.name).toMatch(/^[a-zA-Z0-9_-]+$/);
+		const payload = {
+			model: harness.ctx.model.id,
+			input: [],
+			tools: [
+				{ type: "function", name: tool.name, description: tool.description, parameters: tool.parameters },
+				{ type: "web_search" },
+			],
+		};
+		const transformed = harness.handlers.get("before_provider_request")!({ payload }, harness.ctx) as typeof payload;
+		expect(transformed.tools).toHaveLength(1);
+		const outgoing = transformed.tools[0];
+		expect(outgoing.name).toMatch(/^[a-zA-Z0-9_-]+$/);
+		expect(outgoing.name).toBe(tool.name);
+		expect(harness.getActiveTools()).toContain(outgoing.name);
+		const prompt = harness.handlers.get("before_agent_start")!({ systemPrompt: "Base" }, harness.ctx) as { systemPrompt: string };
+		expect(prompt.systemPrompt).toContain(`\`${outgoing.name}\``);
+		const dispatched = harness.registered.find((candidate) => candidate.name === outgoing.name);
+		const result = await dispatched.execute("search-1", { search_query: [{ q: "test" }] }, undefined, undefined, harness.ctx);
+		expect(result.content).toEqual([{ type: "text", text: "standalone result" }]);
+		expect(harness.searchCalls).toHaveLength(1);
+	});
+
 	test("removes the registered tool when no standalone route is selected", () => {
 		const harness = createStandaloneHarness({
-			activeTools: ["read", "web.run"],
+			activeTools: ["read", "web_run"],
 			webSearch: {},
 		});
 		harness.handlers.get("session_start")!({}, harness.ctx);
 		expect(harness.getActiveTools()).toEqual(["read"]);
 	});
 
-	test("exact route wins and leaves only web.run active", async () => {
+	test("exact route wins and leaves only web_run active", async () => {
 		const harness = createStandaloneHarness({
-			activeTools: ["read", "web_search", "web.run", "web.run"],
+			activeTools: ["read", "web_search", "web_run", "web_run"],
 			webSearch: {
 				defaultRoute: "hosted",
 				models: ["gateway/gpt-6-astra"],
@@ -230,10 +259,10 @@ describe("standalone-alpha Web Search route", () => {
 			},
 		});
 		harness.handlers.get("session_start")!({}, harness.ctx);
-		expect(harness.getActiveTools()).toEqual(["read", "web.run"]);
+		expect(harness.getActiveTools()).toEqual(["read", "web_run"]);
 
 		const prompt = harness.handlers.get("before_agent_start")!({ systemPrompt: "Base" }, harness.ctx) as { systemPrompt: string };
-		expect(prompt.systemPrompt).toContain("`web.run`");
+		expect(prompt.systemPrompt).toContain("`web_run`");
 		expect(prompt.systemPrompt).not.toContain("The hosted `web_search` tool");
 
 		const payload = {
@@ -242,7 +271,7 @@ describe("standalone-alpha Web Search route", () => {
 			tools: [
 				{ type: "function", name: "web_search" },
 				{ type: "web_search" },
-				{ type: "function", name: "web.run" },
+				{ type: "function", name: "web_run" },
 				{ type: "function", name: "read" },
 			],
 			include: ["web_search_call.action.sources", "reasoning.encrypted_content"],
@@ -252,19 +281,19 @@ describe("standalone-alpha Web Search route", () => {
 			harness.ctx,
 		) as { tools: unknown[]; include: unknown[] };
 		expect(transformed.tools).toEqual([
-			{ type: "function", name: "web.run" },
+			{ type: "function", name: "web_run" },
 			{ type: "function", name: "read" },
 		]);
 		expect(transformed.include).toEqual(["reasoning.encrypted_content"]);
 	});
 
-	test("route switches restore local ownership and keep web.run independent", () => {
+	test("route switches restore local ownership and keep web_run independent", () => {
 		const harness = createStandaloneHarness({
 			activeTools: ["read", "web_search"],
 			webSearch: { defaultRoute: "standalone-alpha" },
 		});
 		harness.handlers.get("session_start")!({}, harness.ctx);
-		expect(harness.getActiveTools()).toEqual(["read", "web.run"]);
+		expect(harness.getActiveTools()).toEqual(["read", "web_run"]);
 
 		harness.config.webSearch.defaultRoute = "local";
 		harness.handlers.get("model_select")!({ model: harness.ctx.model }, harness.ctx);
@@ -350,16 +379,16 @@ describe("standalone-alpha Web Search route", () => {
 			payload: {
 				model: "gpt-6-astra",
 				input: [],
-				tools: [{ type: "function", name: "web.run" }],
+				tools: [{ type: "function", name: "web_run" }],
 			},
 		}, ctx)).toThrow(/not registered|aborted/i);
 		expect(aborted).toBe(1);
 	});
 
-	test("registration conflicts fail closed without replacing another web.run definition", () => {
+	test("registration conflicts fail closed without replacing another web_run definition", () => {
 		const handlers = new Map<string, Handler>();
-		let active = ["read", "web_search", "web.run"];
-		const conflicting = { name: "web.run", description: "third-party", parameters: {} };
+		let active = ["read", "web_search", "web_run"];
+		const conflicting = { name: "web_run", description: "third-party", parameters: {} };
 		const pi = {
 			on: (event: string, handler: Handler) => handlers.set(event, handler),
 			registerTool: () => { throw new Error("conflict"); },
@@ -390,14 +419,14 @@ describe("standalone-alpha Web Search route", () => {
 		);
 		handlers.get("session_start")!({}, ctx);
 		expect(active).toEqual(["read"]);
-		const guard = handlers.get("tool_call")!({ toolName: "web.run", toolCallId: "c", input: {} }, ctx) as { block: boolean };
+		const guard = handlers.get("tool_call")!({ toolName: "web_run", toolCallId: "c", input: {} }, ctx) as { block: boolean };
 		expect(guard.block).toBe(true);
 	});
 
-	test("web.run execution revalidates route and maps all commands before dispatch", async () => {
+	test("web_run execution revalidates route and maps all commands before dispatch", async () => {
 		const harness = createStandaloneHarness({ webSearch: { defaultRoute: "standalone-alpha" } });
 		harness.handlers.get("session_start")!({}, harness.ctx);
-		const tool = harness.registered.find((candidate: { name: string }) => candidate.name === "web.run");
+		const tool = harness.registered.find((candidate: { name: string }) => candidate.name === "web_run");
 		expect(tool.executionMode).toBe("sequential");
 		const result = await tool.execute("call-1", {
 			search_query: [{ q: "latest" }],

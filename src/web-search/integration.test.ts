@@ -134,7 +134,7 @@ describe("Compaction and Web Search integration", () => {
 			model: "gpt-5.5",
 			input: [{ role: "user", content: "latest news" }],
 			tools: [
-				{ type: "function", name: "web.run" },
+				{ type: "function", name: "web_run" },
 				{ type: "function", name: "read_file" },
 				{ type: "function", name: "web_search" },
 				{ type: "web_search" },
