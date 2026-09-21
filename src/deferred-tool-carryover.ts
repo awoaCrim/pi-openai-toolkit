@@ -1,5 +1,6 @@
 import type { ResponsesCompatibleRequestPayload } from "./runtime";
 import { isDeferredToolCarryover, type DeferredToolCarryoverV1 } from "./types";
+import { LOCAL_WEB_SEARCH_TOOL_NAME, WEB_RUN_TOOL_NAME } from "./web-search/types";
 
 type JsonObject = Record<string, unknown>;
 
@@ -226,7 +227,8 @@ export function rewritePayloadWithDeferredToolCarryover(args: {
 	const carryoverNames = new Set(
 		args.carryover.toolNames
 			.map((name) => name.trim())
-			.filter((name) => name.length > 0 && name !== "web_search"),
+			// Search routing validates immediate declarations on every request.
+			.filter((name) => name.length > 0 && name !== LOCAL_WEB_SEARCH_TOOL_NAME && name !== WEB_RUN_TOOL_NAME),
 	);
 	if (carryoverNames.size === 0) return unchanged;
 

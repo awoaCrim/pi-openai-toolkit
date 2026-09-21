@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { parseModelSpec } from "../runtime";
@@ -45,13 +46,7 @@ export function resetScoreTracker(tracker: ScoreTracker): void {
  * an existing score stale, because the score's authorization premise changed.
  */
 export function authorizationVersion(userText: string): string {
-	const bounded = boundReviewText(userText, 8_000);
-	let hash = 2166136261;
-	for (let index = 0; index < bounded.length; index += 1) {
-		hash ^= bounded.charCodeAt(index);
-		hash = Math.imul(hash, 16777619);
-	}
-	return `${bounded.length}:${(hash >>> 0).toString(36)}`;
+	return createHash("sha256").update(userText).digest("hex");
 }
 
 export function recordScoredCall(tracker: ScoreTracker, score: ScoreRecord): void {
@@ -91,7 +86,7 @@ export function fastApprovalEligible(input: FastDecisionInput): {
 	if (!score) return defer("missing_score");
 
 	const lag = input.currentCallIndex - score.scoredAtCall;
-	if (lag > input.maxLag) return defer("stale_score");
+	if (lag < 0 || lag > input.maxLag) return defer("stale_score");
 	if (score.authorizationVersion !== input.authorizationVersion) return defer("authorization_changed");
 	if (score.risk === "low") return { eligible: true, reason: "low_risk" };
 	return defer("elevated_risk");
@@ -144,6 +139,7 @@ export async function classifyTrajectory(params: {
 			},
 			{ signal: controller.signal, cacheRetention: "none" },
 		);
+		if (controller.signal.aborted) return { kind: "failed", reason: "Classifier was cancelled or timed out." };
 		if (response.stopReason === "error" || response.stopReason === "aborted") {
 			return { kind: "failed", reason: response.errorMessage ?? `Classifier stopped: ${response.stopReason}` };
 		}

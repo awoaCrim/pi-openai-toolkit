@@ -1,4 +1,6 @@
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { readFileSync, realpathSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { getPackageDir, parseArgs, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { loadToolkitConfig } from "../config";
 import { resolveResponsesEnvironment, type ResponsesEnvironmentResolution } from "../runtime";
 import {
@@ -362,16 +364,46 @@ function routeReadyForPrompt(
 		(resolution.route !== "standalone-alpha" || standaloneReady);
 }
 
+/** Only the installed Pi CLI owns Pi's process-level tool flags. */
+function piCliArgs(argv: readonly string[] = process.argv, packageDir = getPackageDir()): string[] {
+	try {
+		if (!argv[1]) return [];
+		const entry = realpathSync(argv[1]);
+		const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8")) as { bin?: unknown };
+		const bins = typeof manifest.bin === "string" ? [manifest.bin]
+			: manifest.bin && typeof manifest.bin === "object" ? Object.values(manifest.bin) : [];
+		for (const bin of bins) {
+			if (typeof bin !== "string") continue;
+			if (entry === realpathSync(resolve(packageDir, bin))) return argv.slice(2);
+		}
+	} catch {
+		// SDK hosts and unrecognized launchers have no verified CLI policy.
+	}
+	return [];
+}
+
+/** Missing registry entries alone are not evidence of intentional exclusion. */
+function standaloneExcludedByCli(args: string[]): boolean {
+	const parsed = parseArgs(args);
+	const allowed = parsed.tools ?? (parsed.noTools ? [] : undefined);
+	return (allowed !== undefined && !allowed.includes(WEB_RUN_TOOL_NAME)) ||
+		parsed.excludeTools?.includes(WEB_RUN_TOOL_NAME) === true;
+}
+
 export function registerWebSearchExtension(
 	pi: ExtensionAPI,
 	loadConfig: typeof loadToolkitConfig = loadToolkitConfig,
 	requestSearch: typeof requestAlphaSearch = requestAlphaSearch,
 	resolveRuntime: typeof resolveResponsesEnvironment = resolveResponsesEnvironment,
+	cliArgs: readonly string[] = piCliArgs(),
 ): void {
 	if (registeredApis.has(pi)) return;
 	registeredApis.add(pi);
 
 	const states = { webSearch: cloneToolState(), webRun: cloneToolState() };
+	// Pi does not expose SDK tool policy through ExtensionAPI. Only explicit CLI
+	// evidence relaxes route readiness; an unexplained missing tool stays fatal.
+	const cliExcludesStandalone = standaloneExcludedByCli([...cliArgs]);
 	let standaloneRegistrationSucceeded = false;
 
 	const standaloneTool = createWebRunTool({
@@ -395,8 +427,20 @@ export function registerWebSearchExtension(
 		standaloneRegistrationSucceeded = false;
 	}
 
+	function standaloneExcluded(): boolean {
+		if (!cliExcludesStandalone || !standaloneRegistrationSucceeded) return false;
+		try {
+			// SDK hosts can use -t/--tools for unrelated purposes. Only apply CLI
+			// exclusion when the host actually filtered our registered tool out.
+			// A present replacement definition must still fail registration checks.
+			return !pi.getAllTools().some((tool) => tool.name === WEB_RUN_TOOL_NAME);
+		} catch {
+			return false;
+		}
+	}
+
 	function standaloneReady(): boolean {
-		if (!standaloneRegistrationSucceeded || !canManageActiveTools(pi)) return false;
+		if (standaloneExcluded() || !standaloneRegistrationSucceeded || !canManageActiveTools(pi)) return false;
 		// Recheck on every lifecycle boundary so a later extension cannot replace
 		// the definition after startup and leave a stale active name executable.
 		// Do not use getAllTools() during extension loading; lifecycle callbacks
@@ -460,13 +504,14 @@ export function registerWebSearchExtension(
 			states,
 			standaloneReady(),
 		);
-		if (resolution.route === "standalone-alpha" && resolution.available && !standaloneReady()) {
+		if (resolution.route === "standalone-alpha" && resolution.available && !standaloneExcluded() && !standaloneReady()) {
 			abortAndThrow(ctx, `${WEB_RUN_TOOL_NAME} is not registered by the toolkit; standalone Web Search request aborted.`);
 		}
 		const transformed = transformWebSearchPayload({
 			model: ctx.model,
 			config: config.webSearch,
 			payload: event.payload,
+			standaloneToolExcluded: standaloneExcluded(),
 		});
 		if (transformed.fatal) {
 			abortAndThrow(ctx, transformed.errorMessage ?? "Web Search route request aborted.");
@@ -516,6 +561,8 @@ export default function webSearchExtension(pi: ExtensionAPI): void {
 }
 
 export const _extensionTest = {
+	piCliArgs,
+	standaloneExcludedByCli,
 	createWebRunTool,
 	verifyStandaloneRegistration,
 	syncWebSearchRoute,

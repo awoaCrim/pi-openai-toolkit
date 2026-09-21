@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { transformWebSearchPayload } from "./web-search/payload";
+import { WEB_RUN_TOOL_NAME } from "./web-search/types";
 import {
+	DEFAULT_WEB_SEARCH_CONFIG,
 	CACHE_STACK_ACTIVATION_ENTRY_TYPE,
 	NATIVE_COMPACTION_INPUT_PROVENANCE,
 	createNativeCompactionDetails,
@@ -60,6 +63,28 @@ function createPayload(overrides: Record<string, unknown> = {}) {
 }
 
 describe("cache-stack activation and deferred tool carryover", () => {
+	test("keeps standalone search immediate while restoring other tools in either mode", () => {
+		for (const compat of [{ supportsAdditionalTools: true }, { supportsToolSearch: true }]) {
+			const search = { type: "function", name: WEB_RUN_TOOL_NAME, parameters: { type: "object", properties: {} } };
+			const original = createPayload();
+			const payload = { ...original, tools: [search, ...original.tools] };
+			const result = rewritePayloadWithDeferredToolCarryover({
+				payload, carryover: { ...carryover, toolNames: [...carryover.toolNames, WEB_RUN_TOOL_NAME] },
+				compactionEntryId: "search-checkpoint", checkpointEndIndex: 2, compat,
+			});
+			expect(result.movedToolNames).toEqual(["read_file", "search_docs"]);
+			expect(result.payload.tools).toContainEqual(search);
+			expect(JSON.stringify(result.payload.input)).not.toContain(WEB_RUN_TOOL_NAME);
+			const routed = transformWebSearchPayload({
+				payload: result.payload, model: { provider: "gateway", id: "gpt-5.4", api: "openai-responses" },
+				config: { ...DEFAULT_WEB_SEARCH_CONFIG, defaultRoute: "standalone-alpha" },
+			});
+			expect(routed.fatal).not.toBe(true);
+			expect((routed.payload as typeof payload).tools).toEqual([search]);
+			expect(payload.tools).toHaveLength(4);
+		}
+	});
+
 	test("reads the latest valid current-branch activation entry and ignores malformed versions", () => {
 		const latest = getLatestDeferredToolCarryover([
 			createEntry({ version: 1, activatedTools: ["old_tool"], catalogHash: "old" }),

@@ -72,6 +72,7 @@ export class CodexContextWindowManager {
 	private identity: ContextWindowIdentity | undefined;
 	private sessionId: string | undefined;
 	private restoredMarkerId: string | undefined;
+	private restoredCompactionId: string | undefined;
 	private readonly budget = new ContextWindowBudget();
 	private pendingRollover: PendingRollover | undefined;
 	private trimPendingWindowId: string | undefined;
@@ -138,6 +139,7 @@ export class CodexContextWindowManager {
 		this.identity = undefined;
 		this.sessionId = undefined;
 		this.restoredMarkerId = undefined;
+		this.restoredCompactionId = undefined;
 		this.budget.reset();
 		this.trimPendingWindowId = undefined;
 	}
@@ -149,6 +151,7 @@ export class CodexContextWindowManager {
 		this.sessionId = sessionId;
 		for (const entry of entries) {
 			if (entry.type === "compaction") {
+				this.restoredCompactionId = entry.id;
 				this.recordCompaction(entry.details);
 				continue;
 			}
@@ -175,7 +178,16 @@ export class CodexContextWindowManager {
 		const sessionId = ctx.sessionManager.getSessionId();
 		this.retireSatisfiedOrStalePending(entries, sessionId);
 		const latestMarkerId = findLatestContextMarkerId(entries, sessionId);
-		if (this.sessionId !== sessionId || this.restoredMarkerId !== latestMarkerId) {
+		let latestCompactionId: string | undefined;
+		for (let index = entries.length - 1; index >= 0; index--) {
+			if (entries[index]!.type === "compaction") {
+				latestCompactionId = entries[index]!.id;
+				break;
+			}
+		}
+		// Hook-provided compactions may have no success callback. The persisted
+		// branch also detects navigation before/after a commit with the same marker.
+		if (this.sessionId !== sessionId || this.restoredMarkerId !== latestMarkerId || this.restoredCompactionId !== latestCompactionId) {
 			this.restore(entries, sessionId);
 		}
 	}
@@ -412,11 +424,9 @@ export class CodexContextWindowManager {
 			return { cancel: true };
 		}
 		const compaction = this.createCompaction(event);
-		// Consume the trim synchronously. Pi does not re-fire session_compact
-		// for hook-written entries, so relying on that event leaks the pending
-		// id and lets every later compaction pass this gate again, writing an
-		// endless run of no-op boundaries for the same window.
-		this.trimPendingWindowId = undefined;
+		// Preparation is only a proposal: Pi may abort before appending it.
+		// synchronize() consumes the trim after observing a durable compaction;
+		// recordCompaction() also handles hosts that emit a success callback.
 		return { compaction };
 	}
 

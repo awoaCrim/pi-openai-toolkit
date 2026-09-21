@@ -9,7 +9,7 @@ const targetByName: Record<string, string> = {
 const targetName = process.argv[2];
 const target = targetByName[targetName];
 if (!target) throw new Error(`Unknown Pi smoke target: ${targetName}`);
-const env = await createSmokeEnvironment();
+const env = await createSmokeEnvironment(process.env.PI_TOOLKIT_SMOKE_ROOT);
 try {
 	const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } =
 		await import("@earendil-works/pi-coding-agent");

@@ -23,6 +23,46 @@ import { CODEX_CONTEXT_WINDOW_MESSAGE_TYPE } from "./messages";
 import { createContextManagementTools } from "./tools";
 import { CodexContextWindowManager } from "./window-manager";
 
+test("pending trim survives cancellation and follows committed Pi branches without callbacks", () => {
+	const sm = SessionManager.inMemory("/synthetic-project");
+	const sessionId = sm.getSessionId();
+	sm.appendMessage({ role: "user", content: "old task", timestamp: Date.now() });
+	const markerId = sm.appendCustomMessageEntry(CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, "rollover", true, {
+		protocol: 1, id: "marker", sessionId,
+		contextManagement: {
+			protocol: 1, kind: "window", firstWindowId: "w1", currentWindowId: "w2",
+			windowNumber: 1, trimPreviousWindow: true,
+		},
+	});
+	const manager = new CodexContextWindowManager();
+	const ctx = { sessionManager: sm };
+	const event = () => ({
+		type: "session_before_compact", reason: "manual", branchEntries: sm.getBranch(),
+		preparation: { firstKeptEntryId: markerId, tokensBefore: 100 },
+	}) as never;
+	manager.synchronize(ctx);
+	const proposal = manager.prepareCompaction(event());
+	if (!("compaction" in proposal)) throw new Error("Expected trim proposal");
+	// Simulate Pi cancelling after the hook returns: no append, same branch.
+	manager.synchronize(ctx);
+	expect(manager.hasPendingTrim()).toBe(true);
+	expect(manager.prepareCompaction(event())).toEqual(proposal);
+	const { summary, firstKeptEntryId, tokensBefore, details } = proposal.compaction;
+	const compactId = sm.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, true);
+	// Deliberately do not call recordCompaction: some hosts suppress the event.
+	manager.synchronize(ctx);
+	expect(manager.hasPendingTrim()).toBe(false);
+	expect(manager.prepareCompaction(event())).toEqual({ cancel: true });
+	sm.branch(markerId);
+	manager.synchronize(ctx);
+	expect(manager.hasPendingTrim()).toBe(true);
+	expect(manager.prepareCompaction(event())).toEqual(proposal);
+	sm.branch(compactId);
+	manager.synchronize(ctx);
+	expect(manager.hasPendingTrim()).toBe(false);
+	expect(manager.prepareCompaction(event())).toEqual({ cancel: true });
+});
+
 test("Pi 0.85.1 persists a sequential notes result before new_context and deduplicates rollover", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "pi-context-checkpoint-"));
 	let session: AgentSession | undefined;

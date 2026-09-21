@@ -289,8 +289,12 @@ test("creates a no-summary compaction boundary only for the scheduled rollover",
 	} as never;
 	const result = manager.prepareCompaction(event);
 	expect(result).toMatchObject({ compaction: { summary: CONTEXT_WINDOW_COMPACTION_SUMMARY } });
-	// The trim is consumed exactly once; a second compaction for the same
-	// rollover must cancel instead of writing another no-op boundary.
+	// Cancellation before persistence leaves the same proposal retryable.
+	expect(manager.hasPendingTrim()).toBe(true);
+	expect(manager.prepareCompaction(event)).toEqual(result);
+	if (!("compaction" in result)) throw new Error("Expected a trim proposal");
+	manager.recordCompaction(result.compaction.details);
+	// Once persistence is acknowledged, further no-op compactions cancel.
 	expect(manager.prepareCompaction(event)).toEqual({ cancel: true });
 });
 
@@ -553,7 +557,12 @@ test("rollover arms a once-only trim that is consumed by the persisted boundary"
 	persistSentMarker(branch, sent[0]!);
 	manager.synchronize(ctx);
 	const persistedEvent = { reason: "threshold", branchEntries: branch, preparation: { firstKeptEntryId: "keep", tokensBefore: 50 } } as never;
-	expect(manager.prepareCompaction(persistedEvent)).toMatchObject({ compaction: { summary: CONTEXT_WINDOW_COMPACTION_SUMMARY } });
+	const proposal = manager.prepareCompaction(persistedEvent);
+	expect(proposal).toMatchObject({ compaction: { summary: CONTEXT_WINDOW_COMPACTION_SUMMARY } });
+	expect(manager.hasPendingTrim()).toBe(true);
+	if (!("compaction" in proposal)) throw new Error("Expected a trim proposal");
+	branch.push({ type: "compaction", id: "committed-trim", ...proposal.compaction });
+	manager.synchronize(ctx);
 	expect(manager.hasPendingTrim()).toBe(false);
 	expect(manager.prepareCompaction(persistedEvent)).toEqual({ cancel: true });
 });

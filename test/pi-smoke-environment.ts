@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /** Call before dynamically importing Pi: config paths are captured at import time. */
-export async function createSmokeEnvironment() {
-	const root = await mkdtemp(join(tmpdir(), "pi-openai-toolkit-smoke-"));
+export async function createSmokeEnvironment(preparedRoot?: string) {
+	const root = preparedRoot ?? await mkdtemp(join(tmpdir(), "pi-openai-toolkit-smoke-"));
 	const cwd = join(root, "project");
 	const home = join(root, "home");
 	const agentDir = join(home, ".pi", "agent");

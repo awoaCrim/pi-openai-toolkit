@@ -46,8 +46,8 @@ export function sessionEntriesToLines(entries: readonly SessionEntry[]): Transcr
 	const lines: TranscriptLine[] = [];
 	for (const entry of entries) {
 		if (entry.type === "compaction" && typeof entry.summary === "string") {
-			const summary = boundReviewText(entry.summary, MAX_TRANSCRIPT_ENTRY_CHARS);
-			if (summary) lines.push({ role: "assistant", text: `[earlier conversation summary] ${summary}` });
+			// Defer bounding until selection so the transcript reports truncation.
+			if (entry.summary) lines.push({ role: "assistant", text: `[earlier conversation summary] ${entry.summary}` });
 			continue;
 		}
 		if (entry.type !== "message") continue;
@@ -61,8 +61,8 @@ export function sessionEntriesToLines(entries: readonly SessionEntry[]): Transcr
 	return lines;
 }
 
-function renderLine(index: number, line: TranscriptLine): string {
-	const body = boundReviewText(line.text, MAX_TRANSCRIPT_ENTRY_CHARS);
+function renderLine(index: number, line: TranscriptLine, maxChars = MAX_TRANSCRIPT_ENTRY_CHARS): string {
+	const body = boundReviewText(line.text, maxChars);
 	return `[${index}] [${line.role}]: ${body}`;
 }
 
@@ -82,44 +82,46 @@ export function buildReviewTranscript(
 		maxRecentEntries?: number;
 	} = {},
 ): { text: string; omitted: boolean } {
-	const maxTotalChars = budgets.maxTotalChars ?? MAX_TRANSCRIPT_CHARS;
-	const maxToolChars = budgets.maxToolChars ?? MAX_TRANSCRIPT_TOOL_CHARS;
+	const maxTotalChars = Math.max(0, budgets.maxTotalChars ?? MAX_TRANSCRIPT_CHARS);
+	const maxToolChars = Math.max(0, budgets.maxToolChars ?? MAX_TRANSCRIPT_TOOL_CHARS);
 	const maxRecentEntries = budgets.maxRecentEntries ?? MAX_TRANSCRIPT_RECENT_ENTRIES;
-
 	const recent = lines.slice(-Math.max(1, maxRecentEntries));
-	const omitted = recent.length < lines.length;
+	const notice = `${TRUNCATION_MARKER} conversation content was omitted or truncated.`;
 
-	const userLines: number[] = [];
-	const otherLines: number[] = [];
-	recent.forEach((line, index) => {
-		if (line.role === "user") userLines.push(index);
-		else otherLines.push(index);
-	});
-
-	const selected = new Set<number>();
-	let userChars = 0;
-	// The first user turn carries the task; the latest carries the immediate ask.
-	for (const index of [userLines[0]!, userLines[userLines.length - 1]!, ...userLines.slice(1, -1).reverse()]) {
-		if (index === undefined || selected.has(index)) continue;
-		const cost = recent[index]!.text.length;
-		if (userChars + cost > maxTotalChars) break;
-		selected.add(index);
-		userChars += cost;
+	function select(budget: number): { text: string; omitted: boolean } {
+		const selected = new Map<number, string>();
+		let totalChars = 0;
+		let toolChars = 0;
+		let omitted = recent.length < lines.length;
+		// Authorization gets the first claim on space, newest instructions first.
+		const indices = recent.map((_, index) => index).reverse();
+		for (const index of [...indices.filter((i) => recent[i]!.role === "user"), ...indices.filter((i) => recent[i]!.role !== "user")]) {
+			const line = recent[index]!;
+			const separator = selected.size > 0 ? 1 : 0;
+			const available = Math.min(budget - totalChars, line.role === "user" ? Infinity : maxToolChars - toolChars) - separator;
+			const prefix = `[${index + 1}] [${line.role}]: `;
+			if (available <= prefix.length + 3) {
+				omitted = true;
+				continue;
+			}
+			const rendered = renderLine(index + 1, line, Math.min(MAX_TRANSCRIPT_ENTRY_CHARS, available - prefix.length));
+			if (rendered.slice(prefix.length) !== line.text) omitted = true;
+			selected.set(index, rendered);
+			const cost = rendered.length + separator;
+			totalChars += cost;
+			if (line.role !== "user") toolChars += cost;
+		}
+		return {
+			text: [...selected].sort(([a], [b]) => a - b).map(([, text]) => text).join("\n"),
+			omitted,
+		};
 	}
 
-	let toolChars = 0;
-	for (const index of [...otherLines].reverse()) {
-		const cost = recent[index]!.text.length;
-		if (toolChars + cost > maxToolChars) continue;
-		if (userChars + toolChars + cost > maxTotalChars) continue;
-		selected.add(index);
-		toolChars += cost;
-	}
-
-	const ordered = [...selected].sort((a, b) => a - b);
-	const rendered = ordered.map((index) => renderLine(index + 1, recent[index]!));
-	if (omitted) rendered.unshift(`${TRUNCATION_MARKER} earlier conversation entries were omitted.`);
-	return { text: rendered.join("\n"), omitted };
+	const initial = select(maxTotalChars);
+	if (!initial.omitted) return initial;
+	if (maxTotalChars <= notice.length) return { text: notice.slice(0, maxTotalChars), omitted: true };
+	const bounded = select(maxTotalChars - notice.length - 1);
+	return { text: bounded.text ? `${notice}\n${bounded.text}` : notice, omitted: true };
 }
 
 /**

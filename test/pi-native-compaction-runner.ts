@@ -7,7 +7,7 @@ import { createSmokeEnvironment } from "./pi-smoke-environment";
 const packageDir = resolve(import.meta.dirname, "..");
 const mode = process.argv[2];
 assert(["threshold", "disabled", "under", "manual", "cancel", "failure"].includes(mode));
-const env = await createSmokeEnvironment();
+const env = await createSmokeEnvironment(process.env.PI_TOOLKIT_SMOKE_ROOT);
 process.env.PI_CACHE_RETENTION = "long";
 try {
 	const { createAgentSession, DefaultResourceLoader, defineTool, ModelRuntime, SessionManager, SettingsManager } = await import("@earendil-works/pi-coding-agent");

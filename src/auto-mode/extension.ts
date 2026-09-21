@@ -74,13 +74,14 @@ function textFromToolContent(content: unknown): string {
  * pre-score: once the authorization premise changes, the old score is meaningless.
  */
 function userAuthorizationVersion(entries: readonly { type: string; message?: unknown }[]): string {
-	const userText = entries
+	const userContent = entries
 		.filter((entry) => entry.type === "message")
 		.map((entry) => entry.message as { role?: string; content?: unknown } | undefined)
 		.filter((message): message is { role?: string; content?: unknown } => message?.role === "user")
-		.map((message) => textFromToolContent(message.content))
-		.join("\n");
-	return authorizationVersion(userText);
+		.map((message) => message.content);
+	// Preserve message/block boundaries and all content; display truncation is
+	// unrelated to whether the user has changed the authorization premise.
+	return authorizationVersion(JSON.stringify(userContent));
 }
 
 function evidenceToolsFor(cwd: string): EvidenceTool[] {
@@ -150,7 +151,15 @@ export function registerAutoModeExtension(
 	const tracker: ScoreTracker = createScoreTracker();
 
 	let callIndex = 0;
-	let scoringInFlight = false;
+	let scoringGeneration = 0;
+	let scoringController: AbortController | undefined;
+
+	function invalidateClassification(): void {
+		scoringGeneration += 1;
+		scoringController?.abort();
+		scoringController = undefined;
+		resetScoreTracker(tracker);
+	}
 
 	function updateStatus(ctx: ExtensionContext, reviewingTool?: string): void {
 		if (!ctx.hasUI) return;
@@ -201,7 +210,7 @@ export function registerAutoModeExtension(
 	function disengage(ctx: ExtensionContext): void {
 		if (!runtime.engaged) return;
 		runtime.engaged = false;
-		resetScoreTracker(tracker);
+		invalidateClassification();
 		updateStatus(ctx);
 	}
 
@@ -322,7 +331,7 @@ export function registerAutoModeExtension(
 		config: AutoModeConfig,
 		completed: { toolName: string; toolInput: unknown },
 	): void {
-		if (!config.classifier.enabled || scoringInFlight) return;
+		if (!config.classifier.enabled || scoringController) return;
 		const modelSpec = config.classifier.model ?? config.reviewerModel;
 		if (!modelSpec) return;
 
@@ -330,7 +339,9 @@ export function registerAutoModeExtension(
 		const { text: transcript } = transcriptFromEntries(entries);
 		const authVersion = userAuthorizationVersion(entries as never);
 		const scoredAtCall = callIndex;
-		scoringInFlight = true;
+		const generation = scoringGeneration;
+		const controller = new AbortController();
+		scoringController = controller;
 
 		void classifyTrajectory({
 			registry: reviewerRegistry(ctx),
@@ -342,9 +353,10 @@ export function registerAutoModeExtension(
 				cwd: ctx.cwd,
 			}),
 			timeoutMs: config.classifier.timeoutMs,
-			signal: ctx.signal,
+			signal: ctx.signal ? AbortSignal.any([ctx.signal, controller.signal]) : controller.signal,
 		})
 			.then((result) => {
+				if (generation !== scoringGeneration || controller.signal.aborted) return;
 				if (result.kind === "failed") {
 					recordFailedCall(tracker, scoredAtCall);
 					return;
@@ -357,10 +369,10 @@ export function registerAutoModeExtension(
 				});
 			})
 			.catch(() => {
-				recordFailedCall(tracker, scoredAtCall);
+				if (generation === scoringGeneration && !controller.signal.aborted) recordFailedCall(tracker, scoredAtCall);
 			})
 			.finally(() => {
-				scoringInFlight = false;
+				if (generation === scoringGeneration) scoringController = undefined;
 			});
 	}
 
@@ -385,7 +397,7 @@ export function registerAutoModeExtension(
 				case "off":
 					runtime.engaged = false;
 					setGateOverride(runtime, auto, undefined);
-					resetScoreTracker(tracker);
+					invalidateClassification();
 					ctx.ui.notify("Auto mode off.", "info");
 					break;
 				case "all":
@@ -435,7 +447,7 @@ export function registerAutoModeExtension(
 		}
 		setGateOverride(runtime, config.autoMode, undefined);
 		applyConfiguredGate(runtime, config.autoMode);
-		resetScoreTracker(tracker);
+		invalidateClassification();
 		resetRejectionBreaker(breaker);
 		callIndex = 0;
 		const startedFromFlag = pi.getFlag(AUTO_MODE_FLAG) === true && engage(ctx, config.autoMode);
@@ -455,6 +467,9 @@ export function registerAutoModeExtension(
 	});
 
 	pi.on("before_agent_start", (_event, ctx) => {
+		// One user request spans multiple turn_start events (model responses).
+		resetRejectionBreaker(breaker);
+		invalidateClassification();
 		const { config } = loadConfig();
 		applyConfiguredGate(runtime, config.autoMode);
 		if (runtime.engaged && !isAutoModeEligible(ctx.model, config.autoMode)) {
@@ -463,9 +478,11 @@ export function registerAutoModeExtension(
 		updateStatus(ctx);
 	});
 
-	// The breaker judges one turn's denial pattern, so it starts clean each turn.
-	pi.on("turn_start", () => {
+	pi.on("session_shutdown", () => invalidateClassification());
+	pi.on("session_tree", () => {
+		invalidateClassification();
 		resetRejectionBreaker(breaker);
+		callIndex = 0;
 	});
 
 	pi.on("tool_call", async (event, ctx) => {

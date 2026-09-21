@@ -49,6 +49,7 @@ function unavailableRouteTransform(
 function transformStandalonePayload(args: {
 	payload: JsonObject;
 	resolution: ReturnType<typeof resolveWebSearchRoute>;
+	toolExcluded?: boolean;
 }): WebSearchPayloadTransform {
 	const { payload, resolution } = args;
 	const toolsValue = payload.tools;
@@ -77,6 +78,7 @@ function transformStandalonePayload(args: {
 	const normalizedTools = tools.filter((tool) => {
 		if (isLocalWebSearchFunction(tool) || isNativeWebSearchTool(tool)) return false;
 		if (!isStandaloneWebRunFunction(tool)) return true;
+		if (args.toolExcluded) return false;
 		standaloneToolCount += 1;
 		return standaloneToolCount === 1;
 	});
@@ -84,7 +86,7 @@ function transformStandalonePayload(args: {
 	const normalizedInclude = include.filter((item) => item !== WEB_SEARCH_SOURCE_INCLUDE);
 	const toolsChanged = normalizedTools.length !== tools.length;
 	const includeChanged = normalizedInclude.length !== include.length;
-	if (toolsValue !== undefined && !normalizedTools.some(isStandaloneWebRunFunction)) {
+	if (!args.toolExcluded && toolsValue !== undefined && !normalizedTools.some(isStandaloneWebRunFunction)) {
 		return {
 			payload,
 			outcome: "unavailable-route",
@@ -159,6 +161,8 @@ export function transformWebSearchPayload(args: {
 	model: WebSearchModel | undefined;
 	config: WebSearchConfig;
 	payload: unknown;
+	/** Only set with explicit host policy evidence, never inferred from payload. */
+	standaloneToolExcluded?: boolean;
 }): WebSearchPayloadTransform {
 	const { model, config, payload } = args;
 	const resolution = resolveWebSearchRoute({ model, config });
@@ -170,7 +174,7 @@ export function transformWebSearchPayload(args: {
 			changed: false,
 		};
 	}
-	if (!resolution.available) {
+	if (!resolution.available && !(resolution.route === "standalone-alpha" && args.standaloneToolExcluded)) {
 		return unavailableRouteTransform(payload, resolution);
 	}
 	if (resolution.route === "local") {
@@ -195,7 +199,7 @@ export function transformWebSearchPayload(args: {
 				errorMessage: "Standalone Web Search requires an object provider payload.",
 			};
 		}
-		return transformStandalonePayload({ payload, resolution });
+		return transformStandalonePayload({ payload, resolution, toolExcluded: args.standaloneToolExcluded });
 	}
 
 	if (!isRecord(payload)) {
