@@ -7,7 +7,9 @@ import type {
 	ExtensionContext,
 	SessionBeforeCompactEvent,
 } from "@earendil-works/pi-coding-agent";
-import { loadToolkitConfig } from "./config";
+import { assertConfigValid, loadToolkitConfig, resolveToolkitConfig, type ResolvedToolkitConfig } from "./config";
+import { notifyConfigIssues } from "./config/notifications";
+import { registerToolkitConfigCommand } from "./config-command";
 import {
 	codexContextProviderHeaders,
 	resolveCodexContextProvider,
@@ -56,6 +58,7 @@ import { executeRemoteV2Compaction } from "./remote-v2-client";
 import {
 	resolveNativeCompactionEnvironment,
 	resolveRemoteCompactionExecution,
+	parseModelSpec,
 	type RemoteCompactionExecution,
 } from "./runtime";
 import {
@@ -80,6 +83,27 @@ type CompactionContextProjection = (
 	messages: readonly AgentMessage[],
 	ctx: ExtensionContext,
 ) => readonly AgentMessage[] | undefined | Promise<readonly AgentMessage[] | undefined>;
+
+function contextOperation(loadConfig: typeof loadToolkitConfig, ctx: ExtensionContext, model = ctx.model): ResolvedToolkitConfig {
+	const loaded = loadConfig();
+	const resolved = resolveToolkitConfig(loaded, model);
+	notifyConfigIssues(ctx, resolved);
+	return resolved;
+}
+
+function requireContextPolicy(resolved: ResolvedToolkitConfig, ctx: ExtensionContext): void {
+	try {
+		assertConfigValid(resolved, "context", "compatibility", "diagnostics");
+	} catch (error) {
+		if (typeof ctx.abort === "function") ctx.abort();
+		throw error;
+	}
+}
+
+function compactGatewayModels(resolved: ResolvedToolkitConfig): readonly string[] {
+	return resolved.format === "v2" || resolved.config.compaction.contextManagement === "remote"
+		? resolved.gatewayModelKeys : [];
+}
 
 type CompactionDependencies = {
 	loadConfig: typeof loadToolkitConfig;
@@ -541,8 +565,9 @@ async function handleSessionBeforeCompact(
 	dependencies: CompactionDependencies,
 	remoteContextActive: RemoteContextActive,
 ) {
-	const { config: toolkitConfig } = dependencies.loadConfig();
-	const config = toolkitConfig.compaction;
+	const resolved = contextOperation(dependencies.loadConfig, ctx);
+	if (resolved.invalidFeatures.some((feature) => ["context", "compatibility", "diagnostics"].includes(feature))) return { cancel: true };
+	const config = resolved.config.compaction;
 	if (!config.enabled) {
 		return undefined;
 	}
@@ -590,6 +615,15 @@ async function handleSessionBeforeCompact(
 		return { cancel: true };
 	}
 
+	// Resolve producer protocol policy from this operation's document, not a later disk read.
+	if (resolved.format === "v2" && config.remoteCompactModel) {
+		const producer = parseModelSpec(config.remoteCompactModel);
+		if (producer) {
+			const producerPolicy = resolveToolkitConfig(resolved.snapshot, { provider: producer.provider, id: producer.modelId });
+			notifyConfigIssues(ctx, producerPolicy);
+			if (producerPolicy.invalidFeatures.includes("compatibility")) return { cancel: true };
+		}
+	}
 	// Branch 1: Responses-family APIs use remote_compaction_v2 on the normal Responses stream.
 	let remoteAttempted = false;
 	const resolution = await resolveRemoteCompactionExecution(
@@ -597,7 +631,7 @@ async function handleSessionBeforeCompact(
 		{
 			enabled: config.enabled,
 			responsesApis: config.responsesApis,
-			codexGatewayModels: config.contextManagement === "remote" ? config.gatewayContextModels : [],
+			codexGatewayModels: compactGatewayModels(resolved),
 		},
 		config.remoteCompactModel,
 	);
@@ -748,9 +782,10 @@ async function handleWindowBulk(
 	contextWindows: CodexContextWindowManager,
 	loadConfig: typeof loadToolkitConfig,
 	trigger: "model-switch" | "turn-end",
+	resolved = contextOperation(loadConfig, ctx),
 ): Promise<void> {
-	const { config: config } = loadConfig();
-	const compaction = config.compaction;
+	requireContextPolicy(resolved, ctx);
+	const compaction = resolved.config.compaction;
 	if (!compaction.enabled || compaction.contextManagement !== "remote") return;
 	if (!ctx.model) return;
 
@@ -810,7 +845,9 @@ async function handleContextInternal(
 	contextWindows: CodexContextWindowManager,
 	remoteContextActive: RemoteContextActive,
 ) {
-	const { config: { compaction: config } } = loadConfig();
+	const resolved = contextOperation(loadConfig, ctx);
+	requireContextPolicy(resolved, ctx);
+	const config = resolved.config.compaction;
 	if (!config.enabled) {
 		const visibleMessages = contextWindows.project(event.messages, "off");
 		return visibleMessages.length === event.messages.length && visibleMessages.every((message, index) => message === event.messages[index])
@@ -876,7 +913,7 @@ async function handleContextInternal(
 	const resolution = await resolveNativeCompactionEnvironment(ctx, {
 		enabled: config.enabled,
 		responsesApis: config.responsesApis,
-		codexGatewayModels: config.contextManagement === "remote" ? config.gatewayContextModels : [],
+		codexGatewayModels: compactGatewayModels(resolved),
 	});
 	if (!resolution.ok) return undefined;
 	const branchEntries = ctx.sessionManager.getBranch();
@@ -926,7 +963,9 @@ async function handleBeforeProviderRequest(
 	contextWindows: CodexContextWindowManager,
 	remoteContextActive: RemoteContextActive,
 ) {
-	const { config: toolkitConfig } = loadConfig();
+	const resolved = contextOperation(loadConfig, ctx);
+	requireContextPolicy(resolved, ctx);
+	const toolkitConfig = resolved.config;
 	const config = toolkitConfig.compaction;
 	if (!config.enabled) {
 		return undefined;
@@ -967,7 +1006,7 @@ async function handleBeforeProviderRequest(
 		{
 			enabled: config.enabled,
 			responsesApis: config.responsesApis,
-			codexGatewayModels: config.contextManagement === "remote" ? config.gatewayContextModels : [],
+			codexGatewayModels: compactGatewayModels(resolved),
 		},
 		event.payload,
 	);
@@ -1125,9 +1164,10 @@ export default function registerCompactionExtension(
 	overrides: Partial<CompactionDependencies> = {},
 ) {
 	const loadConfig = overrides.loadConfig ?? loadToolkitConfig;
+	registerToolkitConfigCommand(pi, loadConfig);
 	const piContextHookPatch = installPiContextHookPatch();
-	const contextWindows = overrides.contextWindows ?? new CodexContextWindowManager((ctx, signal) =>
-		loadHistoryNotesThreadHint(ctx, signal, loadConfig().config.compaction.gatewayContextModels)
+	const contextWindows = overrides.contextWindows ?? new CodexContextWindowManager((ctx, signal, gatewayModels) =>
+		loadHistoryNotesThreadHint(ctx, signal, gatewayModels)
 	);
 	const dependencies: CompactionDependencies = {
 		loadConfig,
@@ -1149,22 +1189,23 @@ export default function registerCompactionExtension(
 		pi,
 		contextWindows,
 		async (ctx) => {
-			const config = dependencies.loadConfig().config.compaction;
-			return isContextRuntimeActive(ctx, config);
+			const resolved = contextOperation(dependencies.loadConfig, ctx);
+			assertConfigValid(resolved, "context", "compatibility");
+			return { active: await isContextRuntimeActive(ctx, resolved.config.compaction), gatewayModels: resolved.gatewayModelKeys };
 		},
-		() => dependencies.loadConfig().config.compaction.gatewayContextModels,
 	);
 	const remoteContextActive: RemoteContextActive = isContextRuntimeActive;
 	const syncTools = async (
 		ctx: ExtensionContext,
 		model = ctx.model,
 		options: { notifyWindowFailure?: boolean } = {},
+		resolved = contextOperation(dependencies.loadConfig, ctx, model),
 	): Promise<ContextToolSyncOutcome> => {
 		// Until this call proves otherwise, do not let a previous session/window
 		// identity make a failed activation look usable.
 		contextWindowReady = false;
-		const config = dependencies.loadConfig().config.compaction;
-		const eligible = await isRemoteContextActive(ctx, config, model);
+		const config = resolved.config.compaction;
+		const eligible = !resolved.invalidFeatures.some((feature) => ["context", "compatibility"].includes(feature)) && await isRemoteContextActive(ctx, config, model);
 		const toolSync = tools.sync(eligible);
 		const outcome: ContextToolSyncOutcome = {
 			eligible,
@@ -1190,10 +1231,13 @@ export default function registerCompactionExtension(
 		}
 	};
 	pi.on("session_start", async (_event, ctx) => {
-		const syncOutcome = await syncTools(ctx, ctx.model, { notifyWindowFailure: true });
+		const resolved = contextOperation(dependencies.loadConfig, ctx);
+		const syncOutcome = await syncTools(ctx, ctx.model, { notifyWindowFailure: true }, resolved);
 		const active = syncOutcome.eligible && syncOutcome.toolsSynced && syncOutcome.windowInitialized;
-		const { config: toolkitConfig, source, warnings } = dependencies.loadConfig();
-		const config = toolkitConfig.compaction;
+		const { source } = resolved;
+		const warnings = resolved.issues.map((issue) => `${issue.path}: ${issue.code}`);
+		const config = resolved.config.compaction;
+		if (resolved.invalidFeatures.length > 0) return;
 		if (!config.enabled) return;
 
 		let activationReason: string | undefined;
@@ -1216,9 +1260,6 @@ export default function registerCompactionExtension(
 			}
 		}
 
-		if (warnings.length > 0 && ctx.hasUI && config.debug) {
-			ctx.ui.notify(`${COMPACTION_EXTENSION_ID}: ${warnings[0]}`, "warning");
-		}
 
 		const artifactPath = writeDebugArtifact(
 			"lifecycle",
@@ -1240,7 +1281,7 @@ export default function registerCompactionExtension(
 			ctx,
 		);
 
-		if (ctx.hasUI && (config.notifyOnLoad || config.debug)) {
+		if (ctx.hasUI && ["info", "debug"].includes(resolved.policy.diagnostics.level) && (config.notifyOnLoad || config.debug)) {
 			ctx.ui.notify(
 				artifactPath
 					? `${COMPACTION_EXTENSION_ID} loaded • debug artifacts → ${artifactPath}`
@@ -1269,17 +1310,20 @@ export default function registerCompactionExtension(
 		// window metadata, the backend never ingests those turns, and the first
 		// new_context would trim pre-switch history that no history can recover.
 		// syncTools() activates and initializes the window when the model is covered.
-		await syncTools(ctx, event.model, { notifyWindowFailure: true });
+		const resolved = contextOperation(dependencies.loadConfig, ctx, event.model);
+		await syncTools(ctx, event.model, { notifyWindowFailure: true }, resolved);
 		// The switch itself is the moment the durable transcript changes consumer, and the
 		// session is idle here, so the close-out must happen now rather than mid-turn.
-		await handleWindowBulk(ctx, contextWindows, dependencies.loadConfig, "model-switch");
+		await handleWindowBulk(ctx, contextWindows, dependencies.loadConfig, "model-switch", resolved);
 	});
 	pi.on("before_agent_start", async (_event, ctx) => {
 		await syncTools(ctx, ctx.model, { notifyWindowFailure: true });
 	});
 	pi.on("before_provider_request", (event, ctx) => handleBeforeProviderRequest(event, ctx, dependencies.loadConfig, contextWindows, remoteContextActive));
 	pi.on("before_provider_headers", async (event, ctx) => {
-		const config = dependencies.loadConfig().config.compaction;
+		const resolved = contextOperation(dependencies.loadConfig, ctx);
+		requireContextPolicy(resolved, ctx);
+		const config = resolved.config.compaction;
 		if (!isCodexContextModel(ctx.model, config)) return;
 		const active = await remoteContextActive(ctx, config);
 		if (!active) {
@@ -1320,7 +1364,9 @@ export default function registerCompactionExtension(
 		contextWindows.rewriteHeaders(event.headers, ctx);
 	});
 	pi.on("message_end", async (event, ctx) => {
-		const config = dependencies.loadConfig().config.compaction;
+		const resolved = contextOperation(dependencies.loadConfig, ctx);
+		requireContextPolicy(resolved, ctx);
+		const config = resolved.config.compaction;
 		if (!isCodexContextModel(ctx.model, config) || !tools.isRegistered) return undefined;
 		if (!(await remoteContextActive(ctx, config))) return undefined;
 		const message = routeContextNamespaceToolMessage(event.message);

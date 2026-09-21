@@ -1,9 +1,12 @@
+import { v2Fixture } from "../config/test-helpers";
+import type { loadToolkitConfig } from "../config";
 import { describe, expect, test } from "bun:test";
 import {
 	DEFAULT_COMPACTION_CONFIG,
 	DEFAULT_IMAGE_GENERATION_CONFIG,
 	DEFAULT_TOOLKIT_CONFIG,
 	DEFAULT_WEB_SEARCH_CONFIG,
+	type WebSearchConfig,
 } from "../types";
 import { registerWebSearchExtension } from "./extension";
 import { WEB_SEARCH_SOURCE_INCLUDE } from "./types";
@@ -137,6 +140,7 @@ describe("Web Search extension", () => {
 function createStandaloneHarness(args: {
 	activeTools?: string[];
 	webSearch?: Partial<typeof DEFAULT_WEB_SEARCH_CONFIG>;
+	loadConfig?: typeof loadToolkitConfig;
 } = {}) {
 	const handlers = new Map<string, Handler>();
 	const registered: any[] = [];
@@ -188,7 +192,7 @@ function createStandaloneHarness(args: {
 	});
 	registerWebSearchExtension(
 		pi as never,
-		(() => ({ config, warnings: [] })) as never,
+		(args.loadConfig ?? (() => ({ config, warnings: [] }))) as never,
 		requestSearch as never,
 		resolveRuntime as never,
 	);
@@ -209,6 +213,234 @@ function createStandaloneHarness(args: {
 		getAborted: () => aborted,
 	};
 }
+
+type RouteCycleStateKey = "standalone" | "local" | "hosted" | "disabled" | "unconfigured";
+
+const DOTTED_WEB_RUN_ALIAS = "web.run";
+const ROUTE_LOCAL_TOOL_FIXTURE = {
+	type: "function",
+	name: "web_search",
+	description: "third-party local search",
+	parameters: { type: "object" },
+};
+const ROUTE_READ_TOOL_FIXTURE = { type: "function", name: "read", parameters: { type: "object" } };
+
+type RouteCycleExpectation = {
+	configure: (config: WebSearchConfig) => void;
+	activeTools: string[];
+	guidance: "none" | { contains: string; excludes: string[] };
+	/** `undefined` means the provider hook must leave the caller payload untouched. */
+	payload?: { tools: unknown[]; include: unknown[] };
+	blockWebRun: boolean;
+	blockLocalSearch: boolean;
+};
+
+const ROUTE_CYCLE_STATES: Record<RouteCycleStateKey, RouteCycleExpectation> = {
+	standalone: {
+		configure: (config) => {
+			config.enabled = true;
+			config.models = [];
+			config.defaultRoute = "standalone-alpha";
+			config.routes = undefined;
+		},
+		activeTools: ["read", "web_run"],
+		guidance: {
+			contains: "The `web_run` tool is available",
+			excludes: ["The hosted `web_search` tool", "The local `web_search` tool"],
+		},
+		payload: {
+			tools: [{ type: "function", name: "web_run", parameters: { type: "object" } }, ROUTE_READ_TOOL_FIXTURE],
+			include: ["reasoning.encrypted_content"],
+		},
+		blockWebRun: false,
+		blockLocalSearch: true,
+	},
+	local: {
+		configure: (config) => {
+			config.enabled = true;
+			config.models = [];
+			config.defaultRoute = "local";
+			config.routes = undefined;
+		},
+		activeTools: ["read", "web_search"],
+		guidance: {
+			contains: "The local `web_search` tool is available",
+			excludes: ["The `web_run` tool is available", "The hosted `web_search` tool"],
+		},
+		payload: {
+			tools: [ROUTE_LOCAL_TOOL_FIXTURE, ROUTE_READ_TOOL_FIXTURE],
+			include: ["reasoning.encrypted_content"],
+		},
+		blockWebRun: true,
+		blockLocalSearch: false,
+	},
+	hosted: {
+		configure: (config) => {
+			config.enabled = true;
+			config.models = [];
+			config.defaultRoute = "hosted";
+			config.routes = undefined;
+		},
+		activeTools: ["read"],
+		guidance: {
+			contains: "The hosted `web_search` tool is part of your tool list",
+			excludes: ["The `web_run` tool is available", "The local `web_search` tool"],
+		},
+		payload: {
+			tools: [{ type: "web_search" }, ROUTE_READ_TOOL_FIXTURE],
+			include: [WEB_SEARCH_SOURCE_INCLUDE, "reasoning.encrypted_content"],
+		},
+		blockWebRun: true,
+		blockLocalSearch: true,
+	},
+	disabled: {
+		configure: (config) => {
+			config.enabled = false;
+			config.models = [];
+			config.defaultRoute = undefined;
+			config.routes = undefined;
+		},
+		// A disabled route releases toolkit ownership. The local tool returns to
+		// whatever third party owned it before, and no route owns an active tool.
+		activeTools: ["read", "web_search"],
+		guidance: "none",
+		blockWebRun: false,
+		blockLocalSearch: false,
+	},
+	unconfigured: {
+		configure: (config) => {
+			config.enabled = true;
+			config.models = [];
+			config.defaultRoute = undefined;
+			config.routes = undefined;
+		},
+		activeTools: ["read", "web_search"],
+		guidance: "none",
+		blockWebRun: false,
+		blockLocalSearch: false,
+	},
+};
+
+function switchRouteCycleState(
+	harness: ReturnType<typeof createStandaloneHarness>,
+	key: RouteCycleStateKey,
+): void {
+	ROUTE_CYCLE_STATES[key].configure(harness.config.webSearch);
+	harness.handlers.get("model_select")!({ model: harness.ctx.model }, harness.ctx);
+}
+
+function createRouteCyclePayload() {
+	return {
+		model: "gpt-6-astra",
+		input: [],
+		tools: [
+			{ type: "function", name: "web_run", parameters: { type: "object" } },
+			{ type: "function", name: "web_run" },
+			ROUTE_LOCAL_TOOL_FIXTURE,
+			{ type: "web_search" },
+			{ type: "web_search_preview" },
+			ROUTE_READ_TOOL_FIXTURE,
+		],
+		include: [WEB_SEARCH_SOURCE_INCLUDE, "reasoning.encrypted_content"],
+		unrelated: "keep",
+	};
+}
+
+function observeRouteCycle(harness: ReturnType<typeof createStandaloneHarness>, systemPrompt: string) {
+	const payload = createRouteCyclePayload();
+	const snapshot = structuredClone(payload);
+	const beforeAgentStart = harness.handlers.get("before_agent_start")!({ systemPrompt }, harness.ctx);
+	const beforeProviderRequest = harness.handlers.get("before_provider_request")!({ payload }, harness.ctx);
+	const webRunGuard = harness.handlers.get("tool_call")!(
+		{ toolName: "web_run", toolCallId: "cycle-web-run", input: {} },
+		harness.ctx,
+	);
+	const localGuard = harness.handlers.get("tool_call")!(
+		{ toolName: "web_search", toolCallId: "cycle-local-search", input: {} },
+		harness.ctx,
+	);
+	return {
+		activeTools: harness.getActiveTools(),
+		payload,
+		snapshot,
+		beforeAgentStart,
+		beforeProviderRequest,
+		webRunGuard,
+		localGuard,
+	};
+}
+
+function expectRouteCycleState(
+	harness: ReturnType<typeof createStandaloneHarness>,
+	key: RouteCycleStateKey,
+	previousPrompt = "Base prompt",
+): string {
+	const expected = ROUTE_CYCLE_STATES[key];
+	const observed = observeRouteCycle(harness, previousPrompt);
+
+	expect(observed.activeTools).toEqual(expected.activeTools);
+	expect(observed.activeTools.filter((name) => name === "web_run")).toHaveLength(key === "standalone" ? 1 : 0);
+
+	const guidance = observed.beforeAgentStart as { systemPrompt: string } | undefined;
+	const systemPrompt = guidance?.systemPrompt ?? previousPrompt;
+	if (expected.guidance === "none") {
+		expect(systemPrompt).toBe("Base prompt");
+	} else {
+		expect(systemPrompt).toContain(expected.guidance.contains);
+		for (const excluded of expected.guidance.excludes) expect(systemPrompt).not.toContain(excluded);
+		// The standalone section must name the callable exactly once.
+		if (key === "standalone") expect(systemPrompt.split("`web_run`")).toHaveLength(2);
+	}
+
+	const transformed = observed.beforeProviderRequest as
+		| { tools?: unknown[]; include?: unknown[]; unrelated?: unknown }
+		| undefined;
+	if (expected.payload) {
+		expect(transformed).toBeDefined();
+		expect(transformed!.tools).toEqual(expected.payload.tools);
+		expect(transformed!.include).toEqual(expected.payload.include);
+		expect(transformed!.unrelated).toBe("keep");
+	} else {
+		expect(transformed).toBeUndefined();
+	}
+	// A disabled or unconfigured route releases ownership; it must not erase
+	// third-party tools from the outgoing payload.
+	expect(observed.payload).toEqual(observed.snapshot);
+
+	const webRunGuard = observed.webRunGuard as { block?: boolean; reason?: string } | undefined;
+	const localGuard = observed.localGuard as { block?: boolean; reason?: string } | undefined;
+	expect(webRunGuard?.block ?? false).toBe(expected.blockWebRun);
+	expect(localGuard?.block ?? false).toBe(expected.blockLocalSearch);
+	if (expected.blockWebRun) expect(webRunGuard?.reason).toContain("blocked instead of falling back");
+	if (expected.blockLocalSearch) expect(localGuard?.reason).toContain("blocked instead of falling back");
+
+	// Issue #5 regression: no surface may reintroduce the dotted callable alias.
+	expect(String(JSON.stringify(observed.activeTools))).not.toContain(DOTTED_WEB_RUN_ALIAS);
+	expect(String(JSON.stringify(observed.beforeAgentStart))).not.toContain(DOTTED_WEB_RUN_ALIAS);
+	expect(String(JSON.stringify(transformed))).not.toContain(DOTTED_WEB_RUN_ALIAS);
+	return systemPrompt;
+}
+
+describe("standalone-alpha route round-trips", () => {
+	for (const intermediate of ["local", "hosted", "disabled", "unconfigured"] as const) {
+		test(`standalone -> ${intermediate} -> standalone stays consistent`, () => {
+			const harness = createStandaloneHarness({
+				activeTools: ["read", "web_search"],
+				webSearch: { defaultRoute: "standalone-alpha" },
+			});
+			harness.handlers.get("session_start")!({ type: "session_start", reason: "startup" }, harness.ctx);
+			let prompt = expectRouteCycleState(harness, "standalone");
+
+			switchRouteCycleState(harness, intermediate);
+			prompt = expectRouteCycleState(harness, intermediate, prompt);
+
+			switchRouteCycleState(harness, "standalone");
+			expectRouteCycleState(harness, "standalone", prompt);
+			// Returning must not register a second definition or a legacy alias.
+			expect(harness.registered.map((tool) => tool.name)).toEqual(["web_run"]);
+		});
+	}
+});
 
 describe("standalone-alpha Web Search route", () => {
 	test("registered standalone function keeps a provider-valid name through dispatch", async () => {
@@ -457,4 +689,25 @@ describe("standalone-alpha Web Search route", () => {
 		await expect(tool.execute("call-2", { search_query: [{ q: "blocked" }] }, undefined, undefined, harness.ctx)).rejects.toThrow(/route/i);
 		expect(harness.searchCalls).toHaveLength(1);
 	});
+});
+
+
+test("invalid selected v2 search cannot leak local/standalone tools or dispatch a request", async () => {
+	let raw: Record<string, unknown> = { models: { "gateway/gpt-6-astra": { webSearch: { route: "standalone-alpha" } } } };
+	let reads = 0;
+	const h = createStandaloneHarness({ activeTools: ["read", "web_search"], loadConfig: () => { reads++; return v2Fixture(raw); } });
+	h.handlers.get("session_start")!({}, h.ctx);
+	expect(reads).toBe(1);
+	expect(h.getActiveTools()).toEqual(["read", "web_run"]);
+	raw = { models: { "gateway/gpt-6-astra": { webSearch: { route: "typo" } } } };
+	h.handlers.get("before_agent_start")!({ systemPrompt: "base" }, h.ctx);
+	expect(h.getActiveTools()).toEqual(["read"]);
+	expect(() => h.handlers.get("before_provider_request")!({ payload: { input: [] } }, h.ctx)).toThrow("configuration is invalid");
+	expect(h.getAborted()).toBe(1);
+	expect(h.handlers.get("tool_call")!({ toolName: "web_search" }, h.ctx)).toMatchObject({ block: true });
+	await expect(h.registered[0].execute("id", { search_query: [{ q: "fixture" }] }, undefined, undefined, h.ctx)).rejects.toThrow("configuration is invalid");
+	expect(h.searchCalls).toHaveLength(0);
+	raw = { defaults: { webSearch: { route: "hosted" } }, models: { "other/model": { webSearch: { route: "typo" } } } };
+	const payload = h.handlers.get("before_provider_request")!({ payload: { input: [], tools: [] } }, h.ctx) as { tools: unknown[] };
+	expect(payload.tools).toEqual([{ type: "web_search" }]);
 });

@@ -11,11 +11,11 @@
 
 | 功能 | 用途 |
 | --- | --- |
-| Codex 远程上下文 | 切换到新上下文窗口，并通过 `history` 按需检索较早窗口。 |
+| Codex 远程上下文 | 使用适配的 Codex 窗口协议切换上下文窗口，并通过 `history` 检索较早窗口。 |
 | 远程压缩 v2 | 使用服务端返回的加密检查点继续符合条件的 Responses 会话。 |
-| 联网搜索路由 | 按精确模型路由选择本地 `pi-web-access`、Responses 托管 `web_search` 或 CPA standalone `web_run`。 |
-| 图像生成 | 生成图片，或根据明确传入的本地参考图片进行编辑。 |
-| 工具调用审查 | 在指定范围的工具调用执行前，由审查模型判断是否允许执行。 |
+| 联网搜索路由 | 按精确模型选择本地 `pi-web-access`、Responses 托管 `web_search` 或实验性的 CPA 独立 `web_run`。 |
+| 图像生成 | 调用 Responses 托管生图工具生成图片，或编辑明确传入的本地参考图片。 |
+| 工具调用审查 | 使用 Toolkit 的审批门禁，由审查模型判断指定工具调用是否可以执行。 |
 
 本包沿用 Pi 已有的模型、认证和会话配置，不新增提供商或模型。
 
@@ -23,36 +23,33 @@
 
 需要 Pi 0.85.1 或更高版本，以及 Node.js 22.19.0 或更高版本。
 
-安装扩展：
-
 ```bash
 pi install npm:pi-openai-toolkit
 ```
 
-在当前项目中安装时，在命令后加上 `--local`。
+在当前项目中安装扩展时加上 `--local`。Toolkit 策略仍然只使用全局配置，不支持项目配置或环境变量策略覆盖。
 
-只安装扩展不会自动启用所有功能。没有扩展配置时，压缩模块处于开启状态，但远程上下文关闭，联网搜索没有工具包选择的路由，图像生成关闭，自动模式也没有允许的模型和审查模型。
+没有配置文件时，符合条件的模型启用远程压缩 v2，远程上下文窗口关闭，搜索不由 Toolkit 管理，图像生成关闭，自动模式不可用。这些默认值不表示后端能力已经验证。
 
-扩展配置文件位于：
+Toolkit 唯一的配置文件是：
 
 `~/.pi/agent/extensions/pi-openai-toolkit/config.json`
 
-下文除 `models.json` 示例外，其他 JSON 配置示例都写入此文件。文件不存在时，创建文件及所需目录；已有配置时，将字段合并到对应对象中，保留其他设置。
+下文除 Pi 模型注册示例外，其他 JSON 示例均使用**配置格式 v2**。文件不存在时，创建文件及所需目录；已有 v2 配置时，将示例合并到对应对象并保留其他设置。无版本号的旧格式仍受支持，请勿直接加入 v2 字段，也不要用示例覆盖原文件。先运行 `/toolkit-config migration-preview`；[配置参考](docs/configuration.md)说明了审查和已安装版本检查要求。读取配置和预览迁移都不会改写源文件。
 
 ## 快速开始：启用远程上下文
 
-本节适用于想使用 Codex 风格上下文窗口的用户。如果只需要联网搜索、图像生成或工具调用审查，请直接跳到[常见用法](#常见用法)。
+本节适用于想使用 Codex 风格上下文窗口的用户。如果只需要搜索、生图或工具调用审查，请跳到[常见用法](#常见用法)。
 
 ### 使用 Pi 内置的 Codex 提供商
 
-你需要先登录 Pi 内置的 `openai-codex` 提供商。
-
-创建或合并扩展配置：
+你需要先登录 Pi 内置的 `openai-codex` 提供商。创建或合并以下 v2 Toolkit 配置：
 
 ```json
 {
-  "compaction": {
-    "contextManagement": "remote"
+  "schemaVersion": 2,
+  "defaults": {
+    "context": { "mode": "remote-windows" }
   }
 }
 ```
@@ -63,13 +60,13 @@ pi install npm:pi-openai-toolkit
 pi --model openai-codex/<model-id>
 ```
 
-将 `<model-id>` 换成 Pi 配置中实际显示的模型 ID。会话中出现 `new_context`、`get_context_remaining`、`history` 和 `notes` 工具，说明扩展已经完成启用检查。
+将 `<model-id>` 换成 Pi 配置中实际显示的模型 ID。会话中出现 `new_context`、`get_context_remaining`、`history` 和 `notes`，说明已经激活；这不代表已完成后端往返验证。
 
 ### 使用兼容网关
 
-本路线要求使用 `openai-responses` 接口，并且网关保留远程上下文所需的 Codex 协议字段。普通对话请求成功，不代表已经验证远程上下文兼容性。
+本路线要求使用 `openai-responses`，并且网关保留远程上下文所需的 Codex 协议字段。普通对话请求成功，不代表远程上下文兼容性已经验证。
 
-如果 `~/.pi/agent/models.json` 中已有符合上述条件的网关模型，可以跳过模型配置，直接设置扩展白名单。否则，先添加或合并下面的提供商配置。请把 `my-gateway`、地址、环境变量名称和模型字段替换成实际值。示例中的数字只是示意值，不是项目默认值，必须改成符合实际模型与网关能力的上下文窗口和最大输出 token 数。
+如果 `~/.pi/agent/models.json` 中已有兼容模型，可以跳过注册，直接设置下方 Toolkit 精确模型覆盖。否则，添加或合并下面的 Pi 提供商配置。请替换提供商名称、地址、环境变量和模型字段。示例数字不是项目默认值。
 
 ```json
 {
@@ -91,7 +88,7 @@ pi --model openai-codex/<model-id>
 }
 ```
 
-在启动 Pi 之前设置配置中引用的密钥。PowerShell 使用：
+启动 Pi 前设置配置中引用的密钥。PowerShell 使用：
 
 ```powershell
 $env:MY_GATEWAY_KEY = "replace-with-your-gateway-key"
@@ -103,137 +100,149 @@ POSIX shell 使用：
 export MY_GATEWAY_KEY="replace-with-your-gateway-key"
 ```
 
-使用同一个终端启动 Pi。创建或合并扩展配置，并确保白名单条目与提供商名称和模型 ID 完全一致：
+使用同一个终端启动 Pi。在 Toolkit 配置中，确保键与已注册的提供商名称和模型 ID 完全一致：
 
 ```json
 {
-  "compaction": {
-    "contextManagement": "remote",
-    "gatewayContextModels": ["my-gateway/gpt-5.6-luna"]
+  "schemaVersion": 2,
+  "models": {
+    "my-gateway/gpt-5.6-luna": {
+      "context": { "mode": "remote-windows" },
+      "compatibility": { "transport": "codex-gateway" }
+    }
   }
 }
 ```
-
-使用相同的模型标识启动 Pi：
 
 ```bash
 pi --model my-gateway/gpt-5.6-luna
 ```
 
-启用检查方式相同：会话中应该出现 `new_context`、`get_context_remaining`、`history` 和 `notes`。如果没有出现，先查看工具包通知，再检查提供商和模型字符串、接口、密钥、基础 URL 和白名单条目。
+检查是否出现 `new_context`、`get_context_remaining`、`history` 和 `notes`。如果没有，查看通知与 `/toolkit-config`，再检查精确模型键、Pi API、认证和基础 URL。传输设置只是显式选择协议适配，不会注册模型，也不能证明后端支持。
 
-较早窗口的历史仍可通过 `history` 检索和读取，但不会全部自动加入当前上下文。
+较早窗口仍可通过 `history` 检索，但不会全部自动加入当前上下文。
 
 ## 常见用法
 
 ### 使用服务端压缩继续会话
 
-如果希望使用 Responses 压缩路径，就保持远程上下文关闭。远程压缩 v2 会为符合条件的 Responses 模型保存并回放加密检查点。只有在压缩请求需要使用其他模型时，才设置 `compaction.remoteCompactModel`。
+使用 `context.mode: "remote-compaction"` 选择 Responses 压缩路径（默认值），或设为 `"pi"` 交回 Toolkit 的上下文管理权。只有需要独立模型生成检查点时才设置 `context.remoteCompaction.model`。这些字段放在 `defaults` 或精确的 `models` 覆盖下。
 
-不配置 `compaction.remoteV2ContextSource` 时，Remote V2 保持原来的 `"legacy"` 输入链路：首次压缩使用 Pi 当前的 session context（最后才回退到事件提供的 preparation），递归压缩使用原始 branch tail。这会保留既有行为，但如果其他扩展改写消息，可能与 provider 实际看到的上下文不同。
+`context.remoteCompaction.inputSource` 默认为 `"legacy"`：首次压缩使用 Pi 当前会话上下文，最后才回退到事件提供的数据；递归压缩使用原始分支尾部。这保留了既有行为，但当其他扩展改写消息时，可能与提供商实际看到的上下文不同。
 
-将 `compaction.remoteV2ContextSource` 设为 `"pi-context-hook"` 可主动启用 Pi 0.85.1 runtime bridge，让 Remote V2 压缩使用与实时 provider 请求相同的有序 `context` hook 链。如果 Pi 无法提供这条公开 hook 路径，Remote V2 会取消压缩，而不会发送未投影的历史。只有检查点来源标记与当前设置一致时，才会继续回放。在两种模式之间切换后，必须重新创建 Remote V2 检查点；如果自定义状态必须保留在不透明检查点中，请关闭 Remote V2，或使用 Pi 原生压缩。
+主动选择 `"pi-context-hook"` 后，使用 Pi 有序上下文钩子投影。如果桥接不可用，压缩会取消，不会发送未投影的历史。检查点与来源绑定，切换来源后必须创建新检查点。详见[协议说明](docs/internals.md#remote-compaction-v2-wire-contract)。
 
 ### 选择联网搜索路由
 
-联网搜索有三条互斥路由。可以设置一个全局默认路由，也可以按精确的 `provider/model-id` 覆盖：
+设置全局默认值和精确模型覆盖：
 
 ```json
 {
-  "webSearch": {
-    "enabled": true,
-    "defaultRoute": "hosted",
-    "routes": {
-      "uwoacrimson/gpt-6-astra": "standalone-alpha",
-      "my-gateway/gpt-5.6-luna": "local"
+  "schemaVersion": 2,
+  "defaults": {
+    "webSearch": { "route": "local" }
+  },
+  "models": {
+    "my-gateway/gpt-5.6-luna": {
+      "webSearch": { "route": "hosted" }
     }
   }
 }
 ```
 
-路由选择是精确且确定的：`routes[provider/model-id]` 优先于 `defaultRoute`，`defaultRoute` 优先于旧版 `models` 列表。不支持通配符、模糊模型匹配、按模型名称猜能力、路由间 fallback 或重试。无效的路由值或模型键会告警后忽略，不会猜测路由；新旧字段重叠时会给出迁移告警。`enabled: false` 会释放工具包的工具所有权，并关闭工具包选择的全部三条路径。
+- `unmanaged` 释放 Toolkit 的管理权，不会关闭第三方搜索或所有网络访问。
+- `local` 保留本地 `pi-web-access` 工具原先的激活状态，并从提供商请求中移除冲突的托管或独立搜索工具。原先未激活的本地工具不会被自动激活。
+- `hosted` 用原生 Responses 搜索工具和来源标注替换本地 `web_search` 函数。
+- `standalone-alpha` 显式启用实验性的 CPA/Codex 网关搜索。它暴露顺序执行的 `web_run`，每次调用向提供商相对路径 `/alpha/search` 发送一次隔离请求，使用当前 Pi 模型及认证。网关必须实际支持该端点和能力，Toolkit 不会探测或替你开启。
 
-- **`local`** 保留已经安装的 `pi-web-access` `web_search` 工具。如果它原本没有激活，工具包不会替你激活；同时不会添加托管 provider 工具或 `web_run`。
-- **`hosted`** 移除名为 `web_search` 的本地 function，并注入原生 Responses `{ "type": "web_search" }` 工具和来源标注。旧版配置仍然有效：
-
-  ```json
-  {
-    "webSearch": {
-      "models": ["my-gateway/gpt-5.6-luna"]
-    }
-  }
-  ```
-
-  没有配置新路由字段时，只有精确命中该列表、且 API 属于现有 Responses 系列（`openai-responses` 或 `openai-codex-responses`）的模型会使用托管搜索。
-- **`standalone-alpha`** 暴露一个 sequential 的 `web_run` 工具，并向 provider 相对的 `/alpha/search` 端点发送一次隔离的 `POST` 请求。例如基础地址是 `https://gateway.example/v1` 时，请求地址是 `https://gateway.example/v1/alpha/search`，不会变成 Responses 端点。支持的命令族包括 `search_query`、`image_query`、`open`、`click`、`find`、`screenshot`、`finance`、`weather`、`sports` 和 `time`；`response_length` 用于调整请求的结果长度。
-
-standalone 路由属于实验性的 CPA/Codex 网关协议，不是稳定的公开 OpenAI Responses 端点。网关/provider 必须提供 `/alpha/search`、启用 `alpha-search` 能力，并支持 standalone web search（Codex provider 通常以 `supports_standalone_web_search = true` 表示）。请求会复用 Pi 当前模型、认证、provider headers、会话标识及 Codex/gateway affinity，不会切换当前模型。MVP 发送受边界限制的命令 envelope，而不是完整会话 transcript；`ref_id` 后续操作依赖 provider 的会话/引用处理；每次工具调用最多发送一次请求；配置无效、路由不可用、取消、超时、非 2xx、响应畸形或超限时都会 fail closed。
+精确覆盖优先于默认值。不支持模式匹配、猜测能力或路由间回退。选中策略无效时，会阻止受影响操作，不会改选其他路由。旧版托管模型列表仍可读取，但其宽松失败处理与 v2 显式 `hosted` 不完全相同；迁移预览会标出差异。
 
 ### 生成图片
 
-图像生成需要 Responses 会话，并且可能产生服务商费用。启用方式如下：
+图像生成需要 Responses 会话，并且可能产生服务商费用。全局启用方式如下：
 
 ```json
 {
-  "imageGeneration": {
-    "enabled": true,
-    "models": ["gpt-image-2.5", "grok-imagine-image-2.0"]
+  "schemaVersion": 2,
+  "defaults": {
+    "imageGeneration": {
+      "enabled": true,
+      "defaultModel": "gpt-image-2.5",
+      "allowedModels": ["gpt-image-2.5", "grok-imagine-image-2.0"]
+    }
   }
 }
 ```
 
-`models` 填写嵌套 Responses `image_generation` 工具使用的裸模型 ID。列表第一项是默认模型；`openai_generate_image` 也支持通过可选的 `model` 参数在单次调用中切换，但该值必须与配置列表中的某一项完全一致。省略 `models` 时默认使用 `gpt-image-2.5`。列表为空或格式无效时会告警并回退到默认模型；如果要关闭工具，将 `enabled` 设置为 `false`。服务商或网关必须实际支持配置的生图模型。
+这里填写嵌套 Responses `image_generation` 工具使用的裸输出模型 ID。列表顺序不决定默认模型。`defaultModel` 必须属于非空的 `allowedModels` 列表，单次调用的可选 `model` 也必须在列表中。无效策略或不允许的选择会在认证、参考图上传及付费请求前被拒绝。提供商必须支持所选模型。
 
-`openai_generate_image` 支持文生图，也支持使用明确传入的本地参考图片进行编辑。
+`openai_generate_image` 支持文生图和使用明确传入的本地参考图进行编辑。生图策略不能按当前会话模型覆盖。
 
 ### 启用工具调用自动审查
 
-在 `autoMode` 中设置允许使用的模型和审查模型：
+为精确模型开放自动模式，并选择审查模型：
 
 ```json
 {
-  "autoMode": {
-    "models": ["my-gateway/gpt-5.6-luna"],
-    "reviewerModel": "my-gateway/gpt-5.6-luna"
+  "schemaVersion": 2,
+  "models": {
+    "my-gateway/gpt-5.6-luna": {
+      "autoMode": {
+        "available": true,
+        "reviewerModel": "my-gateway/gpt-5.6-luna"
+      }
+    }
   }
 }
 ```
 
-在会话中使用 `/auto on`，也可以用 `--auto` 启动 Pi。TUI 会显示自动模式已开启的提示；每次审查受控工具时，工作指示器会临时显示 `Auto mode: reviewing <tool>`，底部状态栏会保留当前审查范围。在支持兼容 tool renderer 的 Pi 版本中，自动模式下每个工具块底部都会显示一行状态：已审查的调用会显示 `allowed by reviewer · low risk · authorization medium` 或 `denied · <reason>`，不在当前审查范围内的调用会显示 `not reviewed · outside the configured gate`。如果当前 Pi 没有这个 renderer seam，扩展会告警一次并继续使用底部状态栏提示。默认的 `side-effect` 审查范围覆盖 `bash`、`write`、`edit` 和额外配置的工具。如果需要审查所有工具调用，将 `gate` 设置为 `"all"`。审查超时不会自动放行调用。
+`available` 表示允许开启，使用 `/auto on` 或 `--auto` 才会实际开启；`/auto off` 明确关闭。默认 `side-effect` 范围覆盖 `bash`、`write`、`edit` 和额外配置的工具；`gate: "all"` 审查所有工具调用。审查超时不会自动放行。运行中配置变为无效时，已开启的门禁继续阻止调用，直到修正配置或明确关闭。
+
+TUI 会显示开启提示、审查活动和底部状态。兼容的 Pi 工具渲染器还会显示每次调用的允许、拒绝、阻止或未审查状态。如果渲染接口不可用，Toolkit 告警一次并保留底部显示。审查器、分类器和熔断器的高级配置见[配置参考](docs/configuration.md)。
 
 ## 常用配置
 
-配置文件为 `~/.pi/agent/extensions/pi-openai-toolkit/config.json`。未知键会告警后忽略。大多数模型列表必须使用精确的 `provider/model-id` 字符串，不支持通配符；`imageGeneration.models` 是例外，填写嵌套生图工具使用的裸模型 ID。
+全局文件按内置值、`defaults`、精确 `models["provider/model-id"]` 的顺序解析。缺失字段继承，数组整体替换，`false` 和 `0` 保持含义。支持的可选模型引用可以用 `null` 清除继承。默认值不是总开关：精确覆盖可以开启默认关闭的功能。
 
 | 配置项 | 默认值 | 用途 |
 | --- | --- | --- |
-| `compaction.enabled` | `true` | 压缩功能总开关。 |
-| `compaction.contextManagement` | `"off"` | 设置为 `"remote"` 后启用 Codex 远程上下文。 |
-| `compaction.gatewayContextModels` | `[]` | 允许使用远程上下文的网关模型。 |
-| `compaction.remoteCompactModel` | 未设置 | 仅用于 v2 压缩请求的可选模型。 |
-| `compaction.remoteV2ContextSource` | `"legacy"` | 保留原来的原始 session/branch 输入路径。设置为 `"pi-context-hook"` 后才启用 Pi 的有序 context hook projection。检查点与模式绑定。 |
-| `compaction.leaveManagedMode` | `"warn"` | 会话即将把整份持久 transcript（而不只是当前远程窗口）交给某个模型时的处理方式。`"warn"` 每个窗口与模型只提示一次；`"compact"` 在退役历史还超过该模型上下文窗口 80% 时额外先执行一次压缩——发生在切换模型时，或发生在仍排队着换窗裁剪的轮次结束时。print（`-p`）模式与没有排队裁剪的轮次只做提示，因为那种位置上的压缩无法跑完。 |
-| `compaction.contextReminderThresholdPercent` | `5` | 每个窗口触发一次提醒的剩余预算百分比。设置为 `0` 会关闭提醒和窗口耗尽兜底。 |
-| `webSearch.enabled` | `true` | 工具包联网搜索路由的总开关。设为 `false` 时不选择任何工具包路由。 |
-| `webSearch.defaultRoute` | 未设置 | 默认路由：`local`、`hosted` 或 `standalone-alpha`。未设置时保留旧版行为。 |
-| `webSearch.routes` | 未设置 | 精确的 `provider/model-id` 路由覆盖。精确条目优先于 `defaultRoute`。 |
-| `webSearch.models` | `[]` | 旧版精确白名单；没有新路由字段时，列表中的 Responses 系列模型使用托管联网搜索。 |
-| `imageGeneration.enabled` | `false` | 启用 `openai_generate_image`。 |
-| `imageGeneration.models` | `["gpt-image-2.5"]` | 裸生图模型 ID；列表第一项是默认模型。 |
-| `autoMode.models` | `[]` | 允许使用自动模式的模型。 |
-| `autoMode.reviewerModel` | 未设置 | 审查自动模式调用的模型。 |
-| `autoMode.gate` | `"side-effect"` | 设置为 `"all"` 后审查所有工具调用。 |
-| `autoMode.timeoutMs` | `30000` | 审查超时时间，单位为毫秒。 |
+| `defaults.context.mode` | `"remote-compaction"` | `"pi"`、`"remote-compaction"` 或 `"remote-windows"`。 |
+| `models[exact].compatibility.transport` | `"standard"` | 用 `"codex-gateway"` 显式选择网关协议。 |
+| `defaults.context.remoteCompaction.model` | `null` | 可选的检查点生成模型。 |
+| `defaults.context.remoteCompaction.inputSource` | `"legacy"` | 与检查点来源绑定的输入策略。 |
+| `defaults.context.remoteWindows.reminderThresholdPercent` | `5` | `0` 关闭提醒和窗口耗尽兜底。 |
+| `defaults.webSearch.route` | `"unmanaged"` | Toolkit 搜索管理策略。 |
+| `defaults.imageGeneration.enabled` | `false` | 全局生图开关。 |
+| `defaults.imageGeneration.defaultModel` | `"gpt-image-2.5"` | 明确指定默认输出模型。 |
+| `defaults.imageGeneration.allowedModels` | `["gpt-image-2.5"]` | 允许的输出模型，仅支持全局设置。 |
+| `defaults.autoMode.available` | `false` | 是否允许开启工具审查。 |
+| `defaults.autoMode.gate` | `"side-effect"` | 指定副作用工具，或 `"all"`。 |
+| `defaults.autoMode.timeoutMs` | `30000` | 审查超时，单位为毫秒。 |
+| `diagnostics.level` | `"info"` | `"debug"` 开启调试产物。 |
+| `diagnostics.captureRequests` / `captureResponses` | `false` | 分别开启请求或压缩响应捕获。 |
+
+使用 `/toolkit-config` 查看有效值及来源，`/toolkit-config validate` 查看文档问题，`/toolkit-config migration-preview` 预览只读的旧格式迁移候选。这些命令需要 UI，不查询网络或认证，不激活工具，也不写文件。选中配置不表示后端支持已验证。
+
+未知 v2 策略键和畸形值会产生可见的分范围错误，不依赖调试模式。每个公开回调或工具执行及其等待的辅助操作使用同一份不可变快照，后续操作重新读取文件；独立 Pi 事件之间不保证原子事务。完整选项见[配置参考](docs/configuration.md)和[编辑器 schema](config.schema.json)。
 
 ## 开发
 
 在仓库根目录安装依赖后运行：
 
 ```bash
-npm run typecheck    # 类型检查
-bun test             # 运行测试
-npm run test:pi      # 运行 Pi 冒烟测试
-npm pack --dry-run   # 检查发布包内容
+npm run typecheck
+```
+
+```bash
+bun test
+```
+
+```bash
+npm run test:pi
+```
+
+```bash
+npm pack --dry-run
 ```
 
 ## 许可证

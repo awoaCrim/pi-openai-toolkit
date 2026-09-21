@@ -12,6 +12,8 @@ const targets = [
 	["cooperative compaction cancellation", "native_cancel"],
 	["remote failure and native fallback", "native_failure"],
 	["complete package", "package"],
+	["standalone search (openai-responses)", "web_openai-responses"],
+	["standalone search (openai-codex-responses)", "web_openai-codex-responses"],
 ] as const;
 
 describe("pi smoke", () => {
@@ -25,7 +27,11 @@ describe("pi smoke", () => {
 					if (["PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "PATHEXT"].includes(key.toUpperCase())) env[key] = value;
 				}
 				const native = target.startsWith("native_");
-				const result = spawnSync(process.execPath, [native ? join(import.meta.dir, "pi-native-compaction-runner.ts") : runnerPath, native ? target.slice(7) : target], {
+				const webSearch = target.startsWith("web_");
+				const runner = native ? join(import.meta.dir, "pi-native-compaction-runner.ts")
+					: webSearch ? join(import.meta.dir, "pi-web-search-runner.ts") : runnerPath;
+				const argument = native ? target.slice(7) : webSearch ? target.slice(4) : target;
+				const result = spawnSync(process.execPath, [runner, argument], {
 					cwd: packageDir,
 					encoding: "utf8",
 					env,

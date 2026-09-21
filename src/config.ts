@@ -1,739 +1,318 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { getExactModelKey, type ExactModelScopeModel } from "./model-scope";
+import { resolveWebSearchRoute, type WebSearchModel } from "./web-search/types";
+import { CONFIG_PATH, normalizeLegacyConfig } from "./config/legacy";
+import { resolveV2Config } from "./config/v2";
 import {
-	DEFAULT_COMPACTION_CONFIG,
-	DEFAULT_TOOLKIT_CONFIG,
-	DEFAULT_AUTO_MODE_CONFIG,
-	DEFAULT_IMAGE_GENERATION_CONFIG,
-	DEFAULT_IMAGE_GENERATION_MODEL,
-	DEFAULT_NATIVE_FALLBACK_CONFIG,
-	DEFAULT_WEB_SEARCH_CONFIG,
-	RESPONSES_COMPACT_CAPABLE_APIS,
-	BREAKER_LIMIT_MAX,
-	BREAKER_LIMIT_MIN,
-	BREAKER_WINDOW_MAX,
-	BREAKER_WINDOW_MIN,
-	CLASSIFIER_MAX_LAG_MAX,
-	CLASSIFIER_MAX_LAG_MIN,
-	DEFAULT_CLASSIFIER_TIMEOUT_MS,
-	EVIDENCE_ROUNDS_MAX,
-	EVIDENCE_ROUNDS_MIN,
-	REVIEWER_TIMEOUT_MAX_MS,
-	REVIEWER_TIMEOUT_MIN_MS,
-	THINKING_LEVELS,
-	TOOLKIT_ID,
-	type AutoModeCircuitBreakerConfig,
-	type AutoModeClassifierConfig,
-	type AutoModeConfig,
-	type AutoModeGate,
-	type CompactionConfig,
-	type ContextManagementMode,
-	type LeaveManagedModePolicy,
-	type ImageGenerationConfig,
-	type RemoteV2ContextSource,
-	type LoadedToolkitConfig,
-	type NativeFallbackConfig,
-	type ToolkitConfig,
-	type WebSearchConfig,
-	type WebSearchRoute,
-} from "./types";
-import { MAX_IMAGE_MODEL_ID_CHARS } from "./image-generation/types";
+	CONFIG_FEATURES,
+	createPolicyDefaults,
+	type ConfigDocumentSnapshot,
+	type ConfigFeature,
+	type ConfigIssue,
+	type ConfigOrigin,
+	type EffectiveToolkitPolicy,
+	type ResolvedToolkitPolicy,
+} from "./config/policy";
+import type { LoadedToolkitConfig, ToolkitConfig } from "./types";
 
-export const CONFIG_DIR = path.join(os.homedir(), ".pi", "agent", "extensions", TOOLKIT_ID);
-export const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
+export { CONFIG_DIR, CONFIG_PATH } from "./config/legacy";
+export { DEFAULT_TOOLKIT_CONFIG } from "./types";
+export type { ConfigFeature, ConfigIssue, ConfigOrigin, EffectiveToolkitPolicy } from "./config/policy";
 
-const TOP_LEVEL_FIELDS = new Set(["compaction", "webSearch", "imageGeneration", "autoMode"]);
-const COMPACTION_FIELDS = new Set([
-	"enabled",
-	"leaveManagedMode",
-	"contextManagement",
-	"allowCompactionContinuityBreak",
-	"remoteCompactModel",
-	"remoteV2ContextSource",
-	"nativeFallback",
-	"responsesApis",
-	"gatewayContextModels",
-	"contextReminderThresholdPercent",
-	"notifyOnLoad",
-	"debug",
-	"logProviderPayloads",
-	"logCompactResponses",
-	"redactSensitiveData",
-	"artifactRoot",
-]);
-const NATIVE_FALLBACK_FIELDS = new Set(["enabled", "model", "thinkingLevel"]);
-const WEB_SEARCH_FIELDS = new Set(["enabled", "models", "defaultRoute", "routes"]);
-const IMAGE_GENERATION_FIELDS = new Set(["enabled", "models"]);
-const AUTO_MODE_FIELDS = new Set([
-	"enabled",
-	"models",
-	"reviewerModel",
-	"gate",
-	"extraTools",
-	"timeoutMs",
-	"transcript",
-	"evidenceTools",
-	"maxEvidenceRounds",
-	"classifier",
-	"circuitBreaker",
-]);
-const AUTO_MODE_CLASSIFIER_FIELDS = new Set(["enabled", "model", "timeoutMs", "maxLag"]);
-const AUTO_MODE_BREAKER_FIELDS = new Set(["consecutiveDenials", "recentDenials", "windowSize"]);
+export type ResolvedToolkitConfig = ResolvedToolkitPolicy & {
+	/** Narrow adapters for existing feature engines, never raw document sections. */
+	config: ToolkitConfig;
+	format: ConfigDocumentSnapshot["format"];
+	source?: string;
+	modelKey?: string;
+	/** Cross-feature protocol policy, independent of context enablement. */
+	gatewayModelKeys: string[];
+	/** Same decoded document for resolving another identity within this operation. */
+	snapshot: LoadedToolkitConfig;
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
 }
-
-function isFile(filePath: string): boolean {
-	try {
-		return fs.statSync(filePath).isFile();
-	} catch {
-		return false;
+function has(value: Record<string, unknown>, key: string): boolean {
+	return Object.prototype.hasOwnProperty.call(value, key);
+}
+function freeze<T>(value: T): T {
+	if (value && typeof value === "object" && !Object.isFrozen(value)) {
+		Object.freeze(value);
+		for (const item of Object.values(value)) freeze(item);
 	}
+	return value;
+}
+function documentError(code: string): ConfigIssue {
+	return { severity: "error", code, path: "$", feature: "document" };
 }
 
-function readJsonObject(filePath: string, warnings: string[]): Record<string, unknown> | undefined {
-	if (!isFile(filePath)) return undefined;
-
+/** Read exactly one global file. No project discovery, cache, writes or auth/network work. */
+export function loadToolkitConfig(configPath: string = CONFIG_PATH): LoadedToolkitConfig {
+	let raw: unknown;
+	let format: ConfigDocumentSnapshot["format"] = "missing";
+	const issues: ConfigIssue[] = [];
+	const warnings: string[] = [];
 	try {
-		const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
-		if (isRecord(parsed)) return parsed;
-		warnings.push(`Ignoring ${filePath}: expected a JSON object at the top level.`);
-		return undefined;
+		const text = fs.readFileSync(configPath, "utf8");
+		try {
+			raw = JSON.parse(text);
+			if (!isRecord(raw)) {
+				format = "invalid";
+				issues.push(documentError("expected-object"));
+			} else if (has(raw, "schemaVersion")) {
+				format = raw.schemaVersion === 2 ? "v2" : "invalid";
+				if (format === "invalid") issues.push(documentError("unsupported-schema-version"));
+			} else if (has(raw, "defaults") || has(raw, "models") || has(raw, "diagnostics")) {
+				format = "invalid";
+				issues.push(documentError("missing-schema-version"));
+			} else {
+				format = "legacy";
+			}
+		} catch {
+			format = "invalid";
+			issues.push(documentError("invalid-json"));
+		}
 	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		warnings.push(`Ignoring ${filePath}: ${message}`);
-		return undefined;
-	}
-}
-
-function resolveConfiguredPath(rawPath: string, baseDir: string): string {
-	if (rawPath.startsWith("~/")) {
-		return path.join(os.homedir(), rawPath.slice(2));
-	}
-	if (path.isAbsolute(rawPath)) {
-		return path.resolve(rawPath);
-	}
-	return path.resolve(baseDir, rawPath);
-}
-
-function warnUnknownFields(
-	value: Record<string, unknown>,
-	knownFields: ReadonlySet<string>,
-	fieldPath: string,
-	warnings: string[],
-): void {
-	for (const key of Object.keys(value)) {
-		if (!knownFields.has(key)) {
-			warnings.push(`Ignoring ${fieldPath ? `${fieldPath}.` : ""}${key}: unknown field.`);
+		if (!isRecord(error) || error.code !== "ENOENT") {
+			format = "invalid";
+			issues.push(documentError("unreadable-config"));
 		}
 	}
+	for (const issue of issues) warnings.push(`Ignoring ${configPath}: ${issue.code}.`);
+	const legacy = normalizeLegacyConfig(format === "legacy" && isRecord(raw) ? raw : undefined, configPath, warnings);
+	return {
+		...legacy,
+		...(format === "v2" ? { source: configPath } : {}),
+		document: freeze({ format, configPath, raw, issues }),
+	};
 }
 
-function toBoolean(value: unknown, fieldPath: string, warnings: string[]): boolean | undefined {
-	if (value === undefined) return undefined;
-	if (typeof value === "boolean") return value;
-	warnings.push(`Ignoring ${fieldPath}: expected a boolean.`);
-	return undefined;
+function configuredPath(value: string, configPath: string): string {
+	if (value.startsWith("~/")) return path.join(os.homedir(), value.slice(2));
+	return path.resolve(path.dirname(configPath), value);
 }
 
-function toLeaveManagedMode(
-	value: unknown,
-	fieldPath: string,
-	warnings: string[],
-): LeaveManagedModePolicy | undefined {
-	if (value === undefined) return undefined;
-	if (typeof value === "string") {
-		const normalized = value.trim();
-		if (normalized === "warn" || normalized === "compact") return normalized;
+function leafPaths(value: unknown, prefix = ""): string[] {
+	if (!isRecord(value)) return [prefix];
+	return Object.entries(value).flatMap(([key, child]) => leafPaths(child, prefix ? `${prefix}.${key}` : key));
+}
+
+const LEGACY_PATHS: Record<string, string> = {
+	"context.mode": "compaction.contextManagement",
+	"context.remoteCompaction.model": "compaction.remoteCompactModel",
+	"context.remoteCompaction.inputSource": "compaction.remoteV2ContextSource",
+	"context.remoteCompaction.allowContinuityBreak": "compaction.allowCompactionContinuityBreak",
+	"context.remoteCompaction.apis": "compaction.responsesApis",
+	"context.nativeFallback.enabled": "compaction.nativeFallback.enabled",
+	"context.nativeFallback.model": "compaction.nativeFallback.model",
+	"context.nativeFallback.thinkingLevel": "compaction.nativeFallback.thinkingLevel",
+	"context.remoteWindows.leaveManagedMode": "compaction.leaveManagedMode",
+	"context.remoteWindows.reminderThresholdPercent": "compaction.contextReminderThresholdPercent",
+	"webSearch.route": "webSearch.models",
+	"imageGeneration.enabled": "imageGeneration.enabled",
+	"imageGeneration.defaultModel": "imageGeneration.models",
+	"imageGeneration.allowedModels": "imageGeneration.models",
+	"autoMode.available": "autoMode.models",
+	"compatibility.transport": "compaction.gatewayContextModels",
+	"diagnostics.level": "compaction.debug",
+	"diagnostics.notifyOnLoad": "compaction.notifyOnLoad",
+	"diagnostics.captureRequests": "compaction.logProviderPayloads",
+	"diagnostics.captureResponses": "compaction.logCompactResponses",
+	"diagnostics.redactSensitiveData": "compaction.redactSensitiveData",
+	"diagnostics.artifactRoot": "compaction.artifactRoot",
+};
+function containsPath(value: unknown, fieldPath: string): boolean {
+	for (const key of fieldPath.split(".")) {
+		if (!isRecord(value) || !has(value, key)) return false;
+		value = value[key];
 	}
-	warnings.push(`Ignoring ${fieldPath}: expected one of warn, compact.`);
-	return undefined;
+	return true;
 }
 
-function toContextManagementMode(
-	value: unknown,
-	fieldPath: string,
-	warnings: string[],
-): ContextManagementMode | undefined {
-	if (value === undefined) return undefined;
-	if (typeof value === "string") {
-		const normalized = value.trim();
-		if (normalized === "off" || normalized === "remote") return normalized;
-	}
-	warnings.push(`Ignoring ${fieldPath}: expected one of off, remote.`);
-	return undefined;
+function legacyRouteKey(raw: unknown, modelKey: string | undefined): string | undefined {
+	if (!modelKey || !isRecord(raw) || !isRecord(raw.webSearch) || !isRecord(raw.webSearch.routes)) return undefined;
+	return Object.keys(raw.webSearch.routes).find((key) => key.trim() === modelKey);
 }
 
-function toRemoteV2ContextSource(
-	value: unknown,
-	fieldPath: string,
-	warnings: string[],
-): RemoteV2ContextSource | undefined {
-	if (value === undefined) return undefined;
-	if (typeof value === "string") {
-		const normalized = value.trim();
-		if (normalized === "pi-context-hook" || normalized === "legacy") return normalized;
-	}
-	warnings.push(`Ignoring ${fieldPath}: expected one of pi-context-hook, legacy.`);
-	return undefined;
-}
-
-function toModelSpec(value: unknown, fieldPath: string, warnings: string[]): string | null | undefined {
-	if (value === undefined) return undefined;
-	if (value === null) return null;
-	if (typeof value === "string" && value.trim().length > 0) {
-		return value.trim();
-	}
-	warnings.push(`Ignoring ${fieldPath}: expected "provider/model-id" or null.`);
-	return undefined;
-}
-
-function toThinkingLevel(value: unknown, fieldPath: string, warnings: string[]): ThinkingLevel | undefined {
-	if (value === undefined) return undefined;
-	if (typeof value === "string" && (THINKING_LEVELS as readonly string[]).includes(value)) {
-		return value as ThinkingLevel;
-	}
-	warnings.push(`Ignoring ${fieldPath}: expected one of ${THINKING_LEVELS.join(", ")}.`);
-	return undefined;
-}
-
-function toBoundedInteger(
-	value: unknown,
-	fieldPath: string,
-	warnings: string[],
-	min: number,
-	max: number,
-): number | undefined {
-	if (value === undefined) return undefined;
-	if (typeof value === "number" && Number.isInteger(value) && Number.isFinite(value) && value >= min && value <= max) {
-		return value;
-	}
-	warnings.push(`Ignoring ${fieldPath}: expected an integer between ${min} and ${max}.`);
-	return undefined;
-}
-
-function toSupportedApis(
-	value: unknown,
-	fieldPath: string,
-	capableApis: readonly string[],
-	warnings: string[],
-): string[] | undefined {
-	if (value === undefined) return undefined;
-	if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-		warnings.push(`Ignoring ${fieldPath}: expected a string array.`);
-		return undefined;
-	}
-
-	const capable = new Set(capableApis);
-	const accepted: string[] = [];
-	for (const item of new Set(value.map((entry) => entry.trim()).filter(Boolean))) {
-		if (capable.has(item)) {
-			accepted.push(item);
-		} else {
-			warnings.push(
-				`Ignoring ${fieldPath} entry "${item}": only ${capableApis.join(", ")} are supported.`,
-			);
+function legacyIssues(loaded: LoadedToolkitConfig, modelKey: string | undefined): ConfigIssue[] {
+	const raw = loaded.document?.raw;
+	const rawWeb = isRecord(raw) && isRecord(raw.webSearch) ? raw.webSearch : undefined;
+	// Route keys may contain dots or colons. Never recover identity by splitting a warning.
+	const routeIssues: ConfigIssue[] = [];
+	if (isRecord(rawWeb?.routes)) {
+		for (const [key, value] of Object.entries(rawWeb.routes)) {
+			const normalized = key.trim();
+			const separator = normalized.indexOf("/");
+			const exact = separator > 0 && separator < normalized.length - 1 && !/[\s*?\[\]{}]/.test(normalized);
+			if (exact && typeof value === "string" && ["local", "hosted", "standalone-alpha"].includes(value)) continue;
+			routeIssues.push({ severity: "error", code: "invalid-legacy-value", feature: "webSearch",
+				path: exact ? `webSearch.routes[${JSON.stringify(normalized).slice(0, 180)}]` : "webSearch.routes.[invalid-model-key]",
+				modelKey: normalized });
 		}
 	}
-
-	return accepted;
+	const issues = loaded.warnings.filter((warning) => !warning.startsWith("Ignoring webSearch.routes.")).map((warning): ConfigIssue => {
+		const match = /^Ignoring ([^:]+):/.exec(warning);
+		const field = warning.startsWith("Ignoring compaction.responsesApis entry ") ? "compaction.responsesApis" : match?.[1] ?? "$";
+		const root = field.split(".")[0];
+		const diagnostic = Object.entries(LEGACY_PATHS).some(([leaf, input]) => leaf.startsWith("diagnostics.") && input === field);
+		const feature: ConfigFeature | "document" = diagnostic ? "diagnostics"
+			: field === "compaction.gatewayContextModels" ? "compatibility" : root === "compaction" ? "context"
+			: root === "webSearch" || root === "imageGeneration" || root === "autoMode" ? root : "document";
+		const supersededDefault = field === "webSearch.defaultRoute" && legacyRouteKey(raw, modelKey) !== undefined;
+		const warningOnly = warning.endsWith("unknown field.") || !match
+			|| warning.includes("expected at least one model id") || supersededDefault;
+		return {
+			severity: warningOnly ? "warning" : "error",
+			code: warning.endsWith("unknown field.") ? "unknown-legacy-field" : warningOnly ? "legacy-normalization" : "invalid-legacy-value",
+			path: warning.endsWith("unknown field.") ? `${feature}.[unknown-field]` : field.slice(0, 220),
+			feature,
+		};
+	});
+	return [...issues, ...routeIssues];
 }
 
-function toStringList(value: unknown, fieldPath: string, warnings: string[]): string[] | undefined {
-	if (value === undefined) return undefined;
-	if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-		warnings.push(`Ignoring ${fieldPath}: expected a string array.`);
-		return undefined;
+function selectedInvalidFeatures(issues: ConfigIssue[], modelKey?: string): ConfigFeature[] {
+	const invalid = new Set<ConfigFeature>();
+	for (const issue of issues) {
+		if (issue.severity !== "error" || (issue.modelKey !== undefined && issue.modelKey !== modelKey)) continue;
+		if (issue.feature === "document") for (const feature of CONFIG_FEATURES) invalid.add(feature);
+		else invalid.add(issue.feature);
 	}
-
-	return [...new Set(value.map((entry) => entry.trim()).filter(Boolean))];
+	return [...invalid];
 }
 
-function toImageGenerationModels(value: unknown, fieldPath: string, warnings: string[]): string[] | undefined {
-	const models = toStringList(value, fieldPath, warnings);
-	if (models === undefined) return undefined;
-	if (models.some((model) => model.length > MAX_IMAGE_MODEL_ID_CHARS)) {
-		warnings.push(
-			`Ignoring ${fieldPath}: each model id must be at most ${MAX_IMAGE_MODEL_ID_CHARS} characters.`,
-		);
-		return undefined;
-	}
-	return models;
-}
-
-function toWebSearchRoute(
-	value: unknown,
-	fieldPath: string,
-	warnings: string[],
-): WebSearchRoute | undefined {
-	if (value === undefined) return undefined;
-	if (value === "local" || value === "hosted" || value === "standalone-alpha") {
-		return value;
-	}
-	warnings.push(`Ignoring ${fieldPath}: expected one of local, hosted, standalone-alpha.`);
-	return undefined;
-}
-
-function isExactWebSearchModelKey(value: string): boolean {
-	const trimmed = value.trim();
-	const separatorIndex = trimmed.indexOf("/");
-	if (separatorIndex <= 0 || separatorIndex >= trimmed.length - 1) return false;
-	if (/[\s*?\[\]{}]/.test(trimmed)) return false;
-	const provider = trimmed.slice(0, separatorIndex);
-	const modelId = trimmed.slice(separatorIndex + 1);
-	return provider.length > 0 && modelId.length > 0;
-}
-
-function toWebSearchRoutes(
-	value: unknown,
-	fieldPath: string,
-	warnings: string[],
-): Record<string, WebSearchRoute> | undefined {
-	if (value === undefined) return undefined;
-	if (!isRecord(value)) {
-		warnings.push(`Ignoring ${fieldPath}: expected a JSON object.`);
-		return undefined;
-	}
-
-	const routes: Record<string, WebSearchRoute> = {};
-	for (const [rawKey, rawRoute] of Object.entries(value)) {
-		const key = rawKey.trim();
-		if (!isExactWebSearchModelKey(key)) {
-			warnings.push(`Ignoring ${fieldPath}.${rawKey}: expected an exact "provider/model-id" key.`);
-			continue;
+function fromLegacy(loaded: LoadedToolkitConfig, model: WebSearchModel | undefined): ResolvedToolkitPolicy {
+	const config = loaded.config;
+	const compaction = config.compaction;
+	const modelKey = getExactModelKey(model);
+	const route = resolveWebSearchRoute({ model, config: config.webSearch });
+	const policy = createPolicyDefaults();
+	policy.context = {
+		mode: !compaction.enabled ? "pi" : compaction.contextManagement === "remote" ? "remote-windows" : "remote-compaction",
+		remoteCompaction: {
+			model: compaction.remoteCompactModel ?? null,
+			inputSource: compaction.remoteV2ContextSource,
+			allowContinuityBreak: compaction.allowCompactionContinuityBreak,
+			apis: [...compaction.responsesApis],
+		},
+		nativeFallback: { ...compaction.nativeFallback, model: compaction.nativeFallback.model ?? null },
+		remoteWindows: { leaveManagedMode: compaction.leaveManagedMode, reminderThresholdPercent: compaction.contextReminderThresholdPercent },
+	};
+	policy.webSearch.route = route.route === "none" ? "unmanaged" : route.route;
+	policy.imageGeneration = {
+		enabled: config.imageGeneration.enabled,
+		defaultModel: config.imageGeneration.models[0],
+		allowedModels: [...config.imageGeneration.models],
+	};
+	const { enabled, models, reviewerModel, classifier, ...auto } = config.autoMode;
+	policy.autoMode = {
+		...structuredClone(auto),
+		available: enabled && modelKey !== undefined && models.includes(modelKey),
+		reviewerModel: reviewerModel ?? null,
+		classifier: { ...classifier, model: classifier.model ?? null },
+	};
+	policy.compatibility.transport = modelKey && compaction.gatewayContextModels.includes(modelKey) ? "codex-gateway" : "standard";
+	policy.diagnostics = {
+		level: compaction.debug ? "debug" : "info",
+		notifyOnLoad: compaction.notifyOnLoad,
+		captureRequests: compaction.logProviderPayloads,
+		captureResponses: compaction.logCompactResponses,
+		redactSensitiveData: compaction.redactSensitiveData,
+		artifactRoot: compaction.artifactRoot,
+	};
+	const origins: Record<string, ConfigOrigin> = Object.create(null);
+	const raw = loaded.document?.raw;
+	for (const leaf of leafPaths(policy)) {
+		let input = LEGACY_PATHS[leaf] ?? leaf;
+		if (leaf === "context.mode" && !compaction.enabled) input = "compaction.enabled";
+		if (leaf === "autoMode.available" && !enabled) input = "autoMode.enabled";
+		if (leaf === "webSearch.route") {
+			if (!config.webSearch.enabled) input = "webSearch.enabled";
+			else if (route.source === "exact") {
+				const rawKey = legacyRouteKey(raw, modelKey);
+				if (rawKey !== undefined) {
+					origins[leaf] = { kind: "legacy", path: `webSearch.routes[${JSON.stringify(rawKey)}]`, source: loaded.source };
+					continue;
+				}
+			}
+			else if (route.source === "default") input = "webSearch.defaultRoute";
 		}
-		const route = toWebSearchRoute(rawRoute, `${fieldPath}.${rawKey}`, warnings);
-		if (route !== undefined) routes[key] = route;
+		const ignored = loaded.warnings.some((warning) => warning.startsWith(`Ignoring ${input}:`));
+		origins[leaf] = !ignored && ((raw && containsPath(raw, input)) || (!loaded.document && loaded.source))
+			? { kind: "legacy", path: input, source: loaded.source } : { kind: "builtin" };
 	}
-	return routes;
+	const issues = [...(loaded.document?.issues ?? []), ...legacyIssues(loaded, modelKey)];
+	return { policy, origins, issues, invalidFeatures: selectedInvalidFeatures(issues, modelKey) };
 }
 
-function toAutoModeGate(value: unknown, fieldPath: string, warnings: string[]): AutoModeGate | undefined {
-	if (value === undefined) return undefined;
-	if (value === "side-effect" || value === "all") return value;
-	warnings.push(`Ignoring ${fieldPath}: expected one of side-effect, all.`);
-	return undefined;
-}
-
-function toReviewerTimeoutMs(value: unknown, fieldPath: string, warnings: string[]): number | undefined {
-	if (value === undefined) return undefined;
-	if (
-		typeof value === "number" &&
-		Number.isInteger(value) &&
-		value >= REVIEWER_TIMEOUT_MIN_MS &&
-		value <= REVIEWER_TIMEOUT_MAX_MS
-	) {
-		return value;
-	}
-	warnings.push(
-		`Ignoring ${fieldPath}: expected an integer between ${REVIEWER_TIMEOUT_MIN_MS} and ${REVIEWER_TIMEOUT_MAX_MS} ms.`,
-	);
-	return undefined;
-}
-
-function cloneDefaults(): ToolkitConfig {
+/** Internal engine adapter. All interpretation of document names stays in this module. */
+function engineConfig(policy: EffectiveToolkitPolicy, modelKey: string | undefined, gatewayKeys: string[]): ToolkitConfig {
+	const { context, diagnostics, imageGeneration, autoMode } = policy;
+	const { available, reviewerModel, classifier, ...auto } = autoMode;
 	return {
 		compaction: {
-			...DEFAULT_COMPACTION_CONFIG,
-			nativeFallback: { ...DEFAULT_NATIVE_FALLBACK_CONFIG },
-			responsesApis: [...DEFAULT_COMPACTION_CONFIG.responsesApis],
+			enabled: context.mode !== "pi",
+			contextManagement: context.mode === "remote-windows" ? "remote" : "off",
+			remoteCompactModel: context.remoteCompaction.model ?? undefined,
+			remoteV2ContextSource: context.remoteCompaction.inputSource,
+			allowCompactionContinuityBreak: context.remoteCompaction.allowContinuityBreak,
+			responsesApis: [...context.remoteCompaction.apis],
+			gatewayContextModels: [...gatewayKeys],
+			nativeFallback: { ...context.nativeFallback, model: context.nativeFallback.model ?? undefined },
+			leaveManagedMode: context.remoteWindows.leaveManagedMode,
+			contextReminderThresholdPercent: context.remoteWindows.reminderThresholdPercent,
+			debug: diagnostics.level === "debug",
+			notifyOnLoad: diagnostics.notifyOnLoad,
+			logProviderPayloads: diagnostics.captureRequests,
+			logCompactResponses: diagnostics.captureResponses,
+			redactSensitiveData: diagnostics.redactSensitiveData,
+			artifactRoot: diagnostics.artifactRoot,
 		},
-		webSearch: {
-			...DEFAULT_WEB_SEARCH_CONFIG,
-			models: [...DEFAULT_WEB_SEARCH_CONFIG.models],
-			...(DEFAULT_WEB_SEARCH_CONFIG.defaultRoute
-				? { defaultRoute: DEFAULT_WEB_SEARCH_CONFIG.defaultRoute }
-				: {}),
-			...(DEFAULT_WEB_SEARCH_CONFIG.routes
-				? { routes: { ...DEFAULT_WEB_SEARCH_CONFIG.routes } }
-				: {}),
-		},
-		imageGeneration: {
-			...DEFAULT_IMAGE_GENERATION_CONFIG,
-			models: [...DEFAULT_IMAGE_GENERATION_CONFIG.models],
-		},
+		webSearch: policy.webSearch.route === "unmanaged" ? { enabled: false, models: [] }
+			: { enabled: true, models: [], defaultRoute: policy.webSearch.route },
+		imageGeneration: { enabled: imageGeneration.enabled, models: [...imageGeneration.allowedModels] },
 		autoMode: {
-			...DEFAULT_AUTO_MODE_CONFIG,
-			models: [...DEFAULT_AUTO_MODE_CONFIG.models],
-			extraTools: [...DEFAULT_AUTO_MODE_CONFIG.extraTools],
-			classifier: { ...DEFAULT_AUTO_MODE_CONFIG.classifier },
-			circuitBreaker: { ...DEFAULT_AUTO_MODE_CONFIG.circuitBreaker },
+			...structuredClone(auto), enabled: available, models: available && modelKey ? [modelKey] : [],
+			reviewerModel: reviewerModel ?? undefined, classifier: { ...classifier, model: classifier.model ?? undefined },
 		},
 	};
 }
 
-function applyNativeFallbackConfig(
-	raw: Record<string, unknown>,
-	resolved: NativeFallbackConfig,
-	warnings: string[],
-): void {
-	warnUnknownFields(raw, NATIVE_FALLBACK_FIELDS, "compaction.nativeFallback", warnings);
-	resolved.enabled =
-		toBoolean(raw.enabled, "compaction.nativeFallback.enabled", warnings) ?? resolved.enabled;
-
-	const modelSpec = toModelSpec(raw.model, "compaction.nativeFallback.model", warnings);
-	if (modelSpec !== undefined) {
-		resolved.model = modelSpec === null ? undefined : modelSpec;
+/** Resolve one immutable snapshot for one model. Never reads disk or a model registry. */
+export function resolveToolkitConfig(loaded: LoadedToolkitConfig, model?: ExactModelScopeModel & { api?: string }): ResolvedToolkitConfig {
+	// Injected readers are also decoded at the module seam; they may omit optional feature sections.
+	if (!loaded.document) {
+		const configPath = loaded.source ?? CONFIG_PATH;
+		const normalized = normalizeLegacyConfig(loaded.config, configPath);
+		loaded = { ...normalized, source: loaded.source, warnings: [...loaded.warnings, ...normalized.warnings],
+			document: { format: "legacy", configPath, raw: loaded.config, issues: [] } };
 	}
-
-	resolved.thinkingLevel =
-		toThinkingLevel(raw.thinkingLevel, "compaction.nativeFallback.thinkingLevel", warnings) ??
-		resolved.thinkingLevel;
+	const modelKey = getExactModelKey(model);
+	const format = loaded.document?.format ?? "legacy";
+	const v2 = format === "v2" ? resolveV2Config(loaded.document?.raw, modelKey) : undefined;
+	const resolution = v2 ?? fromLegacy(loaded, model);
+	const source = loaded.source;
+	if (format === "v2") {
+		resolution.policy.diagnostics.artifactRoot = configuredPath(resolution.policy.diagnostics.artifactRoot, loaded.document?.configPath ?? CONFIG_PATH);
+		for (const origin of Object.values(resolution.origins)) if (origin.kind !== "builtin") origin.source = source;
+	}
+	const gatewayModelKeys = v2 ? v2.gatewayModelKeys : [...loaded.config.compaction.gatewayContextModels];
+	const config = format === "v2" ? engineConfig(resolution.policy, modelKey, gatewayModelKeys) : structuredClone(loaded.config);
+	return freeze({ ...resolution, config, format, source, modelKey, gatewayModelKeys, snapshot: structuredClone(loaded) });
 }
 
-function applyCompactionConfig(
-	raw: Record<string, unknown>,
-	resolved: CompactionConfig,
-	warnings: string[],
-): void {
-	warnUnknownFields(raw, COMPACTION_FIELDS, "compaction", warnings);
-
-	resolved.enabled = toBoolean(raw.enabled, "compaction.enabled", warnings) ?? resolved.enabled;
-	resolved.contextManagement =
-		toContextManagementMode(raw.contextManagement, "compaction.contextManagement", warnings) ??
-		resolved.contextManagement;
-	resolved.leaveManagedMode =
-		toLeaveManagedMode(raw.leaveManagedMode, "compaction.leaveManagedMode", warnings) ??
-		resolved.leaveManagedMode;
-	resolved.allowCompactionContinuityBreak =
-		toBoolean(
-			raw.allowCompactionContinuityBreak,
-			"compaction.allowCompactionContinuityBreak",
-			warnings,
-		) ?? resolved.allowCompactionContinuityBreak;
-	resolved.notifyOnLoad =
-		toBoolean(raw.notifyOnLoad, "compaction.notifyOnLoad", warnings) ?? resolved.notifyOnLoad;
-	const reminderPercent = toBoundedInteger(
-		raw.contextReminderThresholdPercent,
-		"compaction.contextReminderThresholdPercent",
-		warnings,
-		0,
-		100,
-	);
-	if (reminderPercent !== undefined) {
-		resolved.contextReminderThresholdPercent = reminderPercent;
-	}
-	resolved.debug = toBoolean(raw.debug, "compaction.debug", warnings) ?? resolved.debug;
-	resolved.logProviderPayloads =
-		toBoolean(raw.logProviderPayloads, "compaction.logProviderPayloads", warnings) ??
-		resolved.logProviderPayloads;
-	resolved.logCompactResponses =
-		toBoolean(raw.logCompactResponses, "compaction.logCompactResponses", warnings) ??
-		resolved.logCompactResponses;
-	resolved.redactSensitiveData =
-		toBoolean(raw.redactSensitiveData, "compaction.redactSensitiveData", warnings) ??
-		resolved.redactSensitiveData;
-
-	const remoteCompactModelSpec = toModelSpec(
-		raw.remoteCompactModel,
-		"compaction.remoteCompactModel",
-		warnings,
-	);
-	if (remoteCompactModelSpec !== undefined) {
-		resolved.remoteCompactModel = remoteCompactModelSpec === null ? undefined : remoteCompactModelSpec;
-	}
-
-	resolved.remoteV2ContextSource =
-		toRemoteV2ContextSource(raw.remoteV2ContextSource, "compaction.remoteV2ContextSource", warnings) ??
-		resolved.remoteV2ContextSource;
-
-	if (raw.nativeFallback !== undefined) {
-		if (isRecord(raw.nativeFallback)) {
-			applyNativeFallbackConfig(raw.nativeFallback, resolved.nativeFallback, warnings);
-		} else {
-			warnings.push("Ignoring compaction.nativeFallback: expected a JSON object.");
-		}
-	}
-
-	const apis = toSupportedApis(
-		raw.responsesApis,
-		"compaction.responsesApis",
-		RESPONSES_COMPACT_CAPABLE_APIS,
-		warnings,
-	);
-	if (apis !== undefined) {
-		resolved.responsesApis = apis;
-	}
-
-	const gatewayContextModels = toStringList(
-		raw.gatewayContextModels,
-		"compaction.gatewayContextModels",
-		warnings,
-	);
-	if (gatewayContextModels !== undefined) {
-		resolved.gatewayContextModels = gatewayContextModels;
-	}
-
-	if (typeof raw.artifactRoot === "string" && raw.artifactRoot.trim().length > 0) {
-		resolved.artifactRoot = raw.artifactRoot.trim();
-	} else if (raw.artifactRoot !== undefined) {
-		warnings.push("Ignoring compaction.artifactRoot: expected a non-empty string.");
+export class ToolkitConfigurationError extends Error {
+	constructor(readonly features: readonly ConfigFeature[]) {
+		super(`Toolkit configuration is invalid for ${features.join(", ")}; use /toolkit-config validate. No fallback policy was selected.`);
+		this.name = "ToolkitConfigurationError";
 	}
 }
 
-function applyWebSearchConfig(
-	raw: Record<string, unknown>,
-	resolved: WebSearchConfig,
-	warnings: string[],
-): void {
-	warnUnknownFields(raw, WEB_SEARCH_FIELDS, "webSearch", warnings);
-	resolved.enabled = toBoolean(raw.enabled, "webSearch.enabled", warnings) ?? resolved.enabled;
-
-	const models = toStringList(raw.models, "webSearch.models", warnings);
-	if (models !== undefined) {
-		resolved.models = models;
-	}
-
-	const defaultRoute = toWebSearchRoute(raw.defaultRoute, "webSearch.defaultRoute", warnings);
-	if (defaultRoute !== undefined) {
-		resolved.defaultRoute = defaultRoute;
-	}
-
-	const routes = toWebSearchRoutes(raw.routes, "webSearch.routes", warnings);
-	if (routes !== undefined) {
-		resolved.routes = routes;
-	}
-
-	if (defaultRoute !== undefined && resolved.models.length > 0) {
-		warnings.push(
-			"webSearch.defaultRoute overrides legacy webSearch.models for models without an exact webSearch.routes entry.",
-		);
-	}
-	if (routes !== undefined) {
-		for (const key of Object.keys(routes)) {
-			if (resolved.models.includes(key)) {
-				warnings.push(
-					`webSearch.routes.${key} overrides the legacy webSearch.models entry for the same exact model.`,
-				);
-			}
-		}
-	}
+export function assertConfigValid(resolved: ResolvedToolkitConfig, ...features: ConfigFeature[]): void {
+	const invalid = features.filter((feature) => resolved.invalidFeatures.includes(feature));
+	if (invalid.length > 0) throw new ToolkitConfigurationError(invalid);
 }
-
-function applyImageGenerationConfig(
-	raw: Record<string, unknown>,
-	resolved: ImageGenerationConfig,
-	warnings: string[],
-): void {
-	warnUnknownFields(raw, IMAGE_GENERATION_FIELDS, "imageGeneration", warnings);
-	resolved.enabled =
-		toBoolean(raw.enabled, "imageGeneration.enabled", warnings) ?? resolved.enabled;
-
-	const models = toImageGenerationModels(raw.models, "imageGeneration.models", warnings);
-	if (models !== undefined) {
-		// An empty or blank-only list cannot express a default, so keep the shipped model.
-		if (models.length === 0) {
-			warnings.push(
-				`Ignoring imageGeneration.models: expected at least one model id; using ${DEFAULT_IMAGE_GENERATION_MODEL}.`,
-			);
-		} else {
-			resolved.models = models;
-		}
-	}
-}
-
-function applyAutoModeConfig(
-	raw: Record<string, unknown>,
-	resolved: AutoModeConfig,
-	warnings: string[],
-): void {
-	warnUnknownFields(raw, AUTO_MODE_FIELDS, "autoMode", warnings);
-	resolved.enabled = toBoolean(raw.enabled, "autoMode.enabled", warnings) ?? resolved.enabled;
-
-	const models = toStringList(raw.models, "autoMode.models", warnings);
-	if (models !== undefined) {
-		resolved.models = models;
-	}
-
-	const reviewerModel = toModelSpec(raw.reviewerModel, "autoMode.reviewerModel", warnings);
-	if (reviewerModel !== undefined) {
-		resolved.reviewerModel = reviewerModel === null ? undefined : reviewerModel;
-	}
-
-	resolved.gate = toAutoModeGate(raw.gate, "autoMode.gate", warnings) ?? resolved.gate;
-
-	const extraTools = toStringList(raw.extraTools, "autoMode.extraTools", warnings);
-	if (extraTools !== undefined) {
-		resolved.extraTools = extraTools;
-	}
-
-	const timeoutMs = toReviewerTimeoutMs(raw.timeoutMs, "autoMode.timeoutMs", warnings);
-	if (timeoutMs !== undefined) {
-		resolved.timeoutMs = timeoutMs;
-	}
-
-	resolved.transcript = toBoolean(raw.transcript, "autoMode.transcript", warnings) ?? resolved.transcript;
-	resolved.evidenceTools =
-		toBoolean(raw.evidenceTools, "autoMode.evidenceTools", warnings) ?? resolved.evidenceTools;
-
-	const maxEvidenceRounds = toBoundedInteger(
-		raw.maxEvidenceRounds,
-		"autoMode.maxEvidenceRounds",
-		warnings,
-		EVIDENCE_ROUNDS_MIN,
-		EVIDENCE_ROUNDS_MAX,
-	);
-	if (maxEvidenceRounds !== undefined) {
-		resolved.maxEvidenceRounds = maxEvidenceRounds;
-	}
-
-	if (raw.classifier !== undefined) {
-		if (isRecord(raw.classifier)) {
-			applyAutoModeClassifierConfig(raw.classifier, resolved.classifier, warnings);
-		} else {
-			warnings.push("Ignoring autoMode.classifier: expected a JSON object.");
-		}
-	}
-
-	if (raw.circuitBreaker !== undefined) {
-		if (isRecord(raw.circuitBreaker)) {
-			applyAutoModeBreakerConfig(raw.circuitBreaker, resolved.circuitBreaker, warnings);
-		} else {
-			warnings.push("Ignoring autoMode.circuitBreaker: expected a JSON object.");
-		}
-	}
-}
-
-function applyAutoModeClassifierConfig(
-	raw: Record<string, unknown>,
-	resolved: AutoModeClassifierConfig,
-	warnings: string[],
-): void {
-	warnUnknownFields(raw, AUTO_MODE_CLASSIFIER_FIELDS, "autoMode.classifier", warnings);
-	resolved.enabled =
-		toBoolean(raw.enabled, "autoMode.classifier.enabled", warnings) ?? resolved.enabled;
-
-	const model = toModelSpec(raw.model, "autoMode.classifier.model", warnings);
-	if (model !== undefined) {
-		resolved.model = model === null ? undefined : model;
-	}
-
-	const timeoutMs =
-		toBoundedInteger(
-			raw.timeoutMs,
-			"autoMode.classifier.timeoutMs",
-			warnings,
-			REVIEWER_TIMEOUT_MIN_MS,
-			REVIEWER_TIMEOUT_MAX_MS,
-		) ?? DEFAULT_CLASSIFIER_TIMEOUT_MS;
-	if (raw.timeoutMs !== undefined) {
-		resolved.timeoutMs = timeoutMs;
-	}
-
-	const maxLag = toBoundedInteger(
-		raw.maxLag,
-		"autoMode.classifier.maxLag",
-		warnings,
-		CLASSIFIER_MAX_LAG_MIN,
-		CLASSIFIER_MAX_LAG_MAX,
-	);
-	if (maxLag !== undefined) {
-		resolved.maxLag = maxLag;
-	}
-}
-
-function applyAutoModeBreakerConfig(
-	raw: Record<string, unknown>,
-	resolved: AutoModeCircuitBreakerConfig,
-	warnings: string[],
-): void {
-	warnUnknownFields(raw, AUTO_MODE_BREAKER_FIELDS, "autoMode.circuitBreaker", warnings);
-
-	const consecutiveDenials = toBoundedInteger(
-		raw.consecutiveDenials,
-		"autoMode.circuitBreaker.consecutiveDenials",
-		warnings,
-		BREAKER_LIMIT_MIN,
-		BREAKER_LIMIT_MAX,
-	);
-	if (consecutiveDenials !== undefined) {
-		resolved.consecutiveDenials = consecutiveDenials;
-	}
-
-	const recentDenials = toBoundedInteger(
-		raw.recentDenials,
-		"autoMode.circuitBreaker.recentDenials",
-		warnings,
-		BREAKER_LIMIT_MIN,
-		BREAKER_LIMIT_MAX,
-	);
-	if (recentDenials !== undefined) {
-		resolved.recentDenials = recentDenials;
-	}
-
-	const windowSize = toBoundedInteger(
-		raw.windowSize,
-		"autoMode.circuitBreaker.windowSize",
-		warnings,
-		BREAKER_WINDOW_MIN,
-		BREAKER_WINDOW_MAX,
-	);
-	if (windowSize !== undefined) {
-		resolved.windowSize = windowSize;
-	}
-}
-
-/**
- * Load the canonical toolkit config from
- * `~/.pi/agent/extensions/pi-openai-toolkit/config.json`.
- * A missing file silently yields defaults; legacy branded paths are never read.
- */
-export function loadToolkitConfig(configPath: string = CONFIG_PATH): LoadedToolkitConfig {
-	const warnings: string[] = [];
-	const resolved = cloneDefaults();
-	let source: string | undefined;
-
-	const raw = readJsonObject(configPath, warnings);
-	if (raw) {
-		source = configPath;
-		warnUnknownFields(raw, TOP_LEVEL_FIELDS, "", warnings);
-
-		if (raw.compaction !== undefined) {
-			if (isRecord(raw.compaction)) {
-				applyCompactionConfig(raw.compaction, resolved.compaction, warnings);
-			} else {
-				warnings.push("Ignoring compaction: expected a JSON object.");
-			}
-		}
-
-		if (raw.webSearch !== undefined) {
-			if (isRecord(raw.webSearch)) {
-				applyWebSearchConfig(raw.webSearch, resolved.webSearch, warnings);
-			} else {
-				warnings.push("Ignoring webSearch: expected a JSON object.");
-			}
-		}
-
-		if (raw.imageGeneration !== undefined) {
-			if (isRecord(raw.imageGeneration)) {
-				applyImageGenerationConfig(raw.imageGeneration, resolved.imageGeneration, warnings);
-			} else {
-				warnings.push("Ignoring imageGeneration: expected a JSON object.");
-			}
-		}
-
-		if (raw.autoMode !== undefined) {
-			if (isRecord(raw.autoMode)) {
-				applyAutoModeConfig(raw.autoMode, resolved.autoMode, warnings);
-			} else {
-				warnings.push("Ignoring autoMode: expected a JSON object.");
-			}
-		}
-	}
-
-	resolved.compaction.artifactRoot = resolveConfiguredPath(
-		resolved.compaction.artifactRoot,
-		path.dirname(configPath),
-	);
-
-	return {
-		config: resolved,
-		source,
-		warnings,
-	};
-}
-
-export { DEFAULT_TOOLKIT_CONFIG };

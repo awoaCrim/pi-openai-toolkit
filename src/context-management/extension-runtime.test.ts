@@ -1,3 +1,4 @@
+import { v2Fixture } from "../config/test-helpers";
 import { expect, test } from "bun:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_COMPACTION_CONFIG, DEFAULT_TOOLKIT_CONFIG } from "../types";
@@ -605,4 +606,31 @@ test("late activation fails closed when the context window cannot initialize", a
 	await handlers.get("before_agent_start")?.({ prompt: "continue", systemPromptOptions: {} } as never, ctx);
 	expect(active).toEqual(["read"]);
 	expect(notices.filter((notice) => notice.includes("malformed-window-state"))).toHaveLength(1);
+});
+
+
+test("v2 context lifecycle reads one snapshot across awaited activation and sees edits next operation", async () => {
+	const handlers = new Map<string, (event: never, ctx: never) => unknown>();
+	const registered: any[] = [];
+	let active: string[] = ["read"];
+	let reads = 0;
+	let raw: Record<string, unknown> = { defaults: { context: { mode: "remote-windows" } } };
+	const pi = {
+		on: (name: string, handler: never) => handlers.set(name, handler),
+		registerTool: (tool: unknown) => registered.push(tool),
+		getAllTools: () => registered, getActiveTools: () => active,
+		setActiveTools: (tools: string[]) => { active = tools; }, sendMessage: () => true,
+	};
+	extension(pi as never, { loadConfig: () => { reads++; return v2Fixture(raw); } });
+	const ctx = makeContext() as any;
+	ctx.modelRegistry.getApiKeyAndHeaders = async () => {
+		raw = { defaults: { context: { mode: "pi" } } };
+		return { ok: true, apiKey: "token", headers: { "chatgpt-account-id": "account" }, baseUrl: model.baseUrl };
+	};
+	await handlers.get("session_start")!({} as never, ctx);
+	expect(reads).toBe(1);
+	expect(active).toContain("new_context");
+	await handlers.get("model_select")!({ model, previousModel: model, source: "set" } as never, ctx);
+	expect(reads).toBe(2);
+	expect(active).toEqual(["read"]);
 });

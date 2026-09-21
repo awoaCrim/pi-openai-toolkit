@@ -191,7 +191,7 @@ describe("image generation protocol", () => {
 				configuredModels: ["gpt-image-2"],
 			}),
 		).toThrow(
-			'Unknown image generation model "grok-imagine-image-2.0". Configure it in imageGeneration.models first; available models: gpt-image-2.',
+			'Unknown image generation model "grok-imagine-image-2.0". Configure it in imageGeneration.allowedModels (legacy: imageGeneration.models) first; available models: gpt-image-2.',
 		);
 		// Matching is exact: prefixes, casing, and provider prefixes are not aliases.
 		expect(() =>

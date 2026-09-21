@@ -46,11 +46,14 @@ interface StartContextWindowOptions {
 	triggerTurn: boolean;
 	signal?: AbortSignal;
 	trimPreviousWindow: boolean;
+	/** Captured with the tool activation policy, before any awaited backend work. */
+	gatewayModels?: readonly string[];
 }
 
 type ThreadHintLoader = (
 	ctx: ExtensionContext,
 	signal?: AbortSignal,
+	gatewayModels?: readonly string[],
 ) => Promise<string | undefined>;
 
 type WindowBoundaryEntry = Extract<SessionEntry, { type: "custom_message" }> & {
@@ -82,7 +85,7 @@ export class CodexContextWindowManager {
 	private readonly loadThreadHint: ThreadHintLoader;
 
 	constructor(loadThreadHint?: ThreadHintLoader) {
-		this.loadThreadHint = loadThreadHint ?? ((ctx, signal) => loadHistoryNotesThreadHint(ctx, signal));
+		this.loadThreadHint = loadThreadHint ?? ((ctx, signal, gatewayModels) => loadHistoryNotesThreadHint(ctx, signal, gatewayModels));
 	}
 
 	reset(): void {
@@ -312,7 +315,7 @@ export class CodexContextWindowManager {
 			let threadHint: string | undefined;
 			if (current) {
 				try {
-					threadHint = await this.loadThreadHint(ctx, options.signal);
+					threadHint = await this.loadThreadHint(ctx, options.signal, options.gatewayModels);
 				} catch (error) {
 					if (options.signal?.aborted) throw error;
 				}

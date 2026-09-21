@@ -1,0 +1,352 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/awoaCrim/pi-openai-toolkit/blob/main/config.schema.json",
+  "title": "Pi OpenAI Toolkit global configuration v2",
+  "description": "Strict schema for the canonical global Toolkit configuration. Runtime validation additionally enforces normalized exact keys and image default membership.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional schema metadata URI. It does not select a runtime schema."
+    },
+    "schemaVersion": {
+      "const": 2
+    },
+    "defaults": {
+      "$ref": "#/$defs/defaults"
+    },
+    "models": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[^\\s*?\\[\\]{}\\u0000-\\u001f\\u007f]+/[^\\s*?\\[\\]{}\\u0000-\\u001f\\u007f]+$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/modelOverride"
+      }
+    },
+    "diagnostics": {
+      "$ref": "#/$defs/diagnostics"
+    }
+  },
+  "$defs": {
+    "modelRef": {
+      "description": "Exact provider/model reference; model ids may contain additional slashes.",
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\s*?\\[\\]{}\\u0000-\\u001f\\u007f]+/[^\\s*?\\[\\]{}\\u0000-\\u001f\\u007f]+$"
+        }
+      ]
+    },
+    "stringList": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "responsesApis": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "openai-responses",
+          "openai-codex-responses"
+        ]
+      }
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "pi",
+            "remote-compaction",
+            "remote-windows"
+          ]
+        },
+        "remoteCompaction": {
+          "$ref": "#/$defs/remoteCompaction"
+        },
+        "nativeFallback": {
+          "$ref": "#/$defs/nativeFallback"
+        },
+        "remoteWindows": {
+          "$ref": "#/$defs/remoteWindows"
+        }
+      }
+    },
+    "remoteCompaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/modelRef"
+        },
+        "inputSource": {
+          "enum": [
+            "legacy",
+            "pi-context-hook"
+          ]
+        },
+        "allowContinuityBreak": {
+          "type": "boolean"
+        },
+        "apis": {
+          "$ref": "#/$defs/responsesApis"
+        }
+      }
+    },
+    "nativeFallback": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "model": {
+          "$ref": "#/$defs/modelRef"
+        },
+        "thinkingLevel": {
+          "enum": [
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        }
+      }
+    },
+    "remoteWindows": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "leaveManagedMode": {
+          "enum": [
+            "warn",
+            "compact"
+          ]
+        },
+        "reminderThresholdPercent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "webSearch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "route": {
+          "enum": [
+            "unmanaged",
+            "local",
+            "hosted",
+            "standalone-alpha"
+          ]
+        }
+      }
+    },
+    "imageGeneration": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "defaultModel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "\\S"
+        },
+        "allowedModels": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    "autoMode": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "reviewerModel": {
+          "$ref": "#/$defs/modelRef"
+        },
+        "gate": {
+          "enum": [
+            "side-effect",
+            "all"
+          ]
+        },
+        "extraTools": {
+          "$ref": "#/$defs/stringList"
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 120000
+        },
+        "transcript": {
+          "type": "boolean"
+        },
+        "evidenceTools": {
+          "type": "boolean"
+        },
+        "maxEvidenceRounds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
+        },
+        "classifier": {
+          "$ref": "#/$defs/classifier"
+        },
+        "circuitBreaker": {
+          "$ref": "#/$defs/circuitBreaker"
+        }
+      }
+    },
+    "classifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "model": {
+          "$ref": "#/$defs/modelRef"
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 120000
+        },
+        "maxLag": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20
+        }
+      }
+    },
+    "circuitBreaker": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "consecutiveDenials": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "recentDenials": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "windowSize": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "transport": {
+          "enum": [
+            "standard",
+            "codex-gateway"
+          ]
+        }
+      }
+    },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/context"
+        },
+        "webSearch": {
+          "$ref": "#/$defs/webSearch"
+        },
+        "imageGeneration": {
+          "$ref": "#/$defs/imageGeneration"
+        },
+        "autoMode": {
+          "$ref": "#/$defs/autoMode"
+        }
+      }
+    },
+    "modelOverride": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/context"
+        },
+        "webSearch": {
+          "$ref": "#/$defs/webSearch"
+        },
+        "autoMode": {
+          "$ref": "#/$defs/autoMode"
+        },
+        "compatibility": {
+          "$ref": "#/$defs/compatibility"
+        }
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "enum": [
+            "error",
+            "warn",
+            "info",
+            "debug"
+          ]
+        },
+        "notifyOnLoad": {
+          "type": "boolean"
+        },
+        "captureRequests": {
+          "type": "boolean"
+        },
+        "captureResponses": {
+          "type": "boolean"
+        },
+        "redactSensitiveData": {
+          "type": "boolean"
+        },
+        "artifactRoot": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        }
+      }
+    }
+  }
+}

@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { loadToolkitConfig } from "../config";
+import { assertConfigValid, loadToolkitConfig, resolveToolkitConfig, type ResolvedToolkitConfig } from "../config";
+import { notifyConfigIssues } from "../config/notifications";
 import { resolveResponsesEnvironment, type ResponsesEnvironmentResolution } from "../runtime";
 import {
 	requestAlphaSearch,
@@ -233,7 +234,10 @@ export async function executeStandaloneWebRun(args: {
 		throw new Error(`${WEB_RUN_TOOL_NAME} is not registered by the toolkit; standalone Web Search is unavailable.`);
 	}
 
-	const { config } = loadConfig();
+	const resolved = resolveToolkitConfig(loadConfig(), args.ctx.model);
+	notifyConfigIssues(args.ctx, resolved);
+	assertConfigValid(resolved, "webSearch", "compatibility");
+	const { config } = resolved;
 	const route = resolveWebSearchRoute({ model: args.ctx.model, config: config.webSearch });
 	if (route.route !== "standalone-alpha" || !route.available) {
 		throw new Error(describeRouteFailure(route));
@@ -242,7 +246,7 @@ export async function executeStandaloneWebRun(args: {
 	const runtime = await resolveRuntime(args.ctx, {
 		enabled: config.webSearch.enabled,
 		responsesApis: WEB_SEARCH_CAPABLE_APIS,
-		codexGatewayModels: config.compaction.gatewayContextModels,
+		codexGatewayModels: resolved.gatewayModelKeys,
 	});
 	if (!runtime.ok) throw standaloneRuntimeFailure(runtime);
 
@@ -404,39 +408,37 @@ export function registerWebSearchExtension(
 		return verifyStandaloneRegistration(pi, standaloneTool);
 	}
 
-	function synchronize(model: WebSearchModel | undefined, ctx?: ExtensionContext): WebSearchRouteResolution {
-		const { config } = loadConfig();
-		const resolution = syncWebSearchRoute(
-			pi,
-			model,
-			config.webSearch,
-			states,
-			standaloneReady(),
-		);
-		if (ctx && resolution.route === "standalone-alpha" && resolution.available && !standaloneReady()) {
-			// Keep the current route selected for diagnostics, but expose no tool.
-			return resolution;
+	function readConfig(model: WebSearchModel | undefined, ctx?: ExtensionContext): ResolvedToolkitConfig {
+		const resolved = resolveToolkitConfig(loadConfig(), model);
+		if (ctx) notifyConfigIssues(ctx, resolved);
+		return resolved;
+	}
+
+	function synchronizeResolved(model: WebSearchModel | undefined, resolved: ResolvedToolkitConfig): WebSearchRouteResolution {
+		if (resolved.invalidFeatures.some((feature) => feature === "webSearch" || feature === "compatibility")) {
+			claimAndRemove(pi, LOCAL_WEB_SEARCH_TOOL_NAME, states.webSearch);
+			claimAndRemove(pi, WEB_RUN_TOOL_NAME, states.webRun);
+			return { route: "none", source: "none", modelKey: resolved.modelKey, reason: "unconfigured" };
 		}
-		return resolution;
+		return syncWebSearchRoute(pi, model, resolved.config.webSearch, states, standaloneReady());
+	}
+
+	function synchronize(model: WebSearchModel | undefined, ctx?: ExtensionContext): WebSearchRouteResolution {
+		return synchronizeResolved(model, readConfig(model, ctx));
 	}
 
 	pi.on("session_start", (_event, ctx) => {
 		synchronize(ctx.model, ctx);
 	});
 
-	pi.on("model_select", (event) => {
-		synchronize(event.model);
+	pi.on("model_select", (event, ctx) => {
+		synchronize(event.model, ctx);
 	});
 
 	pi.on("before_agent_start", (event, ctx) => {
-		const { config } = loadConfig();
-		const resolution = syncWebSearchRoute(
-			pi,
-			ctx.model,
-			config.webSearch,
-			states,
-			standaloneReady(),
-		);
+		const resolved = readConfig(ctx.model, ctx);
+		const { config } = resolved;
+		const resolution = synchronizeResolved(ctx.model, resolved);
 		const localToolIsActive = resolution.route === "local"
 			? isActiveTool(pi, LOCAL_WEB_SEARCH_TOOL_NAME)
 			: undefined;
@@ -452,14 +454,11 @@ export function registerWebSearchExtension(
 	});
 
 	pi.on("before_provider_request", (event, ctx) => {
-		const { config } = loadConfig();
-		const resolution = syncWebSearchRoute(
-			pi,
-			ctx.model,
-			config.webSearch,
-			states,
-			standaloneReady(),
-		);
+		const resolved = readConfig(ctx.model, ctx);
+		try { assertConfigValid(resolved, "webSearch", "compatibility"); }
+		catch (error) { abortAndThrow(ctx, error instanceof Error ? error.message : "Invalid Web Search configuration."); }
+		const { config } = resolved;
+		const resolution = synchronizeResolved(ctx.model, resolved);
 		if (resolution.route === "standalone-alpha" && resolution.available && !standaloneReady()) {
 			abortAndThrow(ctx, `${WEB_RUN_TOOL_NAME} is not registered by the toolkit; standalone Web Search request aborted.`);
 		}
@@ -478,14 +477,10 @@ export function registerWebSearchExtension(
 		if (event.toolName !== LOCAL_WEB_SEARCH_TOOL_NAME && event.toolName !== WEB_RUN_TOOL_NAME) {
 			return undefined;
 		}
-		const { config } = loadConfig();
-		const resolution = syncWebSearchRoute(
-			pi,
-			ctx.model,
-			config.webSearch,
-			states,
-			standaloneReady(),
-		);
+		const resolved = readConfig(ctx.model, ctx);
+		const resolution = synchronizeResolved(ctx.model, resolved);
+		try { assertConfigValid(resolved, "webSearch", "compatibility"); }
+		catch (error) { return { block: true, reason: error instanceof Error ? error.message : "Invalid Web Search configuration." }; }
 		if (event.toolName === LOCAL_WEB_SEARCH_TOOL_NAME) {
 			if (resolution.route === "none") return undefined;
 			if (resolution.route === "local" && resolution.available) {

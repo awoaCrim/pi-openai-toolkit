@@ -154,8 +154,8 @@ function usableImageModels(models: readonly string[] | undefined): string[] {
 
 /**
  * Resolve the nested `image_generation` model for one call. An omitted request selects the
- * first configured model so configuration order expresses the default; an explicit request must
- * match a configured id exactly, and it fails here — before any paid dispatch.
+ * explicit default when supplied (v2), or the first configured model for legacy callers.
+ * An explicit request must match a configured id exactly before any paid dispatch.
  */
 function formatAvailableImageModels(models: readonly string[]): string {
 	const visible = models.slice(0, MAX_DISPLAYED_IMAGE_MODELS_IN_ERROR);
@@ -166,15 +166,21 @@ function formatAvailableImageModels(models: readonly string[]): string {
 export function selectImageGenerationModel(args: {
 	requestedModel?: string;
 	configuredModels?: readonly string[];
+	defaultModel?: string;
 }): string {
 	const models = usableImageModels(args.configuredModels);
+	if (args.defaultModel !== undefined && (!args.configuredModels?.length ||
+		!args.configuredModels.every((model) => typeof model === "string" && model.trim().length > 0 && model.trim().length <= MAX_IMAGE_MODEL_ID_CHARS) ||
+		!models.includes(args.defaultModel))) {
+		throw new ImageGenerationError("invalid-parameters", "The configured default image model must be in the nonempty allowedModels list.");
+	}
 	const requested = typeof args.requestedModel === "string" ? args.requestedModel.trim() : "";
-	if (!requested) return models[0]!;
+	if (!requested) return args.defaultModel ?? models[0]!;
 	if (models.includes(requested)) return requested;
 	throw new ImageGenerationError(
 		"invalid-parameters",
 		`Unknown image generation model "${requested.slice(0, MAX_IMAGE_MODEL_ID_CHARS)}". ` +
-			`Configure it in imageGeneration.models first; available models: ${formatAvailableImageModels(models)}.`,
+			`Configure it in imageGeneration.allowedModels (legacy: imageGeneration.models) first; available models: ${formatAvailableImageModels(models)}.`,
 	);
 }
 

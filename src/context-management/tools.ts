@@ -95,14 +95,19 @@ export type ContextManagementTools = {
 	notes: ToolDefinition<typeof NOTES_PARAMETERS, CodexHistoryNotesDetails>;
 };
 
+export type ContextOperationPolicy = { active: boolean; gatewayModels: readonly string[] };
+type ContextActivity = (ctx: ExtensionContext) => Promise<boolean | ContextOperationPolicy> | boolean | ContextOperationPolicy;
+
 export function createContextManagementTools(
 	pi: ExtensionAPI,
 	manager: CodexContextWindowManager,
-	isActive: (ctx: ExtensionContext) => Promise<boolean> | boolean,
+	isActive: ContextActivity,
 	getGatewayModels: () => readonly string[] = () => [],
 ): ContextManagementTools {
-	const assertActive = async (ctx: ExtensionContext): Promise<void> => {
-		if (!(await isActive(ctx))) throw new Error("remote-context-inactive");
+	const assertActive = async (ctx: ExtensionContext): Promise<readonly string[]> => {
+		const policy = await isActive(ctx);
+		if (!(typeof policy === "boolean" ? policy : policy.active)) throw new Error("remote-context-inactive");
+		return typeof policy === "boolean" ? getGatewayModels() : policy.gatewayModels;
 	};
 	const newContext: ToolDefinition<typeof NEW_CONTEXT_PARAMETERS, NewContextDetails> = {
 		name: "new_context",
@@ -117,7 +122,7 @@ export function createContextManagementTools(
 		],
 		executionMode: "sequential",
 		async execute(_id, _params, signal, _update, ctx) {
-			await assertActive(ctx);
+			const gatewayModels = await assertActive(ctx);
 			manager.synchronize(ctx);
 			if (manager.hasPendingRollover(ctx)) {
 				return {
@@ -138,6 +143,7 @@ export function createContextManagementTools(
 				triggerTurn: true,
 				signal,
 				trimPreviousWindow: true,
+				gatewayModels,
 			});
 			return {
 				content: [{
@@ -178,8 +184,8 @@ export function createContextManagementTools(
 			"History is read-only; make no edits through it. Edits and durable checkpoints belong to notes.",
 		],
 		execute: async (_id, params, _signal, _update, ctx) => {
-			await assertActive(ctx);
-			return executeHistoryNotesTool("history", params.action, params as Record<string, unknown>, ctx, _signal, getGatewayModels());
+			const gatewayModels = await assertActive(ctx);
+			return executeHistoryNotesTool("history", params.action, params as Record<string, unknown>, ctx, _signal, gatewayModels);
 		},
 	};
 	const notes: ToolDefinition<typeof NOTES_PARAMETERS, CodexHistoryNotesDetails> = {
@@ -198,8 +204,8 @@ export function createContextManagementTools(
 		],
 		executionMode: "sequential",
 		execute: async (_id, params, _signal, _update, ctx) => {
-			await assertActive(ctx);
-			return executeHistoryNotesTool("notes", params.action, params as Record<string, unknown>, ctx, _signal, getGatewayModels());
+			const gatewayModels = await assertActive(ctx);
+			return executeHistoryNotesTool("notes", params.action, params as Record<string, unknown>, ctx, _signal, gatewayModels);
 		},
 	};
 	return { newContext, getContextRemaining, history, notes };
@@ -329,7 +335,7 @@ export class ContextManagementToolController {
 export function registerContextManagementTools(
 	pi: ExtensionAPI,
 	manager: CodexContextWindowManager,
-	isActive: (ctx: ExtensionContext) => Promise<boolean> | boolean,
+	isActive: ContextActivity,
 	getGatewayModels?: () => readonly string[],
 ): ContextManagementToolController {
 	const controller = new ContextManagementToolController(pi);

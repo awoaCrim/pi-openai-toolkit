@@ -1,4 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { ConfigDocumentSnapshot } from "./config/policy";
 import type { CompactionEntry, CompactionResult, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 
 export const TOOLKIT_ID = "pi-openai-toolkit";
@@ -14,9 +15,9 @@ export const REDACTED_VALUE = "[REDACTED]";
  */
 export const RESPONSES_COMPACT_CAPABLE_APIS = ["openai-responses", "openai-codex-responses"] as const;
 /**
- * The Codex model whose gateways are verified to speak the alpha window and
- * Astra compatibility protocols. Remote Context and the Astra layer match on
- * this bare model id; no operator allowlist is consulted.
+ * Bare model ID used by the independent Astra effort compatibility layer.
+ * Remote Context eligibility is API/provider based with an exact gateway opt-in;
+ * this constant does not verify backend support or grant that opt-in.
  */
 export const ASTRA_MODEL_ID = "gpt-6-astra";
 export const LEGACY_NATIVE_COMPACTION_STRATEGY = "openai-native-compact-v1";
@@ -76,6 +77,15 @@ export type NativeFallbackConfig = {
 
 /** How the toolkit reacts when leaving remote context management would re-expand the transcript. */
 export type LeaveManagedModePolicy = "warn" | "compact";
+
+export type DebugConfig = {
+	debug: boolean;
+	notifyOnLoad: boolean;
+	logProviderPayloads: boolean;
+	logCompactResponses: boolean;
+	redactSensitiveData: boolean;
+	artifactRoot: string;
+};
 
 export type CompactionConfig = {
 	enabled: boolean;
@@ -216,7 +226,10 @@ export type ToolkitConfig = {
 };
 
 export type LoadedToolkitConfig = {
+	/** Legacy normalization seam. Feature entrypoints must resolve this snapshot for their model. */
 	config: ToolkitConfig;
+	/** Optional only for existing injected legacy readers; real loads always include it. */
+	document?: ConfigDocumentSnapshot;
 	/** Path of the config file that was applied, if it existed and parsed. */
 	source?: string;
 	warnings: string[];

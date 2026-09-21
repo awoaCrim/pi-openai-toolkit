@@ -1,6 +1,7 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { createReadOnlyTools, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { loadToolkitConfig } from "../config";
+import { loadToolkitConfig, resolveToolkitConfig, type ResolvedToolkitConfig } from "../config";
+import { notifyConfigIssues } from "../config/notifications";
 import {
 	DEFAULT_AUTO_MODE_CONFIG,
 	type AutoModeConfig,
@@ -152,6 +153,12 @@ export function registerAutoModeExtension(
 	let callIndex = 0;
 	let scoringInFlight = false;
 
+	function readConfig(ctx: ExtensionContext, model = ctx.model): ResolvedToolkitConfig {
+		const resolved = resolveToolkitConfig(loadConfig(), model);
+		notifyConfigIssues(ctx, resolved);
+		return resolved;
+	}
+
 	function updateStatus(ctx: ExtensionContext, reviewingTool?: string): void {
 		if (!ctx.hasUI) return;
 		if (ctx.mode === "tui") {
@@ -188,7 +195,7 @@ export function registerAutoModeExtension(
 		if (!isAutoModeEligible(ctx.model, config)) {
 			if (ctx.hasUI) {
 				ctx.ui.notify(
-					"Auto mode needs an allowlisted model in autoMode.models and a configured autoMode.reviewerModel.",
+					"Auto mode needs availability for the current model and a configured reviewerModel.",
 					"warning",
 				);
 			}
@@ -373,10 +380,14 @@ export function registerAutoModeExtension(
 	pi.registerCommand(AUTO_MODE_COMMAND, {
 		description: "Model-reviewed tool approval: /auto [on|off|status|all|side]",
 		handler: async (args, ctx) => {
-			const { config } = loadConfig();
-			const auto = config.autoMode;
-			applyConfiguredGate(runtime, auto);
+			const resolved = readConfig(ctx);
+			const auto = resolved.config.autoMode;
 			const sub = args.trim().toLowerCase();
+			if (resolved.invalidFeatures.includes("autoMode") && sub !== "off") {
+				if (ctx.hasUI) ctx.ui.notify("Auto-mode configuration is invalid; the existing gate remains engaged until /auto off or a valid configuration is supplied.", "error");
+				return;
+			}
+			applyConfiguredGate(runtime, auto);
 
 			switch (sub) {
 				case "on":
@@ -419,7 +430,8 @@ export function registerAutoModeExtension(
 	});
 
 	pi.on("session_start", (event, ctx) => {
-		const { config } = loadConfig();
+		const resolved = readConfig(ctx);
+		const { config } = resolved;
 		toolReviewRenderer.clear();
 		if (
 			!toolReviewRenderer.supported &&
@@ -438,7 +450,8 @@ export function registerAutoModeExtension(
 		resetScoreTracker(tracker);
 		resetRejectionBreaker(breaker);
 		callIndex = 0;
-		const startedFromFlag = pi.getFlag(AUTO_MODE_FLAG) === true && engage(ctx, config.autoMode);
+		const requestedFromFlag = pi.getFlag(AUTO_MODE_FLAG) === true;
+		const startedFromFlag = requestedFromFlag && (resolved.invalidFeatures.includes("autoMode") ? (runtime.engaged = true) : engage(ctx, config.autoMode));
 		if (startedFromFlag && event.reason === "startup" && ctx.mode === "tui") {
 			ctx.ui.notify(`Auto mode on. Reviewing: ${describeGate(runtime)}`, "info");
 		}
@@ -446,8 +459,9 @@ export function registerAutoModeExtension(
 	});
 
 	pi.on("model_select", (event, ctx) => {
-		const { config } = loadConfig();
-		if (runtime.engaged && !isAutoModeEligible(event.model, config.autoMode)) {
+		const resolved = readConfig(ctx, event.model);
+		const { config } = resolved;
+		if (!resolved.invalidFeatures.includes("autoMode") && runtime.engaged && !isAutoModeEligible(event.model, config.autoMode)) {
 			disengage(ctx);
 			if (ctx.hasUI) ctx.ui.notify("Auto mode off: this model is not allowlisted.", "warning");
 		}
@@ -455,7 +469,9 @@ export function registerAutoModeExtension(
 	});
 
 	pi.on("before_agent_start", (_event, ctx) => {
-		const { config } = loadConfig();
+		const resolved = readConfig(ctx);
+		const { config } = resolved;
+		if (resolved.invalidFeatures.includes("autoMode")) { resetScoreTracker(tracker); updateStatus(ctx); return; }
 		applyConfiguredGate(runtime, config.autoMode);
 		if (runtime.engaged && !isAutoModeEligible(ctx.model, config.autoMode)) {
 			disengage(ctx);
@@ -472,8 +488,12 @@ export function registerAutoModeExtension(
 		callIndex += 1;
 		if (!runtime.engaged) return undefined;
 
-		const { config } = loadConfig();
-		const auto = config.autoMode;
+		const resolved = readConfig(ctx);
+		if (resolved.invalidFeatures.includes("autoMode")) {
+			resetScoreTracker(tracker);
+			return { block: true, reason: "Auto-mode configuration is invalid. The gate remains engaged; fix the configuration or explicitly use /auto off." };
+		}
+		const auto = resolved.config.autoMode;
 		applyConfiguredGate(runtime, auto);
 
 		if (!isAutoModeEligible(ctx.model, auto)) {
@@ -622,8 +642,10 @@ export function registerAutoModeExtension(
 
 	pi.on("tool_result", (event, ctx) => {
 		if (!runtime.engaged) return undefined;
-		const { config } = loadConfig();
+		const resolved = readConfig(ctx);
+		const { config } = resolved;
 		const auto = config.autoMode;
+		if (resolved.invalidFeatures.includes("autoMode") || !isAutoModeEligible(ctx.model, auto)) { resetScoreTracker(tracker); return undefined; }
 		if (auto.classifier.enabled && shouldReviewTool(event.toolName, runtime)) {
 			scheduleClassification(ctx, auto, {
 				toolName: event.toolName,

@@ -1,5 +1,6 @@
 import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { loadToolkitConfig } from "../config";
+import { assertConfigValid, loadToolkitConfig, resolveToolkitConfig } from "../config";
+import { notifyConfigIssues } from "../config/notifications";
 import { resolveResponsesEnvironment } from "../runtime";
 import {
 	copyImageToExplicitPath,
@@ -134,7 +135,10 @@ export function createImageGenerationExecutor(
 	return async (args) => {
 		const params = normalizeGenerateImageParams(args.params);
 		throwIfAborted(args.signal);
-		const { config } = deps.loadConfig();
+		const resolved = resolveToolkitConfig(deps.loadConfig(), args.ctx.model);
+		notifyConfigIssues(args.ctx, resolved);
+		assertConfigValid(resolved, "imageGeneration", "compatibility");
+		const { config } = resolved;
 		if (!isImageGenerationEnabledForModel(args.ctx.model, config.imageGeneration)) {
 			throw new ImageGenerationError(
 				"unsupported-model",
@@ -144,12 +148,14 @@ export function createImageGenerationExecutor(
 
 		const imageModel = selectImageGenerationModel({
 			requestedModel: params.model,
-			configuredModels: config.imageGeneration.models,
+			configuredModels: resolved.policy.imageGeneration.allowedModels,
+			defaultModel: resolved.policy.imageGeneration.defaultModel,
 		});
 
 		const runtimeResolution = await deps.resolveRuntime(args.ctx, {
 			enabled: config.imageGeneration.enabled,
 			responsesApis: IMAGE_GENERATION_CAPABLE_APIS,
+			...(resolved.format === "v2" ? { codexGatewayModels: resolved.gatewayModelKeys } : {}),
 		});
 		if (!runtimeResolution.ok) {
 			throw runtimeFailure(runtimeResolution.reason, runtimeResolution.errorMessage);

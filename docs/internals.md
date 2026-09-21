@@ -6,12 +6,23 @@ Developer-facing reference for [pi-openai-toolkit](../README.md). The README kee
 
 ### Table of Contents
 
+- [Configuration resolution](#configuration-resolution)
 - [Remote Context protocol](#remote-context-protocol)
 - [Rollover lifecycle](#rollover-lifecycle)
 - [Remote Compaction v2 wire contract](#remote-compaction-v2-wire-contract)
 - [Auto Mode TUI review renderer](#auto-mode-tui-review-renderer)
 - [Artifacts and debugging](#artifacts-and-debugging)
 - [Provenance](#provenance)
+
+---
+
+### Configuration resolution
+
+The single global document is loaded through [src/config.ts](../src/config.ts). [src/config/legacy.ts](../src/config/legacy.ts) owns unversioned compatibility; [src/config/v2.ts](../src/config/v2.ts) validates v2 scopes, resolves exact policy, and records leaf origins. [src/config/policy.ts](../src/config/policy.ts) defines effective values independently of persisted session data. See the [configuration reference](configuration.md) for supported fields and migration limits.
+
+Feature entrypoints resolve once per public operation and pass that immutable snapshot through awaited helpers. A separately named compaction producer is resolved from the same decoded document for its own identity. Subsequent callbacks reload; there is no cross-event provider transaction, project lookup, singleton cache, or config state writer. Internal legacy-shaped engine adapters preserve compaction/search algorithms without exposing v2 parsing to consumers. Cross-feature gateway policy belongs to the resolver, not the context enable switch.
+
+Selected invalid policy blocks dependent operations; unrelated model errors remain reportable without replacing the selected model. An engaged auto gate stays blocking when its policy becomes invalid. Image choices are checked before auth, uploads, or paid requests. The human `/toolkit-config` command inspects effective values, validation, or a migration candidate without action APIs or network access. Migration is preview-only; source bytes and unknown/dormant content stay untouched.
 
 ---
 
@@ -29,7 +40,7 @@ The native route uses `{base} = <backend-api>/codex` with `Authorization: Bearer
 
 Search text and note bodies are sent under the encrypted-argument policy. Live model requests carry `x-codex-window-id` and `x-codex-turn-metadata` request headers derived from the active window identity.
 
-Coverage is never inferred from model names. A native session uses provider `openai-codex` with API `openai-codex-responses` for any model ID. A gateway session uses API `openai-responses` and must carry an exact `provider/model` key listed in `compaction.gatewayContextModels`; the list ships empty and there is no built-in gateway SKU. See [src/context-management/codex-provider.ts](../src/context-management/codex-provider.ts). The toolkit registers no provider or model with Pi. It resolves credentials and base URLs through Pi's `ModelRegistry`.
+Coverage is never inferred from model names. A native session uses provider `openai-codex` with API `openai-codex-responses` for any model ID. A gateway session uses API `openai-responses` and must carry an exact `provider/model` key whose `models[exact].compatibility.transport` is `"codex-gateway"` (legacy `compaction.gatewayContextModels`); no gateway is opted in by default. See [src/context-management/codex-provider.ts](../src/context-management/codex-provider.ts). The toolkit registers no provider or model with Pi. It resolves credentials and base URLs through Pi's `ModelRegistry`.
 
 ---
 
@@ -80,15 +91,15 @@ State invariants the lifecycle code must keep honest:
 
 ### Remote Compaction v2 wire contract
 
-v2 is what an uncovered session gets. Any model that Remote Context declines, such as a gateway model absent from `gatewayContextModels`, can still compact through v2 when its API appears in `responsesApis`. The two strategies never compete for one session.
+v2 is what an uncovered session gets. Any model that Remote Context declines, such as a gateway without an exact transport opt-in, can still compact through v2 when its API appears in `context.remoteCompaction.apis`. The two strategies never compete for one session.
 
 A `compaction_trigger` item appended to the live streaming request yields one output item of `type: "compaction"` with non-empty `encrypted_content`, stored in `CompactionEntry.details.compactedWindow`. On later requests the opaque checkpoint is replayed ahead of live turns, with no text summary. Replay fails closed: if the summary anchor cannot be located, the request is aborted with a notification and a content-free failure artifact. The sentinel-only payload is never sent.
 
 A v2 response with a missing or empty checkpoint is never stored, and the `nativeFallback` tier is skipped. Pi's own threshold drives the next attempt, which may use `remoteCompactModel` when configured. `remoteCompactModel` must resolve to the same effective base URL as the active model.
 
-Pi 0.85.1's `session_before_compact` event supplies preparation and branch data, while the direct Remote V2 client can bypass the provider `context` hook chain. To preserve compatibility, an omitted `compaction.remoteV2ContextSource` keeps the original `"legacy"` behavior: first compaction uses `buildSessionContext()` and falls back to `SessionBeforeCompactEvent.preparation`, while recursion uses the opaque window plus the raw branch tail.
+Pi 0.85.1's `session_before_compact` event supplies preparation and branch data, while the direct Remote V2 client can bypass the provider `context` hook chain. To preserve compatibility, an omitted `context.remoteCompaction.inputSource` keeps the original `"legacy"` behavior: first compaction uses `buildSessionContext()` and falls back to `SessionBeforeCompactEvent.preparation`, while recursion uses the opaque window plus the raw branch tail.
 
-Setting `compaction.remoteV2ContextSource: "pi-context-hook"` opts into a narrow runtime bridge around Pi's public `ExtensionRunner.createContext()`. It adds a non-enumerable `ctx.projectContextForCompaction(messages)` method backed by `ExtensionRunner.emitContext()`. In this opt-in mode, Remote V2 first reads `buildSessionContext()` and then runs the ordered projection. If the bridge, session context, or recursive summary anchor is unavailable, the extension cancels rather than sending an unprojected history. The legacy mode is an intentional compatibility trade-off and does not claim parity with provider-visible context hooks.
+Setting `context.remoteCompaction.inputSource: "pi-context-hook"` opts into a narrow runtime bridge around Pi's public `ExtensionRunner.createContext()`. It adds a non-enumerable `ctx.projectContextForCompaction(messages)` method backed by `ExtensionRunner.emitContext()`. In this opt-in mode, Remote V2 first reads `buildSessionContext()` and then runs the ordered projection. If the bridge, session context, or recursive summary anchor is unavailable, the extension cancels rather than sending an unprojected history. The legacy mode is an intentional compatibility trade-off and does not claim parity with provider-visible context hooks.
 
 New checkpoints record `inputProvenance: "pi-context-hook-v1"` or `"legacy-raw-context-v1"`, and replay/recursion reject missing or mode-mismatched markers without searching past the latest compaction. Retained `role: "custom"` messages are optional during replay because they may be changed or removed by context hooks; required user, assistant, and complete tool-call/result content remains ordered and fail-closed.
 
@@ -113,11 +124,11 @@ This is a version-coupled adapter, not a stable Pi extension contract. It is fea
 
 ### Artifacts and debugging
 
-With `debug: true`, the toolkit writes lifecycle and compaction artifacts under `artifactRoot` (default `~/.pi/agent/artifacts/pi-openai-toolkit/compaction`):
+With `diagnostics.level: "debug"`, the toolkit writes lifecycle and compaction artifacts under `diagnostics.artifactRoot` (default `~/.pi/agent/artifacts/pi-openai-toolkit/compaction`):
 
 - Each `session_start` writes a lifecycle artifact whose `activation` field records `active` or the exact inactive reason, such as `unsupported-model`, `unsupported-api`, `missing-api-key`, `auth-resolution-failed`, or `tool-name-conflict`.
-- `logProviderPayloads` additionally writes provider request metadata and payloads, while `logCompactResponses` writes compact status and structural summaries with complete response and body fields critically redacted. Keep both off unless inspecting a specific request.
-- Artifacts always redact Authorization credentials, API keys and tokens, Codex account IDs, and opaque `encrypted_content` or `encrypted_output`, even when `redactSensitiveData` is `false`.
+- `diagnostics.captureRequests` independently writes provider request metadata and payloads, while `diagnostics.captureResponses` writes compact status and structural summaries with complete response and body fields critically redacted. Keep both off unless inspecting a specific request.
+- Artifacts always redact Authorization credentials, API keys and tokens, Codex account IDs, and opaque `encrypted_content` or `encrypted_output`, even when `diagnostics.redactSensitiveData` is `false`.
 
 ---
 

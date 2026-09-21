@@ -149,7 +149,7 @@ describe("image generation extension", () => {
 			"null",
 			"string",
 		]);
-		expect(parameters.properties.model.description).toContain("imageGeneration.models");
+		expect(parameters.properties.model.description).toContain("imageGeneration.defaultModel");
 		expect(tool.promptSnippet).toContain("Generate or edit PNG images");
 		expect(tool.promptGuidelines.some((guideline: string) => guideline.includes("never invent paths"))).toBe(true);
 		expect(tool.promptGuidelines.some((guideline: string) => guideline.includes("never invent a destination"))).toBe(true);
