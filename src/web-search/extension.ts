@@ -372,9 +372,15 @@ function piCliArgs(argv: readonly string[] = process.argv, packageDir = getPacka
 		const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8")) as { bin?: unknown };
 		const bins = typeof manifest.bin === "string" ? [manifest.bin]
 			: manifest.bin && typeof manifest.bin === "object" ? Object.values(manifest.bin) : [];
-		for (const bin of bins) {
+		// Trellis also launches Pi's shipped unbundled CLI directly. It belongs
+		// to the same runtime package but is not necessarily listed in bin.
+		for (const bin of [...bins, "dist/cli.js"]) {
 			if (typeof bin !== "string") continue;
-			if (entry === realpathSync(resolve(packageDir, bin))) return argv.slice(2);
+			try {
+				if (entry === realpathSync(resolve(packageDir, bin))) return argv.slice(2);
+			} catch {
+				// Optional entrypoints differ across Pi distributions.
+			}
 		}
 	} catch {
 		// SDK hosts and unrecognized launchers have no verified CLI policy.

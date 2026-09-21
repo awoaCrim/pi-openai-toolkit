@@ -16,7 +16,7 @@ const targets = [
 	["complete package", "package"],
 ] as const;
 
-function runSmoke(args: string[]) {
+function runSmoke(args: string[], command = process.execPath) {
 	// Do not inherit provider credentials, model config, or agent settings.
 	// Bun caches os.homedir() at startup, so isolate before starting the child.
 	const env: NodeJS.ProcessEnv = {};
@@ -29,7 +29,7 @@ function runSmoke(args: string[]) {
 	env.USERPROFILE = env.HOME;
 	env.PI_OFFLINE = "1";
 	try {
-		return spawnSync(process.execPath, args, {
+		return spawnSync(command, args, {
 			cwd: packageDir, encoding: "utf8", env, timeout: 30000,
 		});
 	} finally {
@@ -38,6 +38,24 @@ function runSmoke(args: string[]) {
 }
 
 describe("pi smoke", () => {
+	for (const entry of ["dist/cli.js", "dist/bundle/cli.js"]) {
+		test(`standalone exclusion works through the actual Pi ${entry} entrypoint`, () => {
+			const result = runSmoke([
+				join(packageDir, "node_modules/@earendil-works/pi-coding-agent", entry),
+				"--mode", "json", "--no-session", "--offline", "--model", "toolkit-smoke/local",
+				"--tools", "read", "--no-extensions", "--extension", join(import.meta.dir, "pi-search-cli-extension.ts"),
+				"--no-skills", "--no-context-files", "--no-prompt-templates", "--no-themes", "-p", "Read the fixture and finish.",
+			], "node");
+			expect(result.status, result.stderr).toBe(0);
+			const events = result.stdout.trim().split("\n").filter((line) => line.startsWith("{")).map((line) => JSON.parse(line));
+			const toolResults = events.filter((event) => event.type === "tool_execution_end");
+			expect(toolResults).toHaveLength(1);
+			expect(toolResults[0]).toMatchObject({ toolName: "read", isError: false });
+			const last = events.filter((event) => event.type === "message_end" && event.message.role === "assistant").at(-1)?.message;
+			expect(last).toMatchObject({ stopReason: "stop", content: [{ type: "text", text: "CLI-DONE" }] });
+		}, 40000);
+	}
+
 	for (const tools of ["read", "read,web_run"]) {
 		test(`standalone search route permits local read with --tools ${tools}`, () => {
 			const result = runSmoke([join(import.meta.dir, "pi-search-allowlist-runner.ts"), "--tools", tools]);

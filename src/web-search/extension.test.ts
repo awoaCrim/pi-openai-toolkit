@@ -261,6 +261,7 @@ describe("standalone-alpha Web Search route", () => {
 		const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
 		const bin = Object.values(manifest.bin)[0] as string;
 		expect(_extensionTest.piCliArgs(["node", join(packageDir, bin), "--tools", "read"])).toEqual(["--tools", "read"]);
+		expect(_extensionTest.piCliArgs(["node", join(packageDir, "dist/cli.js"), "--tools", "read"])).toEqual(["--tools", "read"]);
 		expect(_extensionTest.piCliArgs(["node", import.meta.path, "-t", "host-task"])).toEqual([]);
 		expect(_extensionTest.piCliArgs(["node", "/nonexistent/sdk-host", "--no-tools"])).toEqual([]);
 	});
