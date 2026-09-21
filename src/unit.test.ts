@@ -214,7 +214,7 @@ test("executeRemoteV2Compaction sends a trigger and accepts exactly one complete
 				`event: keepalive\ndata: ${JSON.stringify({ type: "keepalive" })}`,
 				`event: response.output_item.done\ndata: ${JSON.stringify({ type: "response.output_item.done", item: opaque })}`,
 				`event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { id: "resp_v2", created_at: 1_800_000_000, status: "completed", output: [opaque], usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 } } })}`,
-			].join("\n\n"),
+			].join("\n\n") + "\n\n",
 			{ status: 200, headers: { "content-type": "text/event-stream" } },
 		);
 	}) as typeof fetch;
@@ -485,7 +485,7 @@ test("remote v2 compaction request strips Astra configuration_update items from 
 				`event: response.created\ndata: ${JSON.stringify({ type: "response.created", response: { id: "resp_v2", status: "in_progress", output: [] } })}`,
 				`event: response.output_item.done\ndata: ${JSON.stringify({ type: "response.output_item.done", item: opaque })}`,
 				`event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { id: "resp_v2", created_at: 1_800_000_000, status: "completed", output: [opaque], usage: {} } })}`,
-			].join("\n\n"),
+			].join("\n\n") + "\n\n",
 			{ status: 200, headers: { "content-type": "text/event-stream" } },
 		);
 	}) as typeof fetch;

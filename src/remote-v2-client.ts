@@ -156,41 +156,53 @@ export function buildRemoteV2CompactionRequest(
 	};
 }
 
-export function parseSseEvents(raw: string): ParsedSseEvent[] | undefined {
-	const normalized = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-	const events: ParsedSseEvent[] = [];
+/** Shared line framing; yielding lazily keeps bytes after a terminal out of parsing. */
+class SseEventParser {
+	private line = "";
+	private skipLf = false;
+	private event: string | undefined;
+	private dataLines: string[] = [];
 
-	for (const block of normalized.split(/\n\n+/)) {
-		if (!block.trim()) continue;
-
-		let event: string | undefined;
-		const dataLines: string[] = [];
-		for (const line of block.split("\n")) {
-			if (line.startsWith(":")) continue;
-			if (line.startsWith("event:")) {
-				event = line.slice("event:".length).trim();
+	*push(text: string): Generator<ParsedSseEvent> {
+		for (const character of text) {
+			if (this.skipLf) {
+				this.skipLf = false;
+				if (character === "\n") continue;
+			}
+			if (character !== "\r" && character !== "\n") {
+				this.line += character;
 				continue;
 			}
-			if (line.startsWith("data:")) {
-				dataLines.push(line.slice("data:".length).replace(/^ /, ""));
+			this.skipLf = character === "\r";
+			const line = this.line;
+			this.line = "";
+			if (line === "") {
+				const event = this.event;
+				const dataLines = this.dataLines;
+				this.event = undefined;
+				this.dataLines = [];
+				if (dataLines.length === 0) continue;
+				const dataText = dataLines.join("\n");
+				yield dataText === "[DONE]"
+					? { event, dataText }
+					: { event, dataText, data: JSON.parse(dataText) };
+			} else if (line.startsWith("event:")) {
+				this.event = line.slice("event:".length).trim();
+			} else if (line === "data" || line.startsWith("data:")) {
+				this.dataLines.push(line.slice("data:".length).replace(/^ /, ""));
 			}
 		}
-
-		if (dataLines.length === 0) continue;
-		const dataText = dataLines.join("\n");
-		if (dataText === "[DONE]") {
-			events.push({ event, dataText });
-			continue;
-		}
-
-		try {
-			events.push({ event, dataText, data: JSON.parse(dataText) });
-		} catch {
-			return undefined;
-		}
 	}
+}
 
-	return events.length > 0 ? events : undefined;
+export function parseSseEvents(raw: string): ParsedSseEvent[] | undefined {
+	try {
+		// Retain the buffered helper's historical support for a final unterminated block.
+		const events = [...new SseEventParser().push(`${raw}\n\n`)];
+		return events.length > 0 ? events : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function isRemoteV2CompactionItem(value: unknown): value is RemoteV2CompactionItem {
@@ -560,6 +572,68 @@ function reconcileSseCheckpoint(events: readonly ParsedSseEvent[]): CheckpointRe
 	};
 }
 
+type CollectedSse = {
+	responseText: string;
+	events?: ParsedSseEvent[];
+	reconciliation?: CheckpointReconciliation;
+};
+
+async function collectSseCheckpoint(response: Response, signal?: AbortSignal): Promise<CollectedSse> {
+	const reader = response.body?.getReader();
+	if (!reader) {
+		if (signal?.aborted) throw new DOMException("Compaction aborted", "AbortError");
+		return { responseText: "" };
+	}
+	const decoder = new TextDecoder();
+	const parser = new SseEventParser();
+	const events: ParsedSseEvent[] = [];
+	const text: string[] = [];
+	let onAbort: (() => void) | undefined;
+	const aborted = new Promise<never>((_resolve, reject) => {
+		onAbort = () => reject(new DOMException("Compaction aborted", "AbortError"));
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+	try {
+		while (true) {
+			if (signal?.aborted) throw new DOMException("Compaction aborted", "AbortError");
+			const chunk = await Promise.race([reader.read(), aborted]);
+			if (signal?.aborted) throw new DOMException("Compaction aborted", "AbortError");
+			const decoded = chunk.done ? decoder.decode() : decoder.decode(chunk.value, { stream: true });
+			text.push(decoded);
+			try {
+				for (const event of parser.push(decoded)) {
+					events.push(event);
+					const type = getEventType(event);
+					if (type === "response.completed" || type === "error" || type === "response.failed" || type === "response.incomplete") {
+						// Validate synchronously before cleanup; later cancellation cannot undo this boundary.
+						return { responseText: "", events, reconciliation: reconcileSseCheckpoint(events) };
+					}
+				}
+			} catch (error) {
+				if (!(error instanceof SyntaxError)) throw error;
+				return { responseText: text.join("") };
+			}
+			// EOF never dispatches an unfinished frame, even if its JSON happens to be complete.
+			if (chunk.done) return { responseText: text.join(""), events: events.length ? events : undefined };
+		}
+	} finally {
+		if (onAbort) signal?.removeEventListener("abort", onAbort);
+		// Cancellation is best-effort cleanup, not part of the completion boundary.
+		// Observe rejection immediately and release even if the transport never settles cancel().
+		try {
+			void reader.cancel().catch(() => undefined);
+		} catch {
+			// A custom reader may throw synchronously during cleanup.
+		} finally {
+			try {
+				reader.releaseLock();
+			} catch {
+				// Cleanup failures must not replace a validated checkpoint or cancellation.
+			}
+		}
+	}
+}
+
 export async function executeRemoteV2Compaction(
 	options: ExecuteRemoteV2CompactionOptions,
 ): Promise<RemoteV2CompactionClientResult> {
@@ -588,13 +662,13 @@ export async function executeRemoteV2Compaction(
 			body: JSON.stringify(request),
 			signal,
 		});
-		const responseText = await response.text();
 		const responseHeaders: Record<string, string> = {};
 		response.headers.forEach((value, key) => {
 			responseHeaders[key] = value;
 		});
 
 		if (!response.ok) {
+			const responseText = await response.text();
 			let responseJson: unknown;
 			if (responseText.trim()) {
 				try {
@@ -623,7 +697,9 @@ export async function executeRemoteV2Compaction(
 			return failure;
 		}
 
-		if (!responseText.trim()) {
+		const collected = await collectSseCheckpoint(response, signal);
+		const { responseText, events } = collected;
+		if (!events && !responseText.trim()) {
 			const failure: RemoteV2CompactionClientFailure = {
 				ok: false,
 				reason: "empty-body",
@@ -642,7 +718,6 @@ export async function executeRemoteV2Compaction(
 			return failure;
 		}
 
-		const events = parseSseEvents(responseText);
 		if (!events) {
 			const failure: RemoteV2CompactionClientFailure = {
 				ok: false,
@@ -663,7 +738,7 @@ export async function executeRemoteV2Compaction(
 			return failure;
 		}
 
-		const reconciliation = reconcileSseCheckpoint(events);
+		const reconciliation = collected.reconciliation ?? reconcileSseCheckpoint(events);
 		if (!reconciliation.ok) {
 			const failure: RemoteV2CompactionClientFailure = {
 				ok: false,

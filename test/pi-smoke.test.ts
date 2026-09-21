@@ -11,6 +11,7 @@ const targets = [
 	["Pi-disabled compaction", "native_disabled"],
 	["below-threshold continuation", "native_under"],
 	["manual compaction with auto disabled", "native_manual"],
+	["manual compaction with a completed but open HTTP response", "native_manual-open"],
 	["cooperative compaction cancellation", "native_cancel"],
 	["remote failure and native fallback", "native_failure"],
 	["complete package", "package"],

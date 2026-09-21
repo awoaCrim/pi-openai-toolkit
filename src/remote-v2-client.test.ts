@@ -1,5 +1,6 @@
 import { afterEach, expect, mock, test } from "bun:test";
-import { executeRemoteV2Compaction, type RemoteV2CompactionItem } from "./remote-v2-client";
+import { createServer } from "node:http";
+import { executeRemoteV2Compaction, parseSseEvents, type RemoteV2CompactionItem } from "./remote-v2-client";
 import type { NativeCompactionRequestBody } from "./serializer";
 import type { NativeCompactionRuntime } from "./runtime";
 
@@ -273,12 +274,12 @@ test("rejects malformed, duplicate, conflicting, error, incomplete, and out-of-o
 			reason: "incomplete-response",
 		},
 		{
-			name: "checkpoint after terminal",
+			name: "checkpoint after invalid terminal cannot rescue it",
 			body: stream(
 				completedEvent({ id: "resp_v2", status: "completed", output: [] }),
 				outputItemDone({ ...checkpoint }),
 			),
-			reason: "invalid-event-order",
+			reason: "invalid-compaction-count",
 		},
 		{
 			name: "response id mismatch",
@@ -326,10 +327,9 @@ test("requires exactly one valid checkpoint even for a successful terminal respo
 	expect(result).toEqual(expect.objectContaining({ ok: false, reason: "invalid-compaction-count" }));
 });
 
-test("validates terminal uniqueness, stream identity, content conflicts and semantic field equality", async () => {
+test("validates stream identity, content conflicts and semantic field equality", async () => {
 	const terminal = completedEvent({ id: "resp_v2", status: "completed", output: [checkpoint] });
 	for (const [name, body, reason] of [
-		["duplicate terminal", stream(terminal, terminal), "duplicate-completed-event"],
 		["created identity mismatch", stream(dataEvent("response.created", { response: { id: "other" } }), terminal), "invalid-compaction-metadata"],
 		["opaque conflict", stream(outputItemDone({ ...checkpoint, encrypted_content: "other-opaque" }), terminal), "conflicting-compaction-item"],
 		["extension field conflict", stream(outputItemDone({ ...checkpoint, extra: { value: 1 } }), completedEvent({ status: "completed", output: [{ ...checkpoint, extra: { value: 2 } }] })), "conflicting-compaction-item"],
@@ -348,5 +348,196 @@ test("validates terminal uniqueness, stream identity, content conflicts and sema
 		const result = await execute(stream(outputItemDone(checkpoint, { output_index: 2 }),
 			completedEvent({ status: "completed", ...(output ? { output } : {}) })));
 		expect(result).toMatchObject({ ok: true, compactedWindow: [checkpoint] });
+	}
+});
+
+function installChunks(chunks: Uint8Array[], options: { close?: boolean; cancel?: () => Promise<void> | void } = {}) {
+	const cancel = mock(options.cancel ?? (() => undefined));
+	const body = new ReadableStream<Uint8Array>({
+		start(controller) {
+			for (const chunk of chunks) controller.enqueue(chunk);
+			if (options.close) controller.close();
+		},
+		cancel,
+	});
+	globalThis.fetch = mock(async () => new Response(body)) as typeof fetch;
+	return { body, cancel };
+}
+
+async function promptly<T>(promise: Promise<T>): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<never>((_resolve, reject) => {
+				timer = setTimeout(() => reject(new Error("stream did not settle promptly")), 1000);
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+const encoder = new TextEncoder();
+const validTerminal = stream(completedEvent({ id: "resp_v2", status: "completed", output: [checkpoint] }));
+
+test("completes an open response at its terminal and releases the reader without waiting for cancel", async () => {
+	for (const cancel of [
+		() => undefined,
+		() => new Promise<void>(() => {}),
+		() => Promise.reject(new Error("transport cancellation failed")),
+		() => { throw new Error("synchronous cancellation failed"); },
+	]) {
+		const installed = installChunks([encoder.encode(validTerminal)], { cancel });
+		const result = await promptly(executeRemoteV2Compaction({ runtime, request }));
+		expect(result).toMatchObject({ ok: true, compactedWindow: [checkpoint], compactResponseId: "resp_v2" });
+		expect(installed.cancel).toHaveBeenCalledTimes(1);
+		expect(installed.body.locked).toBe(false);
+	}
+});
+
+test("ignores all data after the first completed frame regardless of byte chunk boundaries", async () => {
+	const suffixes = [
+		validTerminal,
+		stream(dataEvent("error", { message: "late failure" })),
+		stream(outputItemDone({ ...checkpoint, encrypted_content: "late conflict" })),
+		"data: {broken JSON\n\n",
+	];
+	for (const suffix of suffixes) {
+		const bytes = encoder.encode(validTerminal + suffix);
+		for (let split = 0; split <= bytes.length; split += 1) {
+			installChunks([bytes.slice(0, split), bytes.slice(split)], { close: true });
+			const result = await executeRemoteV2Compaction({ runtime, request });
+			expect(result, `suffix ${suffix}, split ${split}`).toMatchObject({ ok: true, compactedWindow: [checkpoint] });
+		}
+	}
+	// Invalid UTF-8 following completion must not make success depend on chunking either.
+	installChunks([new Uint8Array([...encoder.encode(validTerminal), 0xff, 0xc0])]);
+	expect(await promptly(executeRemoteV2Compaction({ runtime, request }))).toMatchObject({ ok: true });
+});
+
+test("decodes split UTF-8, all SSE line endings, comments and multiline data", async () => {
+	const unicodeCheckpoint = { ...checkpoint, metadata: "总结 🧭 café" };
+	for (const newline of ["\n", "\r\n", "\r"]) {
+		const body = [
+			": comment", "event: response.output_item.done",
+			`data: ${JSON.stringify({ type: "response.output_item.done", item: unicodeCheckpoint })}`,
+			"", "event: response.completed", "data: {\"type\": \"response.completed\",",
+			"data: \"response\": {\"id\":\"resp_v2\",\"status\":\"completed\"}}", "", "",
+		].join(newline);
+		const bytes = encoder.encode(body);
+		for (let split = 0; split <= bytes.length; split += 1) {
+			installChunks([bytes.slice(0, split), bytes.slice(split)], { close: true });
+			expect(await executeRemoteV2Compaction({ runtime, request }), `${JSON.stringify(newline)}, split ${split}`)
+				.toMatchObject({ ok: true, compactedWindow: [unicodeCheckpoint] });
+		}
+		installChunks(Array.from(bytes, (byte) => Uint8Array.of(byte)));
+		expect(await promptly(executeRemoteV2Compaction({ runtime, request }))).toMatchObject({
+			ok: true, compactedWindow: [unicodeCheckpoint],
+		});
+		expect(parseSseEvents(body)).toHaveLength(2);
+	}
+	expect(parseSseEvents("data: {broken}\n\n")).toBeUndefined();
+	expect(parseSseEvents("data: [DONE]")).toMatchObject([{ dataText: "[DONE]" }]);
+});
+
+test("rejects early malformed and error terminals promptly even if the body stays open", async () => {
+	for (const [body, reason] of [
+		["data: {broken JSON\n\n" + validTerminal, "invalid-sse"],
+		[stream(dataEvent("error", { message: "gateway error" })) + validTerminal, "error-event"],
+		[stream(dataEvent("response.failed", { error: { message: "failed" } })), "error-event"],
+		[stream(dataEvent("response.incomplete", { response: { status: "incomplete" } })), "error-event"],
+		[stream(completedEvent({ status: "in_progress", output: [checkpoint] })) + validTerminal, "incomplete-response"],
+		[stream(completedEvent({ status: "completed", output: [] })) + validTerminal, "invalid-compaction-count"],
+	] as const) {
+		const installed = installChunks([encoder.encode(body)]);
+		expect(await promptly(executeRemoteV2Compaction({ runtime, request }))).toMatchObject({ ok: false, reason });
+		expect(installed.cancel).toHaveBeenCalledTimes(1);
+		expect(installed.body.locked).toBe(false);
+	}
+});
+
+test("EOF without a complete terminal frame never adopts a checkpoint", async () => {
+	for (const body of ["", " \n", ": only a comment\n\n", stream(outputItemDone(checkpoint)),
+		validTerminal.slice(0, -1), validTerminal.slice(0, -2), validTerminal.slice(0, -10)]) {
+		installChunks([encoder.encode(body)], { close: true });
+		expect(await executeRemoteV2Compaction({ runtime, request })).toMatchObject({ ok: false });
+	}
+});
+
+test("abort interrupts a stalled read with noncooperative cleanup and consumes late cleanup rejection", async () => {
+	let rejectCancel!: (error: Error) => void;
+	for (const cancel of [
+		() => new Promise<void>(() => {}),
+		() => new Promise<void>((_resolve, reject) => { rejectCancel = reject; }),
+	]) {
+		const controller = new AbortController();
+		const installed = installChunks([encoder.encode(stream(outputItemDone(checkpoint)))], { cancel });
+		const pending = executeRemoteV2Compaction({ runtime, request, signal: controller.signal });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		controller.abort(new Error("custom abort reason"));
+		expect(await promptly(pending)).toMatchObject({ ok: false, reason: "aborted" });
+		expect(installed.cancel).toHaveBeenCalledTimes(1);
+		expect(installed.body.locked).toBe(false);
+	}
+	rejectCancel(new Error("late transport failure"));
+	await new Promise((resolve) => setTimeout(resolve, 0));
+});
+
+test("an abort observed with a queued terminal wins, while abort during terminal cleanup cannot undo success", async () => {
+	const early = new AbortController();
+	const earlyBody = new ReadableStream<Uint8Array>({
+		pull(controller) {
+			controller.enqueue(encoder.encode(validTerminal));
+			early.abort();
+		},
+	});
+	globalThis.fetch = mock(async () => new Response(earlyBody)) as typeof fetch;
+	expect(await executeRemoteV2Compaction({ runtime, request, signal: early.signal })).toMatchObject({ ok: false, reason: "aborted" });
+	expect(earlyBody.locked).toBe(false);
+
+	const late = new AbortController();
+	installChunks([encoder.encode(validTerminal)], { cancel: () => late.abort() });
+	expect(await executeRemoteV2Compaction({ runtime, request, signal: late.signal })).toMatchObject({ ok: true });
+});
+
+test("preserves pre-send abort, HTTP errors and body read failures", async () => {
+	const controller = new AbortController();
+	controller.abort();
+	const fetchMock = installSse(validTerminal);
+	expect(await executeRemoteV2Compaction({ runtime, request, signal: controller.signal })).toMatchObject({ ok: false, reason: "aborted" });
+	expect(fetchMock).not.toHaveBeenCalled();
+
+	globalThis.fetch = mock(async () => new Response('{"error":{"message":"unauthorized"}}', { status: 401 })) as typeof fetch;
+	expect(await executeRemoteV2Compaction({ runtime, request })).toMatchObject({
+		ok: false, reason: "non-2xx", status: 401, responseJson: { error: { message: "unauthorized" } },
+	});
+	const body = new ReadableStream<Uint8Array>({ start(controller) { controller.error(new Error("body disconnected")); } });
+	globalThis.fetch = mock(async () => new Response(body)) as typeof fetch;
+	expect(await executeRemoteV2Compaction({ runtime, request })).toMatchObject({ ok: false, reason: "network-error", errorMessage: "body disconnected" });
+	expect(body.locked).toBe(false);
+});
+
+test("real loopback HTTP completes while the response remains open", async () => {
+	globalThis.fetch = originalFetch;
+	let responseEnded: (() => boolean) | undefined;
+	const server = createServer(async (request, response) => {
+		for await (const _chunk of request) { /* Drain the synthetic request before streaming. */ }
+		response.writeHead(200, { "content-type": "text/event-stream" });
+		response.write(validTerminal);
+		responseEnded = () => response.writableEnded;
+	});
+	try {
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("loopback server missing TCP address");
+		const result = await promptly(executeRemoteV2Compaction({
+			runtime: { ...runtime, responsesUrl: `http://127.0.0.1:${address.port}/responses` }, request,
+		}));
+		expect(result).toMatchObject({ ok: true, compactResponseId: "resp_v2", compactedWindow: [checkpoint] });
+		expect(responseEnded?.()).toBe(false);
+	} finally {
+		server.closeAllConnections();
+		await new Promise<void>((resolve) => server.close(() => resolve()));
 	}
 });
