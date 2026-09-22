@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { loadToolkitConfig } from "../config";
+import { loadToolkitConfig, resolveToolkitConfig } from "../config";
+import { notifyConfigIssues } from "../config/notifications";
 import { ASTRA_MODEL_ID } from "../types";
 import { CODEX_CLIENT_VERSION } from "../responses-headers";
 import {
@@ -73,8 +74,10 @@ export function registerCodexAstraExtension(
 		try {
 			// Pi already encodes the selected thinking level in the payload.
 			// Only opt-in Astra Responses requests may pin it to a cache baseline.
-			const enabled = loadConfig().config.reasoning_effort_override;
 			const model = ctx.model;
+			const resolved = resolveToolkitConfig(loadConfig(), model);
+			notifyConfigIssues(ctx, resolved);
+			const enabled = !resolved.invalidFeatures.includes("reasoning") && resolved.policy.reasoning.effortOverride;
 			if (!enabled || !model || model.api !== "openai-responses" || model.id !== ASTRA_MODEL_ID) {
 				states.clear();
 				return undefined;
@@ -104,6 +107,7 @@ export function registerCodexAstraExtension(
 			};
 		} catch {
 			// A planner failure must never break the provider request path.
+			states.clear();
 			return undefined;
 		}
 	});

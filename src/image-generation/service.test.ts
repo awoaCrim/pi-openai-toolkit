@@ -1,3 +1,4 @@
+import { v2Fixture } from "../config/test-helpers";
 import { describe, expect, test } from "bun:test";
 import {
 	DEFAULT_COMPACTION_CONFIG,
@@ -275,4 +276,37 @@ describe("image generation service", () => {
 		).rejects.toThrow("not enabled");
 		expect(dispatched).toBe(false);
 	});
+});
+
+
+test("v2 explicit image default is independent of list order and stable across auth await", async () => {
+	const probe = modelProbeDeps(undefined);
+	const raw = { defaults: { imageGeneration: { enabled: true, defaultModel: "second", allowedModels: ["first", "second"] } } };
+	let reads = 0;
+	probe.deps.loadConfig = () => { reads++; return v2Fixture(raw); };
+	const original = probe.deps.resolveRuntime;
+	probe.deps.resolveRuntime = async (...args) => {
+		raw.defaults.imageGeneration.defaultModel = "first";
+		return original(...args);
+	};
+	const execute = createImageGenerationExecutor(probe.deps);
+	const first = await execute({ params: { prompt: "draw", model: null }, toolCallId: "first", ctx: context() });
+	expect(first.details.imageModel).toBe("second");
+	expect(reads).toBe(1);
+	const next = await execute({ params: { prompt: "draw", model: null }, toolCallId: "next", ctx: context() });
+	expect(next.details.imageModel).toBe("first");
+	expect(reads).toBe(2);
+});
+
+test("v2 invalid image default and disallowed override fail before auth, uploads and paid work", async () => {
+	for (const [defaultModel, requestedModel] of [["missing", null], ["first", "missing"]]) {
+		const probe = modelProbeDeps(undefined);
+		probe.deps.loadConfig = () => v2Fixture({ defaults: { imageGeneration: { enabled: true, defaultModel, allowedModels: ["first"] } } });
+		probe.deps.resolveRuntime = async () => { throw new Error("must not resolve auth"); };
+		probe.deps.prepareReferences = async () => { throw new Error("must not upload"); };
+		const execute = createImageGenerationExecutor(probe.deps);
+		await expect(execute({ params: { prompt: "draw", model: requestedModel }, toolCallId: "call", ctx: context() }))
+			.rejects.toThrow(defaultModel === "missing" ? "configuration is invalid" : "Unknown image generation model");
+		expect(probe.calls.dispatched).toBe(false);
+	}
 });

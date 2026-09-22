@@ -1,3 +1,5 @@
+import { v2Fixture } from "../config/test-helpers";
+import type { loadToolkitConfig } from "../config";
 import { describe, expect, test } from "bun:test";
 import {
 	DEFAULT_AUTO_MODE_CONFIG,
@@ -64,6 +66,7 @@ function createNoopToolReviewRenderer(): ToolReviewRendererBridge {
 
 function createHarness(options: {
 	autoMode?: Partial<AutoModeConfig>;
+	loadConfig?: typeof loadToolkitConfig;
 	flagValue?: boolean;
 	outcome?: ReviewOutcome;
 	confirmed?: boolean;
@@ -161,7 +164,7 @@ function createHarness(options: {
 
 	registerAutoModeExtension(
 		pi as never,
-		loadConfig as never,
+		(options.loadConfig ?? loadConfig) as never,
 		requestReview as never,
 		() => options.toolReviewRenderer ?? createNoopToolReviewRenderer(),
 	);
@@ -831,4 +834,68 @@ describe("auto mode reviewer prompt and transcript", () => {
 		expect(omitted).toBe(true);
 		expect(text).toContain("conversation content was omitted or truncated");
 	});
+});
+
+
+for (const boundary of ["before_agent_start", "tool_call", "tool_result", "model_select", "command"] as const) {
+	test(`invalid v2 policy at ${boundary} retires classification without unlocking a newer sample`, async () => {
+		const valid = { defaults: { autoMode: { available: true, reviewerModel: "p/reviewer", evidenceTools: false,
+			classifier: { enabled: true, maxLag: 20 } } } };
+		let raw: Record<string, unknown> = valid;
+		let settleOld!: (text: string) => void;
+		let settleNew!: (text: string) => void;
+		const old = new Promise<string>((resolve) => { settleOld = resolve; });
+		const next = new Promise<string>((resolve) => { settleNew = resolve; });
+		const h = createHarness({ flagValue: true, loadConfig: () => v2Fixture(raw), classifierResponses: [old, next] });
+		h.fire("session_start");
+		await h.fire("tool_call", bashCall);
+		h.fire("tool_result", bashCall);
+		expect(h.classifierCalls).toHaveLength(1);
+		raw = { defaults: { autoMode: { available: "invalid" } } };
+		if (boundary === "command") await h.runCommand("status");
+		else await h.fire(boundary, boundary === "model_select" ? { model: h.ctx.model } : bashCall);
+		expect((h.classifierCalls[0]!.signal as AbortSignal).aborted).toBe(true);
+		raw = valid;
+		h.fire("tool_result", bashCall);
+		expect(h.classifierCalls).toHaveLength(2);
+		settleOld("low");
+		await h.flush();
+		await h.fire("tool_call", { ...bashCall, toolCallId: "after-repair" });
+		expect(h.reviewCalls).toHaveLength(2);
+		h.fire("tool_result", bashCall);
+		expect(h.classifierCalls).toHaveLength(2);
+		settleNew("low");
+		await h.flush();
+		await h.fire("tool_call", { ...bashCall, toolCallId: "new-score" });
+		expect(h.reviewCalls).toHaveLength(2);
+	});
+}
+
+test("invalid v2 auto policy preserves an engaged blocking gate across later lifecycle operations", async () => {
+	let raw: Record<string, unknown> = { defaults: { autoMode: { available: true, reviewerModel: "p/reviewer", evidenceTools: false, classifier: { enabled: false } } } };
+	let reads = 0;
+	const harness = createHarness({ flagValue: true, loadConfig: () => { reads++; return v2Fixture(raw); } });
+	harness.fire("session_start");
+	expect(reads).toBe(1);
+	await harness.fire("tool_call", bashCall);
+	expect(harness.reviewCalls).toHaveLength(1);
+	raw = { defaults: { autoMode: { available: "bad" } } };
+	harness.fire("before_agent_start");
+	harness.fire("model_select", { model: harness.ctx.model });
+	for (let n = 0; n < 2; n++) {
+		expect(await harness.fire("tool_call", bashCall)).toMatchObject({ block: true });
+	}
+	expect(harness.reviewCalls).toHaveLength(1);
+	await harness.runCommand("off");
+	expect(await harness.fire("tool_call", bashCall)).toBeUndefined();
+});
+
+test("--auto with malformed v2 policy blocks immediately in headless sessions", async () => {
+	const harness = createHarness({ flagValue: true, hasUI: false,
+		loadConfig: () => v2Fixture({ defaults: { autoMode: { reviewerModel: 42 } } }),
+	});
+	harness.fire("session_start");
+	harness.fire("before_agent_start");
+	expect(await harness.fire("tool_call", bashCall)).toMatchObject({ block: true });
+	expect(harness.reviewCalls).toHaveLength(0);
 });

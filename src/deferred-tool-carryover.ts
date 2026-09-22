@@ -224,6 +224,7 @@ export function rewritePayloadWithDeferredToolCarryover(args: {
 	}
 	if (!Array.isArray(args.payload.tools)) return unchanged;
 
+	// Search routing needs its local callable at the top level on every request.
 	const carryoverNames = new Set(
 		args.carryover.toolNames
 			.map((name) => name.trim())

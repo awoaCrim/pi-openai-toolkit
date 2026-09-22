@@ -31,7 +31,7 @@ try {
 	const resourceLoader = new DefaultResourceLoader({
 		cwd: env.cwd, agentDir: env.agentDir, settingsManager,
 		// This SDK fixture explicitly uses Pi-parsed flags as its session policy.
-		extensionFactories: [(pi) => registerWebSearchExtension(pi, loadToolkitConfig, undefined, undefined, process.argv.slice(2))],
+		extensionFactories: [(pi) => registerWebSearchExtension(pi, loadToolkitConfig)],
 		noSkills: true, noPromptTemplates: true, noContextFiles: true, noThemes: true,
 		systemPrompt: "Read fixture.txt and finish.",
 	});

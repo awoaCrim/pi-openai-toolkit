@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -15,6 +15,8 @@ const targets = [
 	["cooperative compaction cancellation", "native_cancel"],
 	["remote failure and native fallback", "native_failure"],
 	["complete package", "package"],
+	["standalone search (openai-responses)", "web_openai-responses"],
+	["standalone search (openai-codex-responses)", "web_openai-codex-responses"],
 ] as const;
 
 function runSmoke(args: string[], command = process.execPath) {
@@ -25,11 +27,16 @@ function runSmoke(args: string[], command = process.execPath) {
 		if (["PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "PATHEXT"].includes(key.toUpperCase())) env[key] = value;
 	}
 	const root = mkdtempSync(join(tmpdir(), "pi-toolkit-smoke-"));
-	env.PI_TOOLKIT_SMOKE_ROOT = root;
-	env.HOME = join(root, "home");
-	env.USERPROFILE = env.HOME;
-	env.PI_OFFLINE = "1";
+	const home = join(root, "home");
 	try {
+		mkdirSync(home, { recursive: true });
+		Object.assign(env, {
+			PI_TOOLKIT_SMOKE_ROOT: root, TOOLKIT_SMOKE_ROOT: root,
+			HOME: home, USERPROFILE: home, PI_OFFLINE: "1",
+			APPDATA: join(home, "AppData", "Roaming"),
+			LOCALAPPDATA: join(home, "AppData", "Local"),
+			PI_CODING_AGENT_DIR: join(home, ".pi", "agent"),
+		});
 		return spawnSync(command, args, {
 			cwd: packageDir, encoding: "utf8", env, timeout: 30000,
 		});
@@ -68,7 +75,11 @@ describe("pi smoke", () => {
 	for (const [name, target] of targets) {
 		test(`loads the ${name} with the local official Pi runtime`, () => {
 			const native = target.startsWith("native_");
-			const result = runSmoke([native ? join(import.meta.dir, "pi-native-compaction-runner.ts") : runnerPath, native ? target.slice(7) : target]);
+			const webSearch = target.startsWith("web_");
+			const runner = native ? join(import.meta.dir, "pi-native-compaction-runner.ts")
+				: webSearch ? join(import.meta.dir, "pi-web-search-runner.ts") : runnerPath;
+			const argument = native ? target.slice(7) : webSearch ? target.slice(4) : target;
+			const result = runSmoke([runner, argument]);
 			expect(result.status, result.stderr).toBe(0);
 			expect(result.stdout.trim()).toBe("OK");
 		}, 180000);

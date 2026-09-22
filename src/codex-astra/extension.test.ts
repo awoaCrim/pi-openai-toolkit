@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { DEFAULT_TOOLKIT_CONFIG } from "../types";
+import { v2Fixture } from "../config/test-helpers";
+import type { loadToolkitConfig } from "../config";
 import { registerCodexAstraExtension } from "./extension";
 
 type Handler = (event: any, ctx: any) => unknown;
@@ -15,7 +17,7 @@ function codexModel(overrides: Record<string, unknown> = {}) {
 	};
 }
 
-function createHarness(options: { model?: unknown; sessionId?: string; enabled?: boolean } = {}) {
+function createHarness(options: { model?: unknown; sessionId?: string; enabled?: boolean; loadConfig?: typeof loadToolkitConfig } = {}) {
 	const handlers = new Map<string, Handler[]>();
 	const pi = {
 		on: (event: string, handler: Handler) => {
@@ -33,7 +35,7 @@ function createHarness(options: { model?: unknown; sessionId?: string; enabled?:
 	};
 
 	const config = { ...DEFAULT_TOOLKIT_CONFIG, reasoning_effort_override: options.enabled ?? true };
-	registerCodexAstraExtension(pi, () => ({ config, warnings: [] }));
+	registerCodexAstraExtension(pi, options.loadConfig ?? (() => ({ config, warnings: [] })));
 
 	const fire = (event: string, e: any, c: any = ctx) =>
 		(handlers.get(event) ?? []).reduce<unknown>((payload, handler) => handler(e, c) ?? payload, undefined);
@@ -46,6 +48,39 @@ function requestPayload(effort: string, input: unknown[] = [{ role: "user", cont
 }
 
 describe("codex astra extension wiring", () => {
+	for (const api of ["openai-responses", "openai-codex-responses", "openai-completions"]) {
+		for (const enabled of [false, true]) {
+			test(`v2 exact effort override=${enabled} retains API gate for ${api}`, () => {
+				let reads = 0;
+				const h = createHarness({ model: codexModel({ api }), loadConfig: () => {
+					reads++;
+					return v2Fixture({ defaults: { reasoning: { effortOverride: !enabled } },
+						models: { "openai-codex/gpt-6-astra": { reasoning: { effortOverride: enabled } } } });
+				} });
+				h.fire("before_provider_request", { payload: requestPayload("medium") });
+				const selected = requestPayload("high");
+				const outgoing = (h.fire("before_provider_request", { payload: selected }) ?? selected) as typeof selected;
+				expect(reads).toBe(2);
+				expect(outgoing.reasoning.effort).toBe(enabled && api === "openai-responses" ? "medium" : "high");
+				expect(outgoing.input.some((item: any) => item.type === "configuration_update")).toBe(enabled && api === "openai-responses");
+			});
+		}
+	}
+
+	test("v2 invalid reasoning skips the rewrite and retires the previous baseline", () => {
+		let raw: Record<string, unknown> = { defaults: { reasoning: { effortOverride: true } } };
+		const h = createHarness({ loadConfig: () => v2Fixture(raw) });
+		h.fire("before_provider_request", { payload: requestPayload("medium") });
+		raw = { defaults: { reasoning: { effortOverride: true } }, models: {
+			"openai-codex/gpt-6-astra": { reasoning: { effortOverride: "invalid" } },
+		} };
+		expect(h.fire("before_provider_request", { payload: requestPayload("high") })).toBeUndefined();
+		raw = { defaults: { reasoning: { effortOverride: true } } };
+		expect(h.fire("before_provider_request", { payload: requestPayload("high") })).toBeUndefined();
+		const next = h.fire("before_provider_request", { payload: requestPayload("low") }) as any;
+		expect(next.reasoning.effort).toBe("high");
+	});
+
 	for (const enabled of [false, true]) {
 		for (const api of ["openai-responses", "openai-codex-responses", "openai-completions"]) {
 			test(`medium to high respects enabled=${enabled}, api=${api}`, () => {

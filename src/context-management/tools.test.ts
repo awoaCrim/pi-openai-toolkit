@@ -343,3 +343,22 @@ test("an exhausted switched window can still escape through new_context", async 
 
 	expect(started.details).toEqual({ started: true });
 });
+
+
+test("new_context passes the operation gateway policy to its awaited thread hint", async () => {
+	const branch = [
+		{ type: "custom_message", id: "boundary", customType: CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, details: boundaryDetails("w-current") },
+		notesCallEntry, notesOkEntry,
+	] as never[];
+	const captured: unknown[] = [];
+	let reads = 0;
+	const manager = new CodexContextWindowManager(async (_ctx, _signal, gatewayModels) => { captured.push(gatewayModels); return undefined; });
+	manager.restore(branch, "session-1");
+	const tools = createContextManagementTools(activePi, manager, async () => {
+		reads++;
+		return { active: true, gatewayModels: ["p/selected"] };
+	});
+	await tools.newContext.execute("call", {}, undefined, undefined, makeCtx(branch));
+	expect(reads).toBe(1);
+	expect(captured).toEqual([["p/selected"]]);
+});

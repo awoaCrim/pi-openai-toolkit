@@ -1,6 +1,7 @@
 import { StringEnum, Type, type Static } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { loadToolkitConfig } from "../config";
+import { loadToolkitConfig, resolveToolkitConfig } from "../config";
+import { notifyConfigIssues } from "../config/notifications";
 import { executeImageGeneration } from "./service";
 import { isImageGenerationEnabledForModel } from "./eligibility";
 import { renderImageGenerationResult } from "./render";
@@ -77,7 +78,7 @@ const GenerateImageParameters = Type.Object(
 				],
 				{
 					description:
-						"Use null to accept the default image model, which is the first entry of imageGeneration.models; otherwise provide another model id exactly as it appears in that configured list.",
+						"Use null to accept the default image model, configured by imageGeneration.defaultModel; otherwise provide another model id exactly as it appears in that configured list.",
 				},
 			),
 		),
@@ -115,14 +116,14 @@ export function registerImageGenerationExtension(
 		label: "OpenAI Generate Image",
 		description:
 			"Generate a PNG image, or edit from one to five user-approved local reference images, through the current Responses-capable model and a configured hosted image_generation model. This is a paid provider operation.",
-		promptSnippet: "Generate or edit PNG images through the current Responses-capable model and a configured imageGeneration.models entry.",
+		promptSnippet: "Generate or edit PNG images through the current Responses-capable model and a configured imageGeneration.allowedModels entry.",
 		promptGuidelines: [
 			"Use openai_generate_image when the user explicitly asks to create, draw, render, or edit a raster image and the active model speaks a Responses API.",
 			"Do not call openai_generate_image speculatively: it consumes the user's provider or gateway image quota.",
 			"Keep the image prompt faithful to the user's requested subject and constraints; do not invent unrequested style details.",
 			"Set referenceImagePaths to null unless the user explicitly identified local files; never invent paths or placeholder strings, and remember upload requires user approval.",
 			"Set outputPath to null unless the user explicitly asks for a destination; never invent a destination or placeholder string, and otherwise use the default Pi agent artifact.",
-			"Set model to null unless the user named an image model configured in imageGeneration.models; never invent or guess a model id, and remember an unlisted model fails before the paid request.",
+			"Set model to null unless the user named an image model configured in imageGeneration.allowedModels; never invent or guess a model id, and remember an unlisted model fails before the paid request.",
 			"Do not substitute Python, browser automation, shell scripts, or unrelated image tools for an eligible image request.",
 		],
 		parameters: GenerateImageParameters,
@@ -151,20 +152,15 @@ export function registerImageGenerationExtension(
 		renderResult: renderImageGenerationResult,
 	});
 
-	pi.on("session_start", (_event, ctx) => {
-		const { config } = loadConfig();
-		syncImageGenerationTool(pi, ctx.model, config.imageGeneration);
-	});
-
-	pi.on("model_select", (event) => {
-		const { config } = loadConfig();
-		syncImageGenerationTool(pi, event.model, config.imageGeneration);
-	});
-
-	pi.on("before_agent_start", (_event, ctx) => {
-		const { config } = loadConfig();
-		syncImageGenerationTool(pi, ctx.model, config.imageGeneration);
-	});
+	const synchronize = (ctx: Parameters<typeof executeImageGeneration>[0]["ctx"], model = ctx.model) => {
+		const resolved = resolveToolkitConfig(loadConfig(), model);
+		notifyConfigIssues(ctx, resolved);
+		const valid = !resolved.invalidFeatures.some((feature) => feature === "imageGeneration" || feature === "compatibility");
+		syncImageGenerationTool(pi, model, { ...resolved.config.imageGeneration, enabled: valid && resolved.policy.imageGeneration.enabled });
+	};
+	pi.on("session_start", (_event, ctx) => synchronize(ctx));
+	pi.on("model_select", (event, ctx) => synchronize(ctx, event.model));
+	pi.on("before_agent_start", (_event, ctx) => synchronize(ctx));
 }
 
 export default function imageGenerationExtension(pi: ExtensionAPI): void {
