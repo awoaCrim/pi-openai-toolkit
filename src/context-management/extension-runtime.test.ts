@@ -290,7 +290,7 @@ test("remote context owns Codex compaction and activates only its four tools", a
 		},
 	});
 
-	const projected = await handlers.get("context")?.({
+	const projected = await handlers.get("context_with_system")?.({
 		messages: [
 			{ role: "custom", customType: "codex-context-window", details: sent[0]?.details },
 			{

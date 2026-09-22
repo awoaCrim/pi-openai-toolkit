@@ -33,7 +33,8 @@ export type PiContextHookPatchResult =
 /**
  * Add a narrow projection method to every ExtensionContext created by Pi.
  *
- * Pi 0.85.1 already has the ordered `ExtensionRunner.emitContext()` method,
+ * Pi 0.87's ordered `ExtensionRunner.emitContext()` runs both `context` and
+ * `context_with_system` phases,
  * but the event-level ExtensionContext does not expose the runner. The patch
  * bridges only the method needed by Remote V2; it does not expose the runner
  * or alter Pi's scheduler.

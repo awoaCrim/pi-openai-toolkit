@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage, fauxToolCall, type Model } from "@earendil-works/pi-ai";
 import { resolveLatestNativeCompactionEntry } from "./details-store";
-import { removeNativeCompactionRetainedMessages, serializeLiveTailToResponsesInput } from "./payload-rewrite";
+import { removeNativeCompactionRetainedMessages, serializeLiveTailToResponsesInput, rewriteResponsesPayloadWithNativeReplay } from "./payload-rewrite";
 import {
 	createNativeCompactionDetails,
 	NATIVE_COMPACTION_FALLBACK_SUMMARY,
@@ -284,7 +284,7 @@ describe("latest Pi retained context", () => {
 		expect(result.messages).toContainEqual(custom);
 		expect(result.messages.filter((message) => message.role === "assistant" || message.role === "toolResult")).toEqual([]);
 	});
-	test("filters recursive retained history including an earlier compaction summary", () => {
+	test("filters recursive retained history without resurrecting an older summary", () => {
 		const args = fixture();
 		args.manager.appendCompaction(NATIVE_COMPACTION_FALLBACK_SUMMARY, args.compactionEntry.firstKeptEntryId, 200,
 			createNativeCompactionDetails({ provider: "openai", api: "openai-responses", model: "gpt-6-astra",
@@ -295,7 +295,7 @@ describe("latest Pi retained context", () => {
 		const latest = resolveLatestNativeCompactionEntry(branchEntries, { baseUrl: "https://offline.invalid/v1" });
 		assert(latest.ok);
 		const messages = args.manager.buildSessionContext().messages;
-		expect(messages.filter((message) => message.role === "compactionSummary")).toHaveLength(2);
+		expect(messages.filter((message) => message.role === "compactionSummary")).toHaveLength(1);
 		const result = removeRetained({ messages, branchEntries, compactionEntry: latest.entry });
 		assert(result.ok);
 		expect(result.messages).toEqual([messages[0], messages.at(-1)]);
@@ -307,4 +307,106 @@ describe("latest Pi retained context", () => {
 		expect(removeRetained({ ...args, compactionEntry: { ...args.compactionEntry, firstKeptEntryId: "missing" } })).toEqual({ ok: false, reason: "first-kept-entry-not-found" });
 		expect(removeRetained({ ...args, messages: args.messages.slice(1) })).toEqual({ ok: false, reason: "compaction-summary-not-found" });
 	});
+});
+
+
+describe("Pi 0.87 canonical context edits", () => {
+	test("live tail applies omission and replacement without rewriting history", () => {
+		const manager = SessionManager.inMemory("C:/offline");
+		const hidden = manager.appendMessage({ role: "user", content: "HIDDEN", timestamp: 1 });
+		const changed = manager.appendMessage(fauxAssistantMessage("OLD", { timestamp: 2 }));
+		manager.appendContextEdit(hidden, null);
+		manager.appendContextEdit(changed, { content: "REPLACEMENT" });
+		const before = structuredClone(manager.getBranch());
+		const input = serializeLiveTailToResponsesInput({ model: liveTailModel, entries: manager.getBranch() });
+		expect(JSON.stringify(input)).not.toContain("HIDDEN");
+		expect(JSON.stringify(input)).not.toContain("OLD");
+		expect(JSON.stringify(input)).toContain("REPLACEMENT");
+		expect(manager.getBranch()).toEqual(before);
+		manager.branch(changed);
+		expect(JSON.stringify(serializeLiveTailToResponsesInput({ model: liveTailModel, entries: manager.getBranch() }))).toContain("HIDDEN");
+	});
+	test("retained entries use edits already included in the checkpoint", () => {
+		const manager = SessionManager.inMemory("C:/offline");
+		const hidden = manager.appendMessage({ role: "user", content: "HIDDEN", timestamp: 1 });
+		const changed = manager.appendMessage(fauxAssistantMessage("OLD", { timestamp: 2 }));
+		manager.appendContextEdit(hidden, null);
+		manager.appendContextEdit(changed, { content: "REPLACEMENT" });
+		const details = fixture().compactionEntry.details;
+		manager.appendCompaction(NATIVE_COMPACTION_FALLBACK_SUMMARY, hidden, 100, details);
+		manager.appendMessage({ role: "user", content: "new", timestamp: 4 });
+		const branchEntries = manager.getBranch();
+		const latest = resolveLatestNativeCompactionEntry(branchEntries, { baseUrl: "https://offline.invalid/v1" });
+		assert(latest.ok);
+		const messages = manager.buildSessionProjection().messages;
+		const result = removeRetained({ branchEntries, compactionEntry: latest.entry, messages });
+		assert(result.ok);
+		expect(result.messages.map(m => m.role)).toEqual(["compactionSummary", "user"]);
+		expect(JSON.stringify(result.messages)).not.toContain("REPLACEMENT");
+	});
+	for (const replacement of [null, { content: "redacted" }]) {
+		test(`edit of checkpoint-covered input refuses opaque replay (${JSON.stringify(replacement)})`, () => {
+			const args = fixture();
+			args.manager.appendContextEdit(args.compactionEntry.firstKeptEntryId, replacement);
+			const branchEntries = args.manager.getBranch();
+			const messages = args.manager.buildSessionProjection().messages;
+			expect(removeRetained({ ...args, branchEntries, messages })).toEqual({ ok: false, reason: "checkpoint-context-edited" });
+			expect(rewriteResponsesPayloadWithNativeReplay({ model: liveTailModel, branchEntries, compactionEntry: args.compactionEntry,
+				expectedInputProvenance: NATIVE_COMPACTION_INPUT_PROVENANCE,
+				payload: { input: [{ role: "user", content: `<summary>${args.compactionEntry.summary}</summary>` }] },
+			})).toEqual({ ok: false, reason: "checkpoint-context-edited" });
+		});
+	}
+	test("retain-none compaction replays with no preceding retained entries", () => {
+		const args = fixture();
+		args.manager.appendCompaction(NATIVE_COMPACTION_FALLBACK_SUMMARY, null, 200, args.compactionEntry.details);
+		args.manager.appendMessage({ role: "user", content: "after retain-none", timestamp: 8 });
+		const branchEntries = args.manager.getBranch();
+		const latest = resolveLatestNativeCompactionEntry(branchEntries, { baseUrl: "https://offline.invalid/v1" });
+		assert(latest.ok);
+		expect(latest.entry.firstKeptEntryId).toBe(latest.entry.id);
+		const messages = args.manager.buildSessionProjection().messages;
+		expect(removeRetained({ branchEntries, compactionEntry: latest.entry, messages })).toEqual({ ok: true, messages });
+		const result = rewriteResponsesPayloadWithNativeReplay({ model: liveTailModel, branchEntries, compactionEntry: latest.entry,
+			expectedInputProvenance: NATIVE_COMPACTION_INPUT_PROVENANCE,
+			payload: { input: [{ role: "user", content: `<summary>${latest.entry.summary}</summary>` }, { role: "user", content: "after retain-none" }] },
+		});
+		assert(result.ok);
+		expect(result.rewrittenPayload.input).toEqual([{ type: "compaction", encrypted_content: "opaque" }, { role: "user", content: "after retain-none" }]);
+	});
+});
+
+
+test("canonical tail preserves tool pairs, normalizes latest replacement and omits custom context", () => {
+	const manager = SessionManager.inMemory("C:/offline");
+	manager.appendMessage(fauxAssistantMessage(fauxToolCall("read", {}, { id: "call_edit|fc_edit" }), { stopReason: "toolUse", timestamp: 1 }));
+	const resultId = manager.appendMessage({ role: "toolResult", toolCallId: "call_edit|fc_edit", toolName: "read", content: [{ type: "text", text: "old-result" }], isError: false, timestamp: 2 });
+	const customId = manager.appendCustomMessageEntry("hidden", "hidden-custom", false);
+	manager.appendContextEdit(resultId, { content: "intermediate-result" });
+	manager.appendContextEdit(resultId, { content: "latest-result" });
+	manager.appendContextEdit(customId, null);
+	const before = structuredClone(manager.getBranch());
+	const input = serializeLiveTailToResponsesInput({ model: liveTailModel, entries: manager.getBranch() });
+	expect(input.filter(item => item.type === "function_call")).toHaveLength(1);
+	expect(input.filter(item => item.type === "function_call_output")).toHaveLength(1);
+	expect(JSON.stringify(input)).toContain("latest-result");
+	for (const hidden of ["old-result", "intermediate-result", "hidden-custom"]) expect(JSON.stringify(input)).not.toContain(hidden);
+	expect(manager.getBranch()).toEqual(before);
+});
+
+test("editing only post-checkpoint input keeps replay valid and navigation restores checkpoint reuse", () => {
+	const args = fixture();
+	const post = args.manager.getLeafId()!;
+	args.manager.appendContextEdit(post, { content: "newly-edited-tail" });
+	const safeLeaf = args.manager.getLeafId()!;
+	const remove = () => removeRetained({ ...args, branchEntries: args.manager.getBranch(), messages: args.manager.buildSessionProjection().messages });
+	let result = remove();
+	assert(result.ok);
+	expect(JSON.stringify(result.messages)).toContain("newly-edited-tail");
+	args.manager.appendContextEdit(args.compactionEntry.firstKeptEntryId, null);
+	expect(remove()).toEqual({ ok: false, reason: "checkpoint-context-edited" });
+	args.manager.branch(safeLeaf);
+	result = remove();
+	assert(result.ok);
+	expect(JSON.stringify(result.messages)).toContain("newly-edited-tail");
 });

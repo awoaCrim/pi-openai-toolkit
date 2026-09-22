@@ -300,6 +300,10 @@ async function buildPiReplayPayload(args: {
 	};
 }
 
+function linkBranch(entries: TestSessionEntry[]) {
+	return entries.map((entry, index) => ({ ...entry, parentId: entries[index - 1]?.id ?? null }));
+}
+
 function createContext(args: {
 	branchEntries?: TestSessionEntry[];
 	model?: TestModel;
@@ -332,8 +336,8 @@ function createContext(args: {
 				},
 		},
 		sessionManager: {
-			getBranch: () => branchEntries,
-			buildSessionContext: () => ({
+			getBranch: () => linkBranch(branchEntries),
+			buildSessionProjection: () => ({
 				messages: sessionContextMessages,
 				thinkingLevel: "off",
 				model: null,
@@ -411,7 +415,7 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 			}) as never;
 		},
 		// Test-only seam for the Pi context-hook projection. The runtime still
-		// obtains the source messages through buildSessionContext().
+		// obtains the source messages through buildSessionProjection().
 		projectCompactionContext: options.disableCompactionProjection
 			? undefined
 			: (messages) => messages,
@@ -421,7 +425,7 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 	// results without patching the scheduler.
 	expect([...handlers.keys()]).toEqual([
 		"session_start",
-		"context",
+		"context_with_system",
 		"session_before_compact",
 		"session_compact",
 		"session_compact_failed",
@@ -440,7 +444,7 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 	]);
 
 	const sessionStart = handlers.get("session_start");
-	const contextHook = handlers.get("context");
+	const contextHook = handlers.get("context_with_system");
 	const sessionBeforeCompact = handlers.get("session_before_compact");
 	const beforeProviderRequest = handlers.get("before_provider_request");
 	const beforeProviderHeaders = handlers.get("before_provider_headers");
@@ -537,7 +541,7 @@ test("remote compaction cancels instead of using incomplete preparation when ses
 	const ctx = createContext({
 		sessionContextMessages: [{ role: "user", content: "complete session context", timestamp: 1 }],
 	});
-	delete (ctx.sessionManager as { buildSessionContext?: unknown }).buildSessionContext;
+	delete (ctx.sessionManager as { buildSessionProjection?: unknown }).buildSessionProjection;
 	const result = await sessionBeforeCompact({
 		signal: new AbortController().signal,
 		customInstructions: undefined,
@@ -592,7 +596,7 @@ test("legacy Remote V2 source falls back to preparation when session context is 
 		disableCompactionProjection: true,
 	});
 	const ctx = createContext({ sessionContextMessages: [{ role: "user", content: "unused context", timestamp: 1 }] });
-	delete (ctx.sessionManager as { buildSessionContext?: unknown }).buildSessionContext;
+	delete (ctx.sessionManager as { buildSessionProjection?: unknown }).buildSessionProjection;
 	await sessionBeforeCompact({
 		signal: new AbortController().signal,
 		customInstructions: undefined,
@@ -668,7 +672,7 @@ test("legacy recursive Remote V2 uses the raw branch tail and stores the legacy 
 		},
 	};
 	const tailUser = createUserEntry("entry-legacy-tail", "raw legacy tail user");
-	const branchEntries = [createUserEntry("entry-legacy-root", "before"), previousCompaction, tailCustom, tailUser] as never;
+	const branchEntries = linkBranch([createUserEntry("entry-legacy-root", "before"), previousCompaction, tailCustom, tailUser]);
 	const result = (await sessionBeforeCompact({
 		signal: new AbortController().signal,
 		customInstructions: undefined,

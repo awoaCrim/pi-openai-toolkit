@@ -21,7 +21,7 @@ The package uses Pi's existing models, authentication, and sessions. It does not
 
 ## Install
 
-Requires Pi 0.85.1+ and Node.js 22.19.0+.
+Requires Pi 0.87.0+ and Node.js 22.19.0+.
 
 ```bash
 pi install npm:pi-openai-toolkit

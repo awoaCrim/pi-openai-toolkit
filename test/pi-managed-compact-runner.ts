@@ -76,6 +76,9 @@ try {
 	let queued = false;
 	let probeExecutions = 0;
 	let settled = 0;
+	let notifyingSettled = false;
+	let actionableTurns = 0;
+	let handoffSettlementObserved = false;
 	const errors: string[] = [];
 	const loader = new DefaultResourceLoader({ cwd: env.cwd, agentDir: env.agentDir, settingsManager: settings,
 		additionalExtensionPaths: [join(packageDir, "src/extension-runtime.ts"), ...(scenario === "approval-refused" ? [join(packageDir, "src/auto-mode/extension.ts")] : [])],
@@ -102,7 +105,28 @@ try {
 					await session[scenario]("QUEUED-USER-REQUEST");
 				}
 			});
-			pi.on("agent_settled", () => { settled++; });
+			pi.on("turn_end", (event, ctx) => {
+				assert(ctx.sessionManager.getEntry(event.messageEntryId), "turn boundary preceded assistant persistence");
+				for (const id of event.toolResultEntryIds) assert(ctx.sessionManager.getEntry(id));
+				assert(Array.isArray(event.entries));
+				assert.equal(typeof event.continue, "boolean");
+				actionableTurns++;
+			});
+			pi.on("agent_start", () => { assert(!notifyingSettled, "reentrant launch inside settled notification"); });
+			pi.on("agent_settled", async (_event, ctx) => {
+				assert(ctx.isIdle());
+				const firstHandoffSettlement = markers().length === 2 && !handoffSettlementObserved;
+				if (firstHandoffSettlement) assert.equal(resumedCalls, 0, "continuation preceded the later settled observer");
+				notifyingSettled = true;
+				await new Promise((done) => setTimeout(done, 5));
+				assert(ctx.isIdle(), "deferred continuation launched before all observers finished");
+				if (firstHandoffSettlement) {
+					assert.equal(resumedCalls, 0, "continuation launched during settled notification");
+					handoffSettlementObserved = true;
+				}
+				notifyingSettled = false;
+				settled++;
+			});
 		}],
 	});
 	await loader.reload(); assert.deepEqual(loader.getExtensions().errors, []);
@@ -141,6 +165,7 @@ try {
 			assert(tools.includes("new_context") && tools.includes("notes") && tools.includes("history"), tools);
 			if (seed) { seed = false; return text("Ready for manual compact", "seed"); }
 			if (switched) {
+				assert(handoffSettlementObserved, "new-window inference preceded the completed settled dispatch");
 				assert(!inputText.includes("ACTIVE-TASK-ONLY-IN-SOURCE"));
 				assert(!inputText.includes("Checkpoint duty only."));
 				assert(inputText.includes("managed-checkpoint.md"));
@@ -174,6 +199,7 @@ try {
 		assert.equal(session.model?.id, "original");
 		assert.equal(session.thinkingLevel, userSelection ? "medium" : "high");
 		assert.equal(probeExecutions, 0);
+		if (!refused) assert(actionableTurns >= 2);
 		assert.equal(noteWrites, refused ? 0 : 1);
 		assert.equal(noteReads, noContinuation || refused ? 0 : 1);
 		assert.equal(markers().length, scenario === "excluded-notes" ? 0 : incomplete || userSelection || refused ? 1 : 2);

@@ -21,7 +21,7 @@
 
 ## 安装
 
-需要 Pi 0.85.1+ 和 Node.js 22.19.0+。
+需要 Pi 0.87.0+ 和 Node.js 22.19.0+。
 
 ```bash
 pi install npm:pi-openai-toolkit

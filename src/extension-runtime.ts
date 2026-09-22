@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type {
 	BeforeProviderRequestEvent,
-	ContextEvent,
+	ContextWithSystemEvent,
 	CompactionResult,
 	ExtensionAPI,
 	ExtensionContext,
@@ -33,6 +33,7 @@ import {
 import { writeDebugArtifact, writeReplayFailureArtifact } from "./debug";
 import {
 	COMPACTION_CHECKPOINT_PROVENANCE_UNAVAILABLE,
+	COMPACTION_CHECKPOINT_CONTEXT_EDITED,
 	COMPACTION_PROJECTION_UNAVAILABLE,
 	COMPACTION_SESSION_CONTEXT_UNAVAILABLE,
 	COMPACTION_PROJECTED_CONTEXT_UNAVAILABLE,
@@ -50,6 +51,7 @@ import {
 import { runNativeFallbackCompaction } from "./native-fallback";
 import {
 	rewriteResponsesPayloadWithNativeReplay,
+	hasInvalidatedCompactionContext,
 	removeNativeCompactionRetainedMessages,
 	serializeLiveTailToResponsesInput,
 } from "./payload-rewrite";
@@ -260,22 +262,11 @@ function findLatestProjectedCompactionSummaryIndex(
 	return -1;
 }
 
-type SessionManagerWithOptionalContext = ExtensionContext["sessionManager"] & {
-	buildSessionContext?: () => { messages?: readonly AgentMessage[] };
-};
-
 function readSessionContextMessages(ctx: ExtensionContext): AgentMessage[] | undefined {
-	const sessionManager = ctx.sessionManager as SessionManagerWithOptionalContext;
-	if (typeof sessionManager.buildSessionContext !== "function") {
-		return undefined;
-	}
-
 	try {
-		const sessionContext = sessionManager.buildSessionContext();
-		if (!sessionContext || !Array.isArray(sessionContext.messages)) {
-			return undefined;
-		}
-		return structuredClone([...sessionContext.messages]);
+		const projection = ctx.sessionManager.buildSessionProjection();
+		if (!projection || !Array.isArray(projection.messages)) return undefined;
+		return structuredClone(projection.messages);
 	} catch {
 		return undefined;
 	}
@@ -339,6 +330,9 @@ async function runResponsesNativeCompact(
 	let requestSource: "session-context" | "non-native-session-context" | "latest-native-replay";
 	let request: NativeCompactionRequestBody;
 	if (latestNativeCompaction.ok) {
+		if (hasInvalidatedCompactionContext(branchEntries, latestNativeCompaction.entry.id)) {
+			return { outcome: "unprojected-input", reason: COMPACTION_CHECKPOINT_CONTEXT_EDITED };
+		}
 		const details = latestNativeCompaction.entry.details;
 		if (!details) {
 			return { outcome: "failed" };
@@ -658,7 +652,9 @@ async function handleSessionBeforeCompact(
 			return { cancel: true };
 		}
 		if (responsesOutcome.outcome === "unprojected-input") {
-			const message = responsesOutcome.reason === COMPACTION_PROJECTION_UNAVAILABLE
+			const message = responsesOutcome.reason === COMPACTION_CHECKPOINT_CONTEXT_EDITED
+				? "A context edit changed history sealed in the opaque checkpoint. Start a new session or navigate before that checkpoint; its encrypted content cannot be selectively rewritten."
+				: responsesOutcome.reason === COMPACTION_PROJECTION_UNAVAILABLE
 				? "Pi's ordered context-hook projection is unavailable; Remote V2 was not sent raw session history."
 				: responsesOutcome.reason === COMPACTION_SESSION_CONTEXT_UNAVAILABLE
 					? "Pi did not provide the current session context required by its context-hook projection."
@@ -680,7 +676,7 @@ async function handleSessionBeforeCompact(
 			);
 			notifyWarning(
 				ctx,
-				`Remote V2 compaction cancelled (${responsesOutcome.reason}); ${message} Keep the context-source setting aligned with the checkpoint or choose legacy mode explicitly.`,
+				`Remote V2 compaction cancelled (${responsesOutcome.reason}); ${message} The existing checkpoint and session history were left unchanged.`,
 			);
 			return { cancel: true };
 		}
@@ -850,7 +846,7 @@ async function handleWindowBulk(
 }
 
 async function handleContextInternal(
-	event: ContextEvent,
+	event: ContextWithSystemEvent,
 	ctx: ExtensionContext,
 	pi: ExtensionAPI,
 	loadConfig: typeof loadToolkitConfig,
@@ -953,7 +949,7 @@ async function handleContextInternal(
  * caught exception for a successful projection.
  */
 async function handleContext(
-	event: ContextEvent,
+	event: ContextWithSystemEvent,
 	ctx: ExtensionContext,
 	pi: ExtensionAPI,
 	loadConfig: typeof loadToolkitConfig,
@@ -1308,7 +1304,7 @@ export default function registerCompactionExtension(
 		}
 	});
 
-	pi.on("context", (event, ctx) => {
+	pi.on("context_with_system", (event, ctx) => {
 		manualCompact.guardRequest(ctx);
 		return handleContext(event, ctx, pi, dependencies.loadConfig, contextWindows, remoteContextActive);
 	});

@@ -12,7 +12,11 @@ export const COMPACTION_PROJECTED_CONTEXT_UNAVAILABLE = "projected-compaction-co
 /** The latest opaque checkpoint was created with no or a different input marker. */
 export const COMPACTION_CHECKPOINT_PROVENANCE_UNAVAILABLE = "unverified-compaction-checkpoint" as const;
 
+/** Persisted edits changed input already sealed inside an opaque checkpoint. */
+export const COMPACTION_CHECKPOINT_CONTEXT_EDITED = "checkpoint-context-edited" as const;
+
 export type UnprojectedCompactionReason =
+	| typeof COMPACTION_CHECKPOINT_CONTEXT_EDITED
 	| typeof COMPACTION_PROJECTION_UNAVAILABLE
 	| typeof COMPACTION_SESSION_CONTEXT_UNAVAILABLE
 	| typeof COMPACTION_CHECKPOINT_PROVENANCE_UNAVAILABLE
