@@ -19,6 +19,7 @@ import {
 import { routeContextNamespaceToolMessage } from "./context-management/namespace-tools";
 import { loadHistoryNotesThreadHint } from "./context-management/history-notes";
 import { CodexContextWindowManager } from "./context-management/window-manager";
+import { ManagedManualCompact } from "./context-management/manual-compact";
 import {
 	BULK_CLIFF_RATIO,
 	decideBulkCliffAction,
@@ -110,6 +111,7 @@ type CompactionDependencies = {
 	remoteCompact: typeof executeRemoteV2Compaction;
 	nativeFallback: typeof runNativeFallbackCompaction;
 	contextWindows: CodexContextWindowManager;
+	manualCompact?: ManagedManualCompact;
 	/** Test seam for the same ordered projection exposed by the Pi host patch. */
 	projectCompactionContext?: CompactionContextProjection;
 	piContextHookPatch: PiContextHookPatchResult;
@@ -599,6 +601,10 @@ async function handleSessionBeforeCompact(
 		if (await remoteContextActive(ctx, config)) {
 			try {
 				dependencies.contextWindows.synchronize(ctx);
+				if (event.reason === "manual" && dependencies.manualCompact && !dependencies.manualCompact.isMaintenance) {
+					await dependencies.manualCompact.request(event, ctx, resolved);
+					return { cancel: true };
+				}
 				return dependencies.contextWindows.prepareCompaction(event);
 			} catch {
 				notifyRemoteContextFailure(ctx, "malformed-window-state");
@@ -783,6 +789,7 @@ async function handleWindowBulk(
 	loadConfig: typeof loadToolkitConfig,
 	trigger: "model-switch" | "turn-end",
 	resolved = contextOperation(loadConfig, ctx),
+	beginMaintenance?: () => () => void,
 ): Promise<void> {
 	requireContextPolicy(resolved, ctx);
 	const compaction = resolved.config.compaction;
@@ -830,11 +837,16 @@ async function handleWindowBulk(
 
 	notifyWarning(ctx, `${gap} to ${modelKey}, past ${Math.round(BULK_CLIFF_RATIO * 100)}% of its window; compacting the retired windows first.`);
 	if (typeof ctx.compact !== "function") return;
-	ctx.compact({
-		onError: (error: Error) => {
-			notifyWarning(ctx, `automatic boundary compaction failed: ${error.message}`);
-		},
-	});
+	const done = beginMaintenance?.();
+	try {
+		ctx.compact({
+			onComplete: () => done?.(),
+			onError: (error: Error) => {
+				done?.();
+				notifyWarning(ctx, `automatic boundary compaction failed: ${error.message}`);
+			},
+		});
+	} catch (error) { done?.(); throw error; }
 }
 
 async function handleContextInternal(
@@ -1169,12 +1181,14 @@ export default function registerCompactionExtension(
 	const contextWindows = overrides.contextWindows ?? new CodexContextWindowManager((ctx, signal, gatewayModels) =>
 		loadHistoryNotesThreadHint(ctx, signal, gatewayModels)
 	);
+	const manualCompact = new ManagedManualCompact(pi, contextWindows);
 	const dependencies: CompactionDependencies = {
-		loadConfig,
 		remoteCompact: executeRemoteV2Compaction,
 		nativeFallback: runNativeFallbackCompaction,
 		contextWindows,
 		...overrides,
+		manualCompact,
+		loadConfig: () => manualCompact.snapshot ?? loadConfig(),
 		piContextHookPatch: overrides.piContextHookPatch ?? piContextHookPatch,
 	};
 	let tools!: ReturnType<typeof registerContextManagementTools>;
@@ -1193,6 +1207,8 @@ export default function registerCompactionExtension(
 			assertConfigValid(resolved, "context", "compatibility");
 			return { active: await isContextRuntimeActive(ctx, resolved.config.compaction), gatewayModels: resolved.gatewayModelKeys };
 		},
+		undefined,
+		manualCompact,
 	);
 	const remoteContextActive: RemoteContextActive = isContextRuntimeActive;
 	const syncTools = async (
@@ -1233,6 +1249,7 @@ export default function registerCompactionExtension(
 	pi.on("session_start", async (_event, ctx) => {
 		const resolved = contextOperation(dependencies.loadConfig, ctx);
 		const syncOutcome = await syncTools(ctx, ctx.model, { notifyWindowFailure: true }, resolved);
+		await manualCompact.recover(ctx);
 		const active = syncOutcome.eligible && syncOutcome.toolsSynced && syncOutcome.windowInitialized;
 		const { source } = resolved;
 		const warnings = resolved.issues.map((issue) => `${issue.path}: ${issue.code}`);
@@ -1291,10 +1308,17 @@ export default function registerCompactionExtension(
 		}
 	});
 
-	pi.on("context", (event, ctx) => handleContext(event, ctx, pi, dependencies.loadConfig, contextWindows, remoteContextActive));
+	pi.on("context", (event, ctx) => {
+		manualCompact.guardRequest(ctx);
+		return handleContext(event, ctx, pi, dependencies.loadConfig, contextWindows, remoteContextActive);
+	});
 	pi.on("session_before_compact", (event, ctx) => handleSessionBeforeCompact(event, ctx, dependencies, remoteContextActive));
 	pi.on("session_compact", (event, _ctx) => contextWindows.recordCompaction(event.compactionEntry.details));
-	pi.on("session_shutdown", () => {
+	pi.on("session_compact_failed", async (event, ctx) => {
+		if (event.reason === "manual" && !manualCompact.isMaintenance) await manualCompact.compactFailed(ctx);
+	});
+	pi.on("session_shutdown", async (_event, ctx) => {
+		await manualCompact.shutdown(ctx);
 		contextWindowReady = false;
 		contextWindows.reset();
 		tools.reset();
@@ -1302,9 +1326,11 @@ export default function registerCompactionExtension(
 	pi.on("agent_settled", async (_event, ctx) => {
 		// Idle: no retry, compaction, or queued continuation is left running, so this is the
 		// only safe place to spend a model call on the user's behalf.
-		await handleWindowBulk(ctx, contextWindows, dependencies.loadConfig, "turn-end");
+		if (await manualCompact.settled(ctx)) return;
+		await handleWindowBulk(ctx, contextWindows, dependencies.loadConfig, "turn-end", undefined, () => manualCompact.beginMaintenance());
 	});
 	pi.on("model_select", async (event, ctx) => {
+		manualCompact.modelSelected(event.model, ctx);
 		// Switching into a covered model mid-session must open the window
 		// lifecycle immediately: without an identity the request rewrite skips
 		// window metadata, the backend never ingests those turns, and the first
@@ -1314,12 +1340,24 @@ export default function registerCompactionExtension(
 		await syncTools(ctx, event.model, { notifyWindowFailure: true }, resolved);
 		// The switch itself is the moment the durable transcript changes consumer, and the
 		// session is idle here, so the close-out must happen now rather than mid-turn.
-		await handleWindowBulk(ctx, contextWindows, dependencies.loadConfig, "model-switch", resolved);
+		if (!manualCompact.busy) await handleWindowBulk(ctx, contextWindows, dependencies.loadConfig, "model-switch", resolved, () => manualCompact.beginMaintenance());
 	});
 	pi.on("before_agent_start", async (_event, ctx) => {
 		await syncTools(ctx, ctx.model, { notifyWindowFailure: true });
 	});
-	pi.on("before_provider_request", (event, ctx) => handleBeforeProviderRequest(event, ctx, dependencies.loadConfig, contextWindows, remoteContextActive));
+	pi.on("thinking_level_select", (event, ctx) => manualCompact.thinkingSelected(event.level, ctx));
+	pi.on("message_start", (event) => manualCompact.messageStarted(event.message));
+	pi.on("turn_end", (_event, ctx) => manualCompact.turnEnded(ctx));
+	pi.on("tool_call", (event) => manualCompact.guardTool(event.toolName));
+	pi.on("session_tree", async (_event, ctx) => {
+		contextWindows.synchronize(ctx);
+		await manualCompact.recover(ctx);
+		await syncTools(ctx);
+	});
+	pi.on("before_provider_request", (event, ctx) => {
+		manualCompact.guardRequest(ctx);
+		return handleBeforeProviderRequest(event, ctx, dependencies.loadConfig, contextWindows, remoteContextActive);
+	});
 	pi.on("before_provider_headers", async (event, ctx) => {
 		const resolved = contextOperation(dependencies.loadConfig, ctx);
 		requireContextPolicy(resolved, ctx);

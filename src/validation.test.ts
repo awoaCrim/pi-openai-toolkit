@@ -416,18 +416,24 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 			? undefined
 			: (messages) => messages,
 	});
-	// Pi owns scheduling. The compaction extension only supplies/replays results.
-	// `agent_settled` is the one idle hook it may use, and only for the leave-managed-mode
-	// close-out: a compaction started inside turn processing would abort that turn.
+	// Pi owns scheduling. Managed manual handoffs use its public cancellation,
+	// delivery and settled boundaries; ordinary compaction still supplies/replays
+	// results without patching the scheduler.
 	expect([...handlers.keys()]).toEqual([
 		"session_start",
 		"context",
 		"session_before_compact",
 		"session_compact",
+		"session_compact_failed",
 		"session_shutdown",
 		"agent_settled",
 		"model_select",
 		"before_agent_start",
+		"thinking_level_select",
+		"message_start",
+		"turn_end",
+		"tool_call",
+		"session_tree",
 		"before_provider_request",
 		"before_provider_headers",
 		"message_end",

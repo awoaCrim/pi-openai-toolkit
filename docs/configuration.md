@@ -57,7 +57,7 @@ Place `context` under `defaults` or an exact `models` entry.
 | Relative field | Default | Contract |
 | --- | --- | --- |
 | `mode` | `"remote-compaction"` | `"pi"` relinquishes Toolkit context management; `"remote-compaction"` uses the eligible Responses checkpoint path; `"remote-windows"` selects Codex windows where supported. |
-| `remoteCompaction.model` | `null` | Exact producer reference; `null` uses the active model. It must share the effective base URL required by the existing compaction path. |
+| `remoteCompaction.model` | `null` | Exact producer reference; `null` uses the active model. In `remote-compaction`, it selects the synthetic checkpoint producer on the same effective base URL. In active `remote-windows`, manual `/compact` temporarily selects it for notes checkpoint duty on the same backend/account. |
 | `remoteCompaction.inputSource` | `"legacy"` | `"legacy"` preserves session/raw-branch input; `"pi-context-hook"` opts into Pi's ordered context projection. Checkpoint provenance must match. |
 | `remoteCompaction.allowContinuityBreak` | `false` | Allow restarting from Pi context after a foreign compaction entry. It does not make malformed opaque checkpoints replayable. |
 | `remoteCompaction.apis` | `["openai-responses", "openai-codex-responses"]` | May narrow this set; `[]` permits no remote-compaction API. Unsupported entries are errors. |
@@ -67,7 +67,13 @@ Place `context` under `defaults` or an exact `models` entry.
 | `remoteWindows.leaveManagedMode` | `"warn"` | `"compact"` also requests a close-out when retired history exceeds 80% of the next model's window and compaction can finish. Print mode remains warning-only; turn-end close-out requires a queued trim. |
 | `remoteWindows.reminderThresholdPercent` | `5` | Integer 0-100. `0` disables both the once-per-window reminder and exhausted-window fallback. |
 
-Native Codex eligibility derives from the actual Pi provider/API. Gateways additionally need the exact transport opt-in below. `remote-windows` retains the compaction chain for models outside window capability. A configured window model whose activation fails does not silently receive a summary fallback. The rollover notes gate, durable history, producer/consumer identities, and checkpoint provenance are unchanged. See [Toolkit internals](internals.md).
+Native Codex eligibility derives from the actual Pi provider/API. Gateways additionally need the exact transport opt-in below. `remote-windows` retains the compaction chain for models outside window capability. A configured window model whose activation fails does not silently receive a summary fallback. Normal `new_context` keeps its persisted-notes, duplicate and cooldown gates. Synthetic Remote V2 producer/consumer identity and checkpoint provenance are unchanged. See [Toolkit internals](internals.md).
+
+In active `remote-windows`, `/compact [instructions]` starts checkpoint duty rather than producing a summary. The selected model must authenticate to the same native backend/account or gateway credential/affinity domain, fit the projected window plus its output reserve, and retain the required permitted context tools. Invalid or unsuitable explicit targets are refused without switching to a fallback model. If Auto Mode is engaged, the target must also be eligible for its gate. The entire handoff uses the initiating context-policy snapshot; no config or global Pi defaults are rewritten.
+
+Only a new persisted successful notes write/append after the handoff and the latest delivered user message authorizes its rollover. After the exact target marker is durable, Toolkit restores the original model/thinking before new-window inference and asks it to read the receipt first. Failure or cancellation restores an owned selection; a later user selection takes priority. Failed restoration blocks further handoff requests until selection/auth is repaired. Reload can recover selection, but does not automatically restart inference.
+
+The SDK native compact call reports its intentional cancellation; the visible handoff is a separate agent operation. Pi's pre-hook “nothing to compact” and “already compacted” outcomes remain. Automatic threshold/overflow compaction and internal pending-trim maintenance do not initiate checkpoint duty. `nativeFallback.model` keeps its existing summary-model meaning.
 
 ---
 
@@ -124,7 +130,7 @@ Place `autoMode` under `defaults` or an exact model. `available` permits engagem
 | `circuitBreaker.recentDenials` | `10` | Integer 0-100; `0` disables this limit. |
 | `circuitBreaker.windowSize` | `50` | Integer 1-200, recent-verdict window size. |
 
-Reviewer and classifier references are not active-session overrides. Classifier scores, denial history, and human decisions never become config entries.
+Reviewer and classifier references are not active-session overrides. Classifier scores, denial history, and human decisions never become config entries. The reviewer and its read-only evidence calls share one cancellable deadline, including dependencies that ignore abort. Denial history resets on actual delivery of a user message, including identical queued messages, not on enqueue or an ordinary tool continuation. Pre-scores are bound to a full structured authorization fingerprint; the bounded review transcript prioritizes recent user instructions and reports omissions.
 
 ---
 

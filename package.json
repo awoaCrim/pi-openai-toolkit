@@ -1,6 +1,6 @@
 {
   "name": "pi-openai-toolkit",
-  "version": "0.15.1",
+  "version": "0.16.0",
   "private": false,
   "type": "module",
   "engines": {
@@ -63,6 +63,7 @@
     "src/context-management/window-request.ts",
     "src/context-management/window-bulk.ts",
     "src/context-management/window-manager.ts",
+    "src/context-management/manual-compact.ts",
     "src/context-management/codex-provider.ts",
     "src/context-management/history-notes.ts",
     "src/context-management/tools.ts",
@@ -80,6 +81,7 @@
     "src/auto-mode/extension.ts",
     "src/auto-mode/tool-review-tui.ts",
     "src/auto-mode/policy.ts",
+    "src/auto-mode/model-selection-guard.ts",
     "src/auto-mode/prompt.ts",
     "src/auto-mode/transcript.ts",
     "src/auto-mode/reviewer.ts",

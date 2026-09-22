@@ -48,6 +48,8 @@ interface StartContextWindowOptions {
 	trimPreviousWindow: boolean;
 	/** Captured with the tool activation policy, before any awaited backend work. */
 	gatewayModels?: readonly string[];
+	/** Persist an owned handoff's exact target before the marker can be queued. */
+	beforeSchedule?: (identity: ContextWindowIdentity) => void;
 }
 
 type ThreadHintLoader = (
@@ -75,6 +77,8 @@ export class CodexContextWindowManager {
 	private identity: ContextWindowIdentity | undefined;
 	private sessionId: string | undefined;
 	private restoredMarkerId: string | undefined;
+	private restoredCompactionId: string | undefined;
+	private branchStateInvalidated = false;
 	private readonly budget = new ContextWindowBudget();
 	private pendingRollover: PendingRollover | undefined;
 	private trimPendingWindowId: string | undefined;
@@ -141,6 +145,8 @@ export class CodexContextWindowManager {
 		this.identity = undefined;
 		this.sessionId = undefined;
 		this.restoredMarkerId = undefined;
+		this.restoredCompactionId = undefined;
+		this.branchStateInvalidated = false;
 		this.budget.reset();
 		this.trimPendingWindowId = undefined;
 	}
@@ -152,6 +158,7 @@ export class CodexContextWindowManager {
 		this.sessionId = sessionId;
 		for (const entry of entries) {
 			if (entry.type === "compaction") {
+				this.restoredCompactionId = entry.id;
 				this.recordCompaction(entry.details);
 				continue;
 			}
@@ -169,6 +176,9 @@ export class CodexContextWindowManager {
 			}
 			this.budget.restore(details.kind, details.currentWindowId);
 		}
+		// recordCompaction may invalidate the cache while replaying entries; the
+		// completed replay already reconciled those acknowledgments with this branch.
+		this.branchStateInvalidated = false;
 		this.retireSatisfiedOrStalePending(entries, sessionId);
 	}
 
@@ -178,7 +188,16 @@ export class CodexContextWindowManager {
 		const sessionId = ctx.sessionManager.getSessionId();
 		this.retireSatisfiedOrStalePending(entries, sessionId);
 		const latestMarkerId = findLatestContextMarkerId(entries, sessionId);
-		if (this.sessionId !== sessionId || this.restoredMarkerId !== latestMarkerId) {
+		let latestCompactionId: string | undefined;
+		for (let index = entries.length - 1; index >= 0; index--) {
+			if (entries[index]!.type === "compaction") {
+				latestCompactionId = entries[index]!.id;
+				break;
+			}
+		}
+		// Hook-provided compactions may have no success callback. The persisted
+		// branch also detects navigation before/after a commit with the same marker.
+		if (this.branchStateInvalidated || this.sessionId !== sessionId || this.restoredMarkerId !== latestMarkerId || this.restoredCompactionId !== latestCompactionId) {
 			this.restore(entries, sessionId);
 		}
 	}
@@ -321,6 +340,7 @@ export class CodexContextWindowManager {
 				}
 			}
 			if (options.signal?.aborted) throw new Error("Remote context rollover was aborted");
+			options.beforeSchedule?.(next);
 			this.sendWindowMessage(pi, ctx, next, options, threadHint, checkpoint);
 			return true;
 		} catch (error) {
@@ -415,17 +435,20 @@ export class CodexContextWindowManager {
 			return { cancel: true };
 		}
 		const compaction = this.createCompaction(event);
-		// Consume the trim synchronously. Pi does not re-fire session_compact
-		// for hook-written entries, so relying on that event leaks the pending
-		// id and lets every later compaction pass this gate again, writing an
-		// endless run of no-op boundaries for the same window.
-		this.trimPendingWindowId = undefined;
+		// Preparation is only a proposal: Pi may abort before appending it.
+		// synchronize() consumes the trim after observing a durable compaction;
+		// recordCompaction() also handles hosts that emit a success callback.
 		return { compaction };
 	}
 
 	recordCompaction(details: unknown): void {
 		if (!isContextWindowCompactionDetails(details)) return;
-		if (details.windowId === this.trimPendingWindowId) this.trimPendingWindowId = undefined;
+		if (this.trimPendingWindowId !== undefined && details.windowId === this.trimPendingWindowId) {
+			this.trimPendingWindowId = undefined;
+			// The callback supplies no branch identity. Force durable reconciliation
+			// even if navigation returns to the cached pre-commit branch before sync.
+			this.branchStateInvalidated = true;
+		}
 	}
 
 	createCompaction(event: SessionBeforeCompactEvent): CompactionResult<ContextWindowCompactionDetails> {
@@ -554,9 +577,12 @@ export function hasAssistantUsageSinceWindowBoundary(
 export function findLatestNotesCheckpointSinceBoundary(
 	entries: readonly SessionEntry[],
 	sessionId?: string,
+	afterEntryId?: string,
 ): NotesCheckpointReceipt | undefined {
-	const boundaryIndex = findLatestWindowBoundaryIndex(entries, sessionId);
-	if (boundaryIndex < 0) return undefined;
+	const windowBoundaryIndex = findLatestWindowBoundaryIndex(entries, sessionId);
+	const afterIndex = afterEntryId === undefined ? -1 : entries.findIndex((entry) => entry.id === afterEntryId);
+	if (windowBoundaryIndex < 0 || (afterEntryId !== undefined && afterIndex < 0)) return undefined;
+	const boundaryIndex = Math.max(windowBoundaryIndex, afterIndex);
 	const checkpointCalls = new Map<string, NotesCheckpointReceipt>();
 	let latest: NotesCheckpointReceipt | undefined;
 	for (let index = boundaryIndex + 1; index < entries.length; index += 1) {

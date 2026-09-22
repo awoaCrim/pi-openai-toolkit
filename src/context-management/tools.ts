@@ -8,7 +8,7 @@ import {
 	NOTES_ACTION_FIELDS,
 	NOTES_ENDPOINTS,
 } from "./history-notes";
-import type { HistoryAction, NotesAction } from "./types";
+import type { ContextWindowIdentity, HistoryAction, NotesAction } from "./types";
 
 const EMPTY_PARAMETERS = Type.Object({}, { additionalProperties: false });
 
@@ -98,11 +98,16 @@ export type ContextManagementTools = {
 export type ContextOperationPolicy = { active: boolean; gatewayModels: readonly string[] };
 type ContextActivity = (ctx: ExtensionContext) => Promise<boolean | ContextOperationPolicy> | boolean | ContextOperationPolicy;
 
+export interface ContextRolloverHandoff {
+	prepare(ctx: ExtensionContext): { triggerTurn: false; beforeSchedule: (identity: ContextWindowIdentity) => void } | undefined;
+}
+
 export function createContextManagementTools(
 	pi: ExtensionAPI,
 	manager: CodexContextWindowManager,
 	isActive: ContextActivity,
 	getGatewayModels: () => readonly string[] = () => [],
+	handoff?: ContextRolloverHandoff,
 ): ContextManagementTools {
 	const assertActive = async (ctx: ExtensionContext): Promise<readonly string[]> => {
 		const policy = await isActive(ctx);
@@ -139,11 +144,13 @@ export function createContextManagementTools(
 			if (!manager.hasNotesCheckpointSinceBoundary(ctx)) {
 				throw new Error(NEW_CONTEXT_CHECKPOINT_REQUIRED_MESSAGE);
 			}
+			const scheduling = handoff?.prepare(ctx);
 			const started = await manager.startNewWindow(pi, ctx, {
 				triggerTurn: true,
 				signal,
 				trimPreviousWindow: true,
 				gatewayModels,
+				...scheduling,
 			});
 			return {
 				content: [{
@@ -153,6 +160,7 @@ export function createContextManagementTools(
 						: "A new context window is already scheduled.",
 				}],
 				details: { started },
+				...(started && scheduling ? { terminate: true } : {}),
 			};
 		},
 	};
@@ -337,9 +345,10 @@ export function registerContextManagementTools(
 	manager: CodexContextWindowManager,
 	isActive: ContextActivity,
 	getGatewayModels?: () => readonly string[],
+	handoff?: ContextRolloverHandoff,
 ): ContextManagementToolController {
 	const controller = new ContextManagementToolController(pi);
-	controller.register(createContextManagementTools(pi, manager, isActive, getGatewayModels));
+	controller.register(createContextManagementTools(pi, manager, isActive, getGatewayModels, handoff));
 	return controller;
 }
 

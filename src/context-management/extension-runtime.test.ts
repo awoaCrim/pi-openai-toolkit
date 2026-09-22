@@ -1,6 +1,9 @@
 import { v2Fixture } from "../config/test-helpers";
 import { expect, test } from "bun:test";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { CompactionResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { CODEX_CONTEXT_WINDOW_MESSAGE_TYPE } from "./messages";
 import { DEFAULT_COMPACTION_CONFIG, DEFAULT_TOOLKIT_CONFIG } from "../types";
 import extension from "../extension-runtime";
 
@@ -333,6 +336,61 @@ test("remote context owns Codex compaction and activates only its four tools", a
 
 	await handlers.get("session_shutdown")?.({} as never, makeContext());
 	expect(active).toEqual(["read"]);
+});
+
+test("registered compaction callback restores trim after navigating before the commit without synchronization", async () => {
+	const handlers = new Map<string, (event: never, ctx: never) => unknown>();
+	const registered: Array<{ name: string }> = [];
+	let active = ["read"];
+	const pi = {
+		on: (name: string, handler: (event: never, ctx: never) => unknown) => handlers.set(name, handler),
+		registerTool: (tool: { name: string }) => registered.push(tool),
+		getAllTools: () => registered,
+		getActiveTools: () => active,
+		setActiveTools: (names: string[]) => { active = names; },
+		sendMessage: () => { throw new Error("persisted window must not initialize again"); },
+	} as unknown as ExtensionAPI;
+	extension(pi, {
+		loadConfig: () => ({
+			config: {
+				...DEFAULT_TOOLKIT_CONFIG,
+				compaction: { ...DEFAULT_COMPACTION_CONFIG, contextManagement: "remote", artifactRoot: "/tmp" },
+			},
+			warnings: [],
+		}),
+		remoteCompact: async () => { throw new Error("window trim must not call a provider"); },
+	} as never);
+	const sm = SessionManager.inMemory("/synthetic-project");
+	sm.appendMessage({ role: "user", content: "old task", timestamp: 1 });
+	const marker = sm.appendCustomMessageEntry(CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, "rollover", true, {
+		protocol: 1, id: "marker", sessionId: sm.getSessionId(),
+		contextManagement: {
+			protocol: 1, kind: "window", firstWindowId: "w1", currentWindowId: "w2",
+			windowNumber: 1, trimPreviousWindow: true,
+		},
+	});
+	const beforeCommit = sm.appendMessage(fauxAssistantMessage("work after rollover"));
+	const ctx = { ...makeContext(), sessionManager: sm } as never;
+	await handlers.get("session_start")!({} as never, ctx);
+	// Automatic trim maintenance still uses the persisted-boundary contract.
+	const prepare = () => handlers.get("session_before_compact")!({
+		signal: new AbortController().signal,
+		reason: "threshold",
+		branchEntries: sm.getBranch(),
+		preparation: { firstKeptEntryId: marker, tokensBefore: 100, messagesToSummarize: [], turnPrefixMessages: [] },
+	} as never, ctx);
+	const proposal = await prepare() as { compaction: CompactionResult };
+	expect(proposal.compaction?.firstKeptEntryId).toBe(marker);
+	// No append means cancellation: invoking the actual hook again can retry.
+	expect(await prepare()).toEqual(proposal);
+	const { summary, firstKeptEntryId, tokensBefore, details } = proposal.compaction;
+	const compactId = sm.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, true);
+	await handlers.get("session_compact")!({ compactionEntry: sm.getEntry(compactId) } as never, ctx);
+	// No context/model hook runs between acknowledgment and branch navigation.
+	sm.branch(beforeCommit);
+	expect(await prepare()).toEqual(proposal);
+	sm.branch(compactId);
+	expect(await prepare()).toEqual({ cancel: true });
 });
 
 test("history and notes tools carry usage guidance in promptGuidelines", async () => {

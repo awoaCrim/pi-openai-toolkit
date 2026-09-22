@@ -1,6 +1,6 @@
 # pi-openai-toolkit
 
-Add Codex context windows, Responses compaction, hosted tools, and reviewed tool calls to Pi.
+Add Codex context windows, Responses compaction, hosted tools, and tool-call review to Pi.
 
 [![npm version](https://img.shields.io/npm/v/pi-openai-toolkit.svg)](https://www.npmjs.com/package/pi-openai-toolkit)
 [![License: MIT](https://img.shields.io/npm/l/pi-openai-toolkit.svg)](LICENSE)
@@ -11,39 +11,37 @@ Add Codex context windows, Responses compaction, hosted tools, and reviewed tool
 
 | Feature | Use it to |
 | --- | --- |
-| Codex Remote Context | Use the adapted Codex window protocol to start a new context window and retrieve earlier windows with `history`. |
-| Remote Compaction v2 | Continue an eligible Responses session with an encrypted server checkpoint. |
-| Web Search routes | Choose local `pi-web-access`, hosted Responses `web_search`, or experimental CPA standalone `web_run` per exact model. |
-| Image generation | Call the hosted Responses image tool to generate images or edit explicitly supplied local references. |
-| Tool-call review | Use Toolkit's approval gate to ask a reviewer model whether selected tool calls may run. |
+| Codex Remote Context | Start new windows with the adapted Codex protocol and retrieve earlier work through `history`. |
+| Remote Compaction v2 | Continue Responses sessions with encrypted server checkpoints. |
+| Web Search | Choose local `pi-web-access`, Responses `web_search`, or experimental CPA `web_run` per model. |
+| Image generation | Generate or edit images with the hosted Responses image tool. |
+| Tool-call review | Have a reviewer model approve selected calls through Toolkit's approval gate. |
 
-The package uses Pi's existing model, authentication, and session configuration. It does not add a provider or model.
+The package uses Pi's existing models, authentication, and sessions. It does not add a provider or model.
 
 ## Install
 
-Requires Pi 0.85.1 or newer and Node.js 22.19.0 or newer.
+Requires Pi 0.85.1+ and Node.js 22.19.0+.
 
 ```bash
 pi install npm:pi-openai-toolkit
 ```
 
-Use `--local` to install the extension in the current project. Toolkit policy is still global; there are no project or environment policy overlays.
-
-Without a config file, Remote Compaction v2 is enabled for eligible models, Remote Context windows are off, search is unmanaged, image generation is disabled, and Auto Mode is unavailable. These defaults do not verify backend support.
-
-The only Toolkit config file is:
+Add `--local` for a project-local installation. Toolkit configuration is global in either case:
 
 `~/.pi/agent/extensions/pi-openai-toolkit/config.json`
 
-All JSON examples below except the Pi model-registration example use **configuration schema v2**. Create the file and parent directory if absent. Merge examples into an existing v2 document, keeping its other settings. An unversioned legacy file remains supported: do not add v2 fields to it or overwrite it with an example. First use `/toolkit-config migration-preview`; the [configuration reference](docs/configuration.md) explains the review and installed-version checks. Loading config and previewing migration never rewrite the source file.
+Create the file and parent directory if needed. Merge the Toolkit examples below into an existing **schema v2** config; do not replace unrelated settings. For an unversioned legacy config, run `/toolkit-config migration-preview` first. See the [migration guide](docs/configuration.md#legacy-compatibility-and-migration).
+
+By default, eligible models use Remote Compaction v2. Remote Context windows, image generation, and Auto Mode are off; search is unmanaged. Backend support is still required.
 
 ## Quick start: enable Remote Context
 
-This section is for Codex-style context windows. For search, images, or tool-call review only, skip to [Common tasks](#common-tasks).
+For search, images, or tool-call review only, skip to [Common tasks](#common-tasks).
 
 ### Use Pi's built-in Codex provider
 
-You must already be signed in to Pi's built-in `openai-codex` provider. Create or merge this v2 Toolkit config:
+Sign in to Pi's `openai-codex` provider, then add this Toolkit config:
 
 ```json
 {
@@ -54,19 +52,24 @@ You must already be signed in to Pi's built-in `openai-codex` provider. Create o
 }
 ```
 
-Start Pi with a model from your existing Codex catalog:
+Start Pi with a model ID from your Codex catalog:
 
 ```bash
 pi --model openai-codex/<model-id>
 ```
 
-Replace `<model-id>` with the ID shown by your Pi setup. The session is activated when `new_context`, `get_context_remaining`, `history`, and `notes` appear. This verifies activation, not a completed backend round trip.
+Look for `new_context`, `get_context_remaining`, `history`, and `notes`. Their presence confirms activation, not backend compatibility. Earlier windows stay accessible through `history` without being loaded into every request.
 
 ### Use a compatible gateway
 
-This route requires `openai-responses` and a gateway that preserves Remote Context's Codex protocol fields. A successful ordinary chat request does not prove Remote Context compatibility.
+The gateway must support `openai-responses` and the Codex Remote Context protocol. Ordinary chat support is not enough.
 
-If `~/.pi/agent/models.json` already registers a compatible model, skip registration and set Toolkit's exact model override below. Otherwise, add or merge this Pi provider entry. Replace the provider name, URL, environment variable, and model values with your setup. The numeric limits are examples, not project defaults.
+If your model is already registered in `~/.pi/agent/models.json`, skip the registration example.
+
+<details>
+<summary>Register a gateway model in Pi</summary>
+
+Merge this into Pi's models file. Replace the provider name, URL, key variable, model ID, and limits with your setup; the numbers are examples.
 
 ```json
 {
@@ -88,19 +91,23 @@ If `~/.pi/agent/models.json` already registers a compatible model, skip registra
 }
 ```
 
-Set the referenced key before starting Pi. In PowerShell:
+Set the key in PowerShell:
 
 ```powershell
 $env:MY_GATEWAY_KEY = "replace-with-your-gateway-key"
 ```
 
-In a POSIX shell:
+Or in a POSIX shell:
 
 ```bash
 export MY_GATEWAY_KEY="replace-with-your-gateway-key"
 ```
 
-Use the same terminal to start Pi. In the Toolkit config, make the key exactly match the registered provider and model ID:
+Start Pi from the same terminal.
+
+</details>
+
+Add the exact registered `provider/model-id` to Toolkit's config:
 
 ```json
 {
@@ -118,23 +125,23 @@ Use the same terminal to start Pi. In the Toolkit config, make the key exactly m
 pi --model my-gateway/gpt-5.6-luna
 ```
 
-Check for `new_context`, `get_context_remaining`, `history`, and `notes`. If absent, read the notification and check `/toolkit-config`, the exact model key, Pi API, credentials, and base URL. The transport setting opts into a protocol profile; it does not register a model or prove the backend supports it.
-
-Earlier windows remain retrievable through `history`, but are not all automatically inserted into the current context.
+Check for the same context tools listed above. If they are missing, use `/toolkit-config` and check the notification, model key, API, credentials, and URL.
 
 ## Common tasks
 
-### Continue a session with server-side compaction
+### Save work and switch windows with `/compact`
 
-Use `context.mode: "remote-compaction"` for the Responses compaction path (the default), or `"pi"` to relinquish Toolkit context management. Set `context.remoteCompaction.model` only when a separate model should produce the checkpoint. These fields belong under `defaults` or an exact `models` override.
+In an active Remote Context session, run `/compact` to save work to notes and enter a new window without a conversation summary. You can append instructions to the command.
 
-`context.remoteCompaction.inputSource` defaults to `"legacy"`: first compaction uses Pi's current session context, with event preparation as a last resort; recursion uses the raw branch tail. This preserves existing behavior but can diverge from provider-visible context when other extensions rewrite messages.
+To use a separate checkpoint model, set `context.remoteCompaction.model` under `defaults` or an exact model override. It must support Remote Context on the same backend/account; leaving it unset uses the current model. Toolkit restores your original model and thinking level before continuing. See [context settings and requirements](docs/configuration.md#context).
 
-Opt into `"pi-context-hook"` to use the ordered Pi context-hook projection. If that bridge is unavailable, compaction cancels rather than sending unprojected history. Checkpoints are source-specific; switching input sources requires a new checkpoint. See [protocol details](docs/internals.md#remote-compaction-v2-wire-contract).
+### Use server-side compaction
+
+Set `context.mode` to `"remote-compaction"` (the default) for encrypted Responses checkpoints, or `"pi"` to leave context management to Pi. Advanced input and fallback options are in the [configuration reference](docs/configuration.md#context).
 
 ### Choose a Web Search route
 
-Configure a global default and exact model overrides:
+Set a default route and override it for individual models:
 
 ```json
 {
@@ -150,16 +157,18 @@ Configure a global default and exact model overrides:
 }
 ```
 
-- `unmanaged` releases Toolkit ownership. It does not disable third-party search or all Internet access.
-- `local` preserves the original local `pi-web-access` tool state and removes conflicting hosted/standalone tools from provider payloads. It never activates a local tool that was inactive.
-- `hosted` replaces the local `web_search` function with the native Responses search tool and source annotations.
-- `standalone-alpha` deliberately opts into experimental CPA/Codex gateway search. It exposes sequential `web_run` and sends one isolated request per call to the provider-relative `/alpha/search`, using the current Pi model and credentials. The gateway must actually support that endpoint and capability; Toolkit does not probe or enable it.
+| Route | Behavior |
+| --- | --- |
+| `unmanaged` | Leave search to Pi and other extensions. |
+| `local` | Keep the existing local `pi-web-access` tools. |
+| `hosted` | Use Responses `web_search` with source annotations. |
+| `standalone-alpha` | Use experimental `web_run` on a CPA/Codex gateway that supports `/alpha/search`. |
 
-Exact overrides win over defaults. There are no patterns, inferred capabilities, or fallback between routes. Invalid selected policy blocks the affected operation instead of choosing another route. The legacy hosted model list remains readable, but its permissive failure behavior is not identical to explicit v2 `hosted`; migration preview flags that difference.
+Toolkit does not fall back between routes. See [search configuration](docs/configuration.md#web-search) for backend requirements.
 
 ### Generate an image
 
-Image generation requires a Responses session and may incur provider charges. Enable it globally:
+Requires a Responses session and may incur provider charges. Enable it with an image model your provider supports:
 
 ```json
 {
@@ -168,19 +177,17 @@ Image generation requires a Responses session and may incur provider charges. En
     "imageGeneration": {
       "enabled": true,
       "defaultModel": "gpt-image-2.5",
-      "allowedModels": ["gpt-image-2.5", "grok-imagine-image-2.0"]
+      "allowedModels": ["gpt-image-2.5"]
     }
   }
 }
 ```
 
-These are bare output-model IDs for the nested Responses `image_generation` tool. List order does not choose the default. `defaultModel` must belong to the nonempty `allowedModels` list; an optional one-call `model` must also be allowed. Invalid policy or a disallowed choice fails before authentication, reference upload, and paid dispatch. The provider must support the chosen model.
-
-`openai_generate_image` accepts text-to-image requests and edits using explicitly supplied local references. Image policy cannot be overridden per session model.
+Ask Pi to generate an image or edit explicitly supplied local references using `openai_generate_image`. The default model must be in `allowedModels`; image settings are global. See [image configuration](docs/configuration.md#images).
 
 ### Review tool calls automatically
 
-Make Auto Mode available to an exact model and choose its reviewer:
+Enable Auto Mode for a model and choose its reviewer:
 
 ```json
 {
@@ -196,38 +203,23 @@ Make Auto Mode available to an exact model and choose its reviewer:
 }
 ```
 
-`available` permits engagement; use `/auto on` or `--auto` to engage. `/auto off` explicitly disengages it. The default `side-effect` gate covers `bash`, `write`, `edit`, and configured extra tools; `gate: "all"` reviews every tool call. A reviewer timeout does not approve a call. Invalid configuration while engaged keeps a blocking gate until corrected or explicitly turned off.
-
-The TUI shows activation, review activity, and a footer status. Compatible Pi tool renderers also show per-call allowed, denied, blocked, or unreviewed states. If that renderer seam is unavailable, Toolkit warns once and retains the footer display. Reviewer, classifier, and circuit-breaker controls are in the [configuration reference](docs/configuration.md).
+Turn it on with `/auto on` or `--auto`, and off with `/auto off`. By default it reviews `bash`, `write`, `edit`, and configured extra tools; `gate: "all"` reviews every call. A reviewer timeout never approves a call. See [Auto Mode settings](docs/configuration.md#auto-mode).
 
 ## Common configuration
 
-The global file uses built-ins, then `defaults`, then exact `models["provider/model-id"]` overrides. Missing fields inherit; arrays replace; `false` and `0` are retained. Supported optional model references accept `null` to clear inheritance. Defaults are not master switches: an exact override can enable a feature whose default is disabled.
+Use `defaults` for shared settings and `models["provider/model-id"]` for exact model overrides. Toolkit reads only the global config file.
 
-| Field | Default | Use |
-| --- | --- | --- |
-| `defaults.context.mode` | `"remote-compaction"` | `"pi"`, `"remote-compaction"`, or `"remote-windows"`. |
-| `models[exact].compatibility.transport` | `"standard"` | Exact gateway opt-in with `"codex-gateway"`. |
-| `defaults.context.remoteCompaction.model` | `null` | Optional checkpoint producer. |
-| `defaults.context.remoteCompaction.inputSource` | `"legacy"` | Source-specific checkpoint input policy. |
-| `defaults.context.remoteWindows.reminderThresholdPercent` | `5` | `0` disables reminders and exhausted-window fallback. |
-| `defaults.webSearch.route` | `"unmanaged"` | Toolkit search ownership policy. |
-| `defaults.imageGeneration.enabled` | `false` | Global image-generation switch. |
-| `defaults.imageGeneration.defaultModel` | `"gpt-image-2.5"` | Explicit default output model. |
-| `defaults.imageGeneration.allowedModels` | `["gpt-image-2.5"]` | Allowed output models, global only. |
-| `defaults.autoMode.available` | `false` | Permission to engage tool review. |
-| `defaults.autoMode.gate` | `"side-effect"` | Selected side-effect tools or `"all"`. |
-| `defaults.autoMode.timeoutMs` | `30000` | Reviewer timeout in milliseconds. |
-| `diagnostics.level` | `"info"` | `"debug"` enables debug artifacts. |
-| `diagnostics.captureRequests` / `captureResponses` | `false` | Independent request/compact-response capture opt-ins. |
+| Command | Purpose |
+| --- | --- |
+| `/toolkit-config` | Show effective settings and their origins. |
+| `/toolkit-config validate` | Check for configuration errors. |
+| `/toolkit-config migration-preview` | Preview a legacy-to-v2 migration without writing files. |
 
-Use `/toolkit-config` for effective values and origins, `/toolkit-config validate` for document issues, and `/toolkit-config migration-preview` for a read-only legacy candidate. These commands require a UI and perform no network/auth lookup, tool activation, or file writes. Configuration selection does not verify backend support.
-
-Unknown v2 policy keys and malformed values produce visible scoped errors, independent of debug mode. Each public callback or tool execution uses one immutable snapshot across its awaited helpers; later operations reread the file. Separate Pi events are not one atomic transaction. See the [complete configuration reference](docs/configuration.md) and [editor schema](config.schema.json).
+These commands require Pi's interactive UI. See the [full configuration reference](docs/configuration.md), [editor schema](config.schema.json), and [implementation details](docs/internals.md).
 
 ## Development
 
-From the repository root, after dependencies are installed:
+After installing dependencies in the repository root:
 
 ```bash
 npm run typecheck

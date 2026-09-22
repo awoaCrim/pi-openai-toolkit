@@ -1,9 +1,7 @@
 import type {
-	Api,
 	AssistantMessage,
 	Context,
 	Message,
-	Model,
 	Tool,
 	ToolCall,
 } from "@earendil-works/pi-ai";
@@ -110,56 +108,64 @@ function toolCallBlocks(message: AssistantMessage): ToolCall[] {
 	return message.content.filter((block): block is ToolCall => block.type === "toolCall");
 }
 
-type CompletionAttempt = {
-	response?: AssistantMessage;
+type ReviewAttempt<T> = {
+	value?: T;
 	errorMessage?: string;
 	timedOut: boolean;
 	cancelled: boolean;
 };
 
-async function completeBefore(
-	registry: ReviewerRegistry,
-	model: Model<Api>,
-	context: Context,
-	deadlineAt: number,
-	callerSignal?: AbortSignal,
-): Promise<CompletionAttempt> {
-	const remaining = deadlineAt - Date.now();
-	if (remaining <= 0) {
-		return { timedOut: true, cancelled: Boolean(callerSignal?.aborted) };
-	}
-
+/** One deadline owns every model and evidence operation in this review. */
+function createReviewDeadline(timeoutMs: number, callerSignal?: AbortSignal) {
+	const deadlineAt = Date.now() + timeoutMs;
 	const controller = new AbortController();
 	let timedOut = false;
 	let cancelled = false;
 	const abortFromCaller = () => {
+		if (controller.signal.aborted) return;
 		cancelled = true;
 		controller.abort();
 	};
-	if (callerSignal?.aborted) {
-		cancelled = true;
-		controller.abort();
-	} else {
-		callerSignal?.addEventListener("abort", abortFromCaller);
-	}
-	const timer = setTimeout(() => {
+	const expire = () => {
+		if (controller.signal.aborted) return;
 		timedOut = true;
 		controller.abort();
-	}, remaining);
+	};
+	if (callerSignal?.aborted) abortFromCaller();
+	else callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+	const timer = setTimeout(expire, Math.max(0, timeoutMs));
 
-	try {
-		const response = await registry.complete(model, context, {
-			signal: controller.signal,
-			cacheRetention: "none",
-		});
-		return { response, timedOut, cancelled };
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		return { errorMessage: message, timedOut, cancelled };
-	} finally {
-		clearTimeout(timer);
-		callerSignal?.removeEventListener("abort", abortFromCaller);
-	}
+	return {
+		async run<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<ReviewAttempt<T>> {
+			if (Date.now() >= deadlineAt) expire();
+			if (controller.signal.aborted) return { timedOut, cancelled };
+			let onAbort!: () => void;
+			const aborted = new Promise<ReviewAttempt<T>>((resolve) => {
+				onAbort = () => resolve({ timedOut, cancelled });
+				controller.signal.addEventListener("abort", onAbort, { once: true });
+			});
+			try {
+				// Both settlement handlers stay attached after cancellation, so an
+				// uncooperative dependency cannot leak an unhandled rejection.
+				const pending = Promise.resolve().then(() => {
+					controller.signal.throwIfAborted();
+					return operation(controller.signal);
+				}).then(
+					(value): ReviewAttempt<T> => ({ value, timedOut, cancelled }),
+					(error): ReviewAttempt<T> => ({ errorMessage: error instanceof Error ? error.message : String(error), timedOut, cancelled }),
+				);
+				const result = await Promise.race([pending, aborted]);
+				if (Date.now() >= deadlineAt) expire();
+				return { ...result, timedOut, cancelled };
+			} finally {
+				controller.signal.removeEventListener("abort", onAbort);
+			}
+		},
+		dispose() {
+			clearTimeout(timer);
+			callerSignal?.removeEventListener("abort", abortFromCaller);
+		},
+	};
 }
 
 function failure(cause: ReviewFailureCause, reason: string): ReviewOutcome {
@@ -215,7 +221,6 @@ export async function requestToolReview(params: {
 	const maxRounds = Math.max(0, params.maxEvidenceRounds ?? 0);
 	const useTools = tools.length > 0 && maxRounds > 0;
 	const toolByName = new Map(tools.map((tool) => [tool.name, tool]));
-	const deadlineAt = Date.now() + params.timeoutMs;
 	const messages: Message[] = [
 		{
 			role: "user",
@@ -234,85 +239,70 @@ export async function requestToolReview(params: {
 		},
 	];
 
-	let evidenceRounds = 0;
-	for (let round = 0; ; round += 1) {
-		const forceAnswer = !useTools || round >= maxRounds;
-		const context: Context = {
-			systemPrompt: reviewerSystemPrompt(useTools),
-			messages,
-			...(forceAnswer ? {} : { tools: tools.map(toProviderTool) }),
-		};
+	const deadline = createReviewDeadline(params.timeoutMs, params.signal);
+	try {
+		let evidenceRounds = 0;
+		for (let round = 0; ; round += 1) {
+			const forceAnswer = !useTools || round >= maxRounds;
+			const context: Context = {
+				systemPrompt: reviewerSystemPrompt(useTools),
+				messages,
+				...(forceAnswer ? {} : { tools: tools.map(toProviderTool) }),
+			};
 
-		const attempt = await completeBefore(params.registry, model, context, deadlineAt, params.signal);
-		if (attempt.cancelled) {
-			return failure("cancelled", "Auto-mode review was cancelled before it finished.");
-		}
-		if (attempt.timedOut) {
-			return failure("timeout", `Auto-mode review timed out after ${params.timeoutMs}ms.`);
-		}
-		if (attempt.errorMessage) {
-			return failure("provider-error", attempt.errorMessage);
-		}
-		const response = attempt.response;
-		if (!response) {
-			return failure("provider-error", "Reviewer returned no message.");
-		}
-		if (response.stopReason === "error" || response.stopReason === "aborted") {
-			return failure(
-				"provider-error",
-				response.errorMessage ?? `Reviewer stopped with "${response.stopReason}".`,
-			);
-		}
+			const attempt = await deadline.run((signal) => params.registry.complete(model, context, { signal, cacheRetention: "none" }));
+			if (attempt.cancelled) {
+				return failure("cancelled", "Auto-mode review was cancelled before it finished.");
+			}
+			if (attempt.timedOut) {
+				return failure("timeout", `Auto-mode review timed out after ${params.timeoutMs}ms.`);
+			}
+			if (attempt.errorMessage) {
+				return failure("provider-error", attempt.errorMessage);
+			}
+			const response = attempt.value;
+			if (!response) {
+				return failure("provider-error", "Reviewer returned no message.");
+			}
+			if (response.stopReason === "error" || response.stopReason === "aborted") {
+				return failure(
+					"provider-error",
+					response.errorMessage ?? `Reviewer stopped with "${response.stopReason}".`,
+				);
+			}
 
-		const calls = toolCallBlocks(response);
-		if (forceAnswer || calls.length === 0) {
-			const verdict = parseReviewVerdict(firstTextBlock(response));
-			if (!verdict) {
-				return failure("invalid-output", "Reviewer did not return a readable allow/deny verdict.");
+			const calls = toolCallBlocks(response);
+			if (forceAnswer || calls.length === 0) {
+				const verdict = parseReviewVerdict(firstTextBlock(response));
+				if (!verdict) {
+					return failure("invalid-output", "Reviewer did not return a readable allow/deny verdict.");
+				}
+				return outcomeFromVerdict(verdict, reviewerModel, evidenceRounds);
 			}
-			return outcomeFromVerdict(verdict, reviewerModel, evidenceRounds);
-		}
 
-		messages.push(response);
-		evidenceRounds += 1;
-		for (const call of calls) {
-			const tool = toolByName.get(call.name);
-			if (!tool) {
-				messages.push(refusedToolResult(call, `Tool "${call.name}" is not available to the reviewer.`));
-				continue;
-			}
-			if (params.signal?.aborted) {
-				return failure("cancelled", "Auto-mode review was cancelled during investigation.");
-			}
-			try {
-				const text = await tool.execute(call.arguments, params.signal);
+			messages.push(response);
+			evidenceRounds += 1;
+			for (const call of calls) {
+				const tool = toolByName.get(call.name);
+				if (!tool) {
+					messages.push(refusedToolResult(call, `Tool "${call.name}" is not available to the reviewer.`));
+					continue;
+				}
+				const evidence = await deadline.run((signal) => tool.execute(call.arguments, signal));
+				if (evidence.cancelled) return failure("cancelled", "Auto-mode review was cancelled during investigation.");
+				if (evidence.timedOut) return failure("timeout", `Auto-mode review timed out after ${params.timeoutMs}ms.`);
 				messages.push({
 					role: "toolResult",
 					toolCallId: call.id,
 					toolName: call.name,
-					content: [{ type: "text", text: boundReviewText(text, 4_000) }],
-					isError: false,
-					timestamp: Date.now(),
-				});
-			} catch (error) {
-				messages.push({
-					role: "toolResult",
-					toolCallId: call.id,
-					toolName: call.name,
-					content: [
-						{
-							type: "text",
-							text: boundReviewText(
-								error instanceof Error ? error.message : String(error),
-								1_000,
-							),
-						},
-					],
-					isError: true,
+					content: [{ type: "text", text: boundReviewText(evidence.errorMessage ?? evidence.value ?? "", evidence.errorMessage ? 1_000 : 4_000) }],
+					isError: evidence.errorMessage !== undefined,
 					timestamp: Date.now(),
 				});
 			}
 		}
+	} finally {
+		deadline.dispose();
 	}
 }
 

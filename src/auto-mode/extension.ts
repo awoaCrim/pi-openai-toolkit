@@ -33,6 +33,7 @@ import {
 } from "./policy";
 import { requestToolReview, type EvidenceTool, type ReviewerRegistry } from "./reviewer";
 import { buildClassifierPrompt } from "./prompt";
+import { listenForProtectedSelection } from "./model-selection-guard";
 import { transcriptFromEntries } from "./transcript";
 import {
 	AUTO_MODE_COMMAND,
@@ -75,13 +76,13 @@ function textFromToolContent(content: unknown): string {
  * pre-score: once the authorization premise changes, the old score is meaningless.
  */
 function userAuthorizationVersion(entries: readonly { type: string; message?: unknown }[]): string {
-	const userText = entries
+	const userContent = entries
 		.filter((entry) => entry.type === "message")
 		.map((entry) => entry.message as { role?: string; content?: unknown } | undefined)
 		.filter((message): message is { role?: string; content?: unknown } => message?.role === "user")
-		.map((message) => textFromToolContent(message.content))
-		.join("\n");
-	return authorizationVersion(userText);
+		.map((message) => message.content);
+	// Display truncation must not change whether the authorization premise changed.
+	return authorizationVersion(JSON.stringify(userContent));
 }
 
 function evidenceToolsFor(cwd: string): EvidenceTool[] {
@@ -151,9 +152,19 @@ export function registerAutoModeExtension(
 	const tracker: ScoreTracker = createScoreTracker();
 
 	let callIndex = 0;
-	let scoringInFlight = false;
+	let scoringGeneration = 0;
+	let scoringController: AbortController | undefined;
+	let protectedSelection: string | undefined;
+	let stopSelectionListener: (() => void) | undefined;
 
-	function readConfig(ctx: ExtensionContext, model = ctx.model): ResolvedToolkitConfig {
+	function invalidateClassification(): void {
+		scoringGeneration += 1;
+		scoringController?.abort();
+		scoringController = undefined;
+		resetScoreTracker(tracker);
+	}
+
+	function readConfig(ctx: ExtensionContext, model: Parameters<typeof resolveToolkitConfig>[1] = ctx.model): ResolvedToolkitConfig {
 		const resolved = resolveToolkitConfig(loadConfig(), model);
 		notifyConfigIssues(ctx, resolved);
 		return resolved;
@@ -208,7 +219,7 @@ export function registerAutoModeExtension(
 	function disengage(ctx: ExtensionContext): void {
 		if (!runtime.engaged) return;
 		runtime.engaged = false;
-		resetScoreTracker(tracker);
+		invalidateClassification();
 		updateStatus(ctx);
 	}
 
@@ -329,7 +340,7 @@ export function registerAutoModeExtension(
 		config: AutoModeConfig,
 		completed: { toolName: string; toolInput: unknown },
 	): void {
-		if (!config.classifier.enabled || scoringInFlight) return;
+		if (!config.classifier.enabled || scoringController) return;
 		const modelSpec = config.classifier.model ?? config.reviewerModel;
 		if (!modelSpec) return;
 
@@ -337,7 +348,9 @@ export function registerAutoModeExtension(
 		const { text: transcript } = transcriptFromEntries(entries);
 		const authVersion = userAuthorizationVersion(entries as never);
 		const scoredAtCall = callIndex;
-		scoringInFlight = true;
+		const generation = scoringGeneration;
+		const controller = new AbortController();
+		scoringController = controller;
 
 		void classifyTrajectory({
 			registry: reviewerRegistry(ctx),
@@ -349,9 +362,10 @@ export function registerAutoModeExtension(
 				cwd: ctx.cwd,
 			}),
 			timeoutMs: config.classifier.timeoutMs,
-			signal: ctx.signal,
+			signal: ctx.signal ? AbortSignal.any([ctx.signal, controller.signal]) : controller.signal,
 		})
 			.then((result) => {
+				if (generation !== scoringGeneration || controller.signal.aborted) return;
 				if (result.kind === "failed") {
 					recordFailedCall(tracker, scoredAtCall);
 					return;
@@ -364,10 +378,10 @@ export function registerAutoModeExtension(
 				});
 			})
 			.catch(() => {
-				recordFailedCall(tracker, scoredAtCall);
+				if (generation === scoringGeneration && !controller.signal.aborted) recordFailedCall(tracker, scoredAtCall);
 			})
 			.finally(() => {
-				scoringInFlight = false;
+				if (generation === scoringGeneration) scoringController = undefined;
 			});
 	}
 
@@ -396,7 +410,7 @@ export function registerAutoModeExtension(
 				case "off":
 					runtime.engaged = false;
 					setGateOverride(runtime, auto, undefined);
-					resetScoreTracker(tracker);
+					invalidateClassification();
 					ctx.ui.notify("Auto mode off.", "info");
 					break;
 				case "all":
@@ -430,6 +444,12 @@ export function registerAutoModeExtension(
 	});
 
 	pi.on("session_start", (event, ctx) => {
+		stopSelectionListener?.();
+		stopSelectionListener = listenForProtectedSelection(pi, (target, sessionId) => {
+			if (ctx.sessionManager.getSessionId() !== sessionId || !runtime.engaged) return "inactive";
+			const policy = readConfig(ctx, target);
+			return !policy.invalidFeatures.includes("autoMode") && isAutoModeEligible(target, policy.config.autoMode) ? "allow" : "deny";
+		}, (owner) => { protectedSelection = owner; });
 		const resolved = readConfig(ctx);
 		const { config } = resolved;
 		toolReviewRenderer.clear();
@@ -447,7 +467,7 @@ export function registerAutoModeExtension(
 		}
 		setGateOverride(runtime, config.autoMode, undefined);
 		applyConfiguredGate(runtime, config.autoMode);
-		resetScoreTracker(tracker);
+		invalidateClassification();
 		resetRejectionBreaker(breaker);
 		callIndex = 0;
 		const requestedFromFlag = pi.getFlag(AUTO_MODE_FLAG) === true;
@@ -461,7 +481,7 @@ export function registerAutoModeExtension(
 	pi.on("model_select", (event, ctx) => {
 		const resolved = readConfig(ctx, event.model);
 		const { config } = resolved;
-		if (!resolved.invalidFeatures.includes("autoMode") && runtime.engaged && !isAutoModeEligible(event.model, config.autoMode)) {
+		if (!protectedSelection && !resolved.invalidFeatures.includes("autoMode") && runtime.engaged && !isAutoModeEligible(event.model, config.autoMode)) {
 			disengage(ctx);
 			if (ctx.hasUI) ctx.ui.notify("Auto mode off: this model is not allowlisted.", "warning");
 		}
@@ -471,17 +491,26 @@ export function registerAutoModeExtension(
 	pi.on("before_agent_start", (_event, ctx) => {
 		const resolved = readConfig(ctx);
 		const { config } = resolved;
-		if (resolved.invalidFeatures.includes("autoMode")) { resetScoreTracker(tracker); updateStatus(ctx); return; }
+		if (resolved.invalidFeatures.includes("autoMode")) { invalidateClassification(); updateStatus(ctx); return; }
 		applyConfiguredGate(runtime, config.autoMode);
-		if (runtime.engaged && !isAutoModeEligible(ctx.model, config.autoMode)) {
+		if (!protectedSelection && runtime.engaged && !isAutoModeEligible(ctx.model, config.autoMode)) {
 			disengage(ctx);
 		}
 		updateStatus(ctx);
 	});
 
-	// The breaker judges one turn's denial pattern, so it starts clean each turn.
-	pi.on("turn_start", () => {
+	pi.on("message_start", (event) => {
+		if (event.message.role !== "user") return;
+		// Steer/follow-up delivery can happen without before_agent_start.
+		// Merely enqueueing input and ordinary tool turns retain denial history.
 		resetRejectionBreaker(breaker);
+		invalidateClassification();
+	});
+	pi.on("session_shutdown", () => { invalidateClassification(); stopSelectionListener?.(); });
+	pi.on("session_tree", () => {
+		invalidateClassification();
+		resetRejectionBreaker(breaker);
+		callIndex = 0;
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
@@ -490,13 +519,14 @@ export function registerAutoModeExtension(
 
 		const resolved = readConfig(ctx);
 		if (resolved.invalidFeatures.includes("autoMode")) {
-			resetScoreTracker(tracker);
+			invalidateClassification();
 			return { block: true, reason: "Auto-mode configuration is invalid. The gate remains engaged; fix the configuration or explicitly use /auto off." };
 		}
 		const auto = resolved.config.autoMode;
 		applyConfiguredGate(runtime, auto);
 
 		if (!isAutoModeEligible(ctx.model, auto)) {
+			if (protectedSelection) return { block: true, reason: "Auto-mode eligibility changed during managed /compact; the existing approval gate remains engaged." };
 			disengage(ctx);
 			return undefined;
 		}
@@ -645,7 +675,7 @@ export function registerAutoModeExtension(
 		const resolved = readConfig(ctx);
 		const { config } = resolved;
 		const auto = config.autoMode;
-		if (resolved.invalidFeatures.includes("autoMode") || !isAutoModeEligible(ctx.model, auto)) { resetScoreTracker(tracker); return undefined; }
+		if (resolved.invalidFeatures.includes("autoMode") || !isAutoModeEligible(ctx.model, auto)) { invalidateClassification(); return undefined; }
 		if (auto.classifier.enabled && shouldReviewTool(event.toolName, runtime)) {
 			scheduleClassification(ctx, auto, {
 				toolName: event.toolName,

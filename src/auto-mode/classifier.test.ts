@@ -135,6 +135,13 @@ describe("classifier fast path", () => {
 		).toEqual({ eligible: false, reason: "requires_synchronous_review" });
 	});
 
+	test("a score from a future call position cannot approve an earlier call", () => {
+		expect(fastApprovalEligible({
+			tracker: trackerWith({ risk: "low", scoredAtCall: 10 }),
+			currentCallIndex: 1, authorizationVersion: "auth-1", maxLag: 2,
+		})).toEqual({ eligible: false, reason: "stale_score" });
+	});
+
 	test("resetting clears both the score and the counters", () => {
 		const tracker = trackerWith({ risk: "low", scoredAtCall: 5 });
 		recordFailedCall(tracker, 7);
@@ -151,13 +158,12 @@ describe("authorization fingerprint", () => {
 		);
 	});
 
-	test("bounds its input so a huge transcript cannot slow every call", () => {
-		// Only the first slice is hashed, so text that differs past the bound is equal.
-		expect(authorizationVersion("x".repeat(50_000))).toBe(
-			authorizationVersion(`${"x".repeat(50_000)} then something else entirely`),
+	test("hashes restrictions beyond the old display bound", () => {
+		expect(authorizationVersion("x".repeat(50_000))).not.toBe(
+			authorizationVersion(`${"x".repeat(50_000)} do not deploy`),
 		);
-		expect(authorizationVersion(`y${"x".repeat(50_000)}`)).not.toBe(
-			authorizationVersion(`x${"x".repeat(50_000)}`),
+		expect(authorizationVersion(`${"x".repeat(50_000)} allow`)).not.toBe(
+			authorizationVersion(`${"x".repeat(50_000)} deny!`),
 		);
 	});
 });

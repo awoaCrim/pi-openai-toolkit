@@ -9,6 +9,7 @@ Developer-facing reference for [pi-openai-toolkit](../README.md). The README kee
 - [Configuration resolution](#configuration-resolution)
 - [Remote Context protocol](#remote-context-protocol)
 - [Rollover lifecycle](#rollover-lifecycle)
+- [Managed manual compact](#managed-manual-compact)
 - [Remote Compaction v2 wire contract](#remote-compaction-v2-wire-contract)
 - [Auto Mode TUI review renderer](#auto-mode-tui-review-renderer)
 - [Artifacts and debugging](#artifacts-and-debugging)
@@ -20,7 +21,7 @@ Developer-facing reference for [pi-openai-toolkit](../README.md). The README kee
 
 The single global document is loaded through [src/config.ts](../src/config.ts). [src/config/legacy.ts](../src/config/legacy.ts) owns unversioned compatibility; [src/config/v2.ts](../src/config/v2.ts) validates v2 scopes, resolves exact policy, and records leaf origins. [src/config/policy.ts](../src/config/policy.ts) defines effective values independently of persisted session data. See the [configuration reference](configuration.md) for supported fields and migration limits.
 
-Feature entrypoints resolve once per public operation and pass that immutable snapshot through awaited helpers. A separately named compaction producer is resolved from the same decoded document for its own identity. Subsequent callbacks reload; there is no cross-event provider transaction, project lookup, singleton cache, or config state writer. Internal legacy-shaped engine adapters preserve compaction/search algorithms without exposing v2 parsing to consumers. Cross-feature gateway policy belongs to the resolver, not the context enable switch.
+Feature entrypoints resolve once per public operation and pass that immutable snapshot through awaited helpers. A separately named compaction producer is resolved from the same decoded document for its own identity. Subsequent independent callbacks reload; a managed manual handoff retains its initiating context-policy snapshot until selection is restored. There is no general cross-event provider transaction, project lookup, singleton cache, or config state writer. Internal legacy-shaped engine adapters preserve compaction/search algorithms without exposing v2 parsing to consumers. Cross-feature gateway policy belongs to the resolver, not the context enable switch.
 
 Selected invalid policy blocks dependent operations; unrelated model errors remain reportable without replacing the selected model. An engaged auto gate stays blocking when its policy becomes invalid. Image choices are checked before auth, uploads, or paid requests. The human `/toolkit-config` command inspects effective values, validation, or a migration candidate without action APIs or network access. Migration is preview-only; source bytes and unknown/dormant content stay untouched.
 
@@ -81,11 +82,29 @@ State invariants the lifecycle code must keep honest:
 - `new_context` has no force escape hatch: a persisted successful notes checkpoint in the current window is always required before rollover. The model must wait for the notes result to be persisted before retrying.
 - After a marker is accepted for sending, the manager keeps a session/window-anchored pending guard until that exact target marker is persisted or the session changes. A duplicate `new_context` during this persistence gap returns `started: false` and sends no second marker; projected/in-memory messages do not retire the guard.
 - Budget checks are skipped until the current window has produced its own assistant usage. Acting on the previous window's usage anchor would burn the once-per-window reminder on a false alarm.
-- The scheduled trim is consumed exactly once, synchronously, by the first compaction attempt whose boundary window ID matches. Every other compaction path, including a threshold without a scheduled rollover, manual `/compact`, and overflow, is cancelled.
+- Preparing a boundary never consumes its scheduled trim. The manager reconciles the latest persisted compaction and branch state, so only a durable matching boundary consumes it. Missing/late callbacks, aborted preparation and navigation across branches sharing a marker remain retryable. Automatic threshold/overflow and toolkit-owned manual maintenance only trim a matching scheduled window; a user manual `/compact` follows the managed handoff below.
 - A window boundary is persisted as a `codex-context-window` custom message. `session_start` replays boundaries from the branch and rebuilds identity after forks.
 - Retiring windows is a projection-level act: the session branch keeps every retired window until a compaction consumes the scheduled trim. `evaluateWindowBulk()` measures that gap and compares it with the model about to receive it, `decideBulkCliffAction()` maps the report onto the `leaveManagedMode` policy (`warn` default, `compact`), and `decideBulkCloseOut()` only allows the automatic compaction where a compaction can actually finish: never in print mode (the process exits with the turn and would kill the summary), and at turn end only while a rollover trim is queued, because the window policy cancels every other compaction. Each window and model is surfaced once, and every decision writes a `window-bulk.<action>` compaction artifact with its trigger.
 - The close-out runs from `model_select` and `agent_settled`, never from `before_agent_start`: `ExtensionContext.compact()` aborts the running turn, and a hook inside turn processing is exactly the busy lane it must not fight.
 - A configured native-fallback summary model is checked against the size of the request Pi is about to send it (`estimateSummarizationRequest`). A narrower summary model than the active one - 272k summarizing a 400k session - returns `model-window-too-small` before authentication or the model call, so the current model gets the first attempt instead of a terminated stream.
+
+---
+
+### Managed manual compact
+
+[src/context-management/manual-compact.ts](../src/context-management/manual-compact.ts) owns manual checkpoint duty. It uses public Pi lifecycle and selection APIs; it does not replace the built-in command or patch the scheduler. [src/context-management/window-manager.ts](../src/context-management/window-manager.ts) remains the sole owner of notes pairing, window identity, projection and trim.
+
+1. An active managed `session_before_compact` with reason `manual` validates the source/target policies from one snapshot, actual permitted tools, remaining capacity, backend/account scope and approval eligibility. It records the original model/thinking and cancels the native compact attempt. Internal window-bulk maintenance has a separate in-process owner even though Pi also labels it `manual`.
+2. The matching `session_compact_failed` callback launches duty only after Pi is idle. Public `setModel` changes the session selection, and a visible `sendUserMessage` rebuilds the target's normal prompt/tools. Delivery is observed through `message_start`; return from the fire-and-forget send API is not proof. A delivery timeout restores an abandoned idle selection.
+3. The existing `new_context` gate additionally requires a successful paired notes result after this operation and any later delivered user message. It records the exact target window before queueing a context-only marker, and returns a terminating result. Ordinary tools are blocked during checkpoint duty. Normal `new_context` outside this operation is unchanged.
+4. A terminating result alone does not stop mixed batches or queued messages. At `turn_end`, Toolkit requests abort without awaiting idle; context/request guards also refuse an unsafe continuation. The standard Responses and native Codex transports must not send an already-aborted continuation. Pi can deliver queued user content during that stop; it remains persisted and ordered for the original model.
+5. At `agent_settled`, after Pi has flushed custom messages, the controller verifies the exact durable marker and fresh checkpoint, restores original model/thinking, and sends one visible receipt-reading continuation. Restoring inside marker `message_end` would be too early for persistence and too late for a model snapshot already captured by `prepareNextTurn`.
+
+Versioned `pi-openai-toolkit:manual-compact` custom entries record operation/session/branch/window identities, exact model keys, original thinking and phase. They contain no credentials, transcript copy or note contents. Reload/navigation reads the current branch and only recovers still-owned selection; it never retries notes, rollover or paid inference. A newer user model/thinking selection ends ownership. Failed restoration stays durable and blocks further provider requests until recovery or an explicit user selection.
+
+An engaged Auto Mode gate grants a session/operation-scoped selection lease through [src/auto-mode/model-selection-guard.ts](../src/auto-mode/model-selection-guard.ts). An ineligible target is refused. While switching, a later eligibility change cannot silently disengage the gate: calls remain blocked. The lease neither enables Auto Mode nor widens its allowlist.
+
+The underlying native compact promise still rejects its intentional cancellation. Empty/already-compacted sessions can fail before the extension hook. This is a separate handoff operation, not a fabricated successful native compaction. An observed user cancellation before the owned checkpoint stop restores selection without automatically resuming. Tests use the official Pi runtime, disk-backed sessions, isolated HOME/settings and synthetic Responses/native Codex traffic in [test/pi-managed-compact.test.ts](../test/pi-managed-compact.test.ts); they assert every request's model/thinking, marker/note order, retained tool head and queue preservation.
 
 ---
 
@@ -94,6 +113,8 @@ State invariants the lifecycle code must keep honest:
 v2 is what an uncovered session gets. Any model that Remote Context declines, such as a gateway without an exact transport opt-in, can still compact through v2 when its API appears in `context.remoteCompaction.apis`. The two strategies never compete for one session.
 
 A `compaction_trigger` item appended to the live streaming request yields one output item of `type: "compaction"` with non-empty `encrypted_content`, stored in `CompactionEntry.details.compactedWindow`. On later requests the opaque checkpoint is replayed ahead of live turns, with no text summary. Replay fails closed: if the summary anchor cannot be located, the request is aborted with a notification and a content-free failure artifact. The sentinel-only payload is never sent.
+
+The incremental SSE consumer validates the first terminal event and reconciles its checkpoint with prior item evidence. A valid completed frame ends the operation even if the HTTP body stays open; reader cancellation is best-effort cleanup and is not awaited. Incomplete frames at EOF, conflicting checkpoint evidence and terminal errors cannot become successful checkpoints.
 
 A v2 response with a missing or empty checkpoint is never stored, and the `nativeFallback` tier is skipped. Pi's own threshold drives the next attempt, which may use `remoteCompactModel` when configured. `remoteCompactModel` must resolve to the same effective base URL as the active model.
 
@@ -106,6 +127,8 @@ New checkpoints record `inputProvenance: "pi-context-hook-v1"` or `"legacy-raw-c
 ---
 
 ### Auto Mode TUI review renderer
+
+Approval state is scoped to actual user-message delivery. Full structured user content is SHA-256 hashed independently of transcript truncation, and generation-owned classifier completions cannot overwrite newer samples. The bounded transcript selects recent user instructions first and reports omissions. The blocking reviewer and its read-only evidence loop share one deadline that also races uncooperative dependencies; timeout/cancellation is an unavailable review, never approval or a safety denial.
 
 Auto Mode owns the review decision, but Pi owns the built-in tool-block component. Pi 0.85.1 exports `ToolExecutionComponent` without a public decorator interface, so `src/auto-mode/tool-review-tui.ts` installs a narrow, idempotent compatibility patch on its `render()` method. The patch only reads the component's existing tool-call ID and appends one bounded, single-line status after the normal block output; it never changes tool execution, event ordering, or provider payloads.
 

@@ -289,9 +289,55 @@ test("creates a no-summary compaction boundary only for the scheduled rollover",
 	} as never;
 	const result = manager.prepareCompaction(event);
 	expect(result).toMatchObject({ compaction: { summary: CONTEXT_WINDOW_COMPACTION_SUMMARY } });
-	// The trim is consumed exactly once; a second compaction for the same
-	// rollover must cancel instead of writing another no-op boundary.
+	// Cancellation before persistence leaves the same proposal retryable.
+	expect(manager.hasPendingTrim()).toBe(true);
+	expect(manager.prepareCompaction(event)).toEqual(result);
+	if (!("compaction" in result)) throw new Error("Expected a trim proposal");
+	manager.recordCompaction(result.compaction.details);
+	// Once persistence is acknowledged, further no-op compactions cancel.
 	expect(manager.prepareCompaction(event)).toEqual({ cancel: true });
+});
+
+test("ignores unrelated compaction callbacks without disturbing initialized or pending windows", async () => {
+	const manager = new CodexContextWindowManager(async () => undefined);
+	const sent: Array<Record<string, unknown>> = [];
+	const branch: Array<Record<string, unknown>> = [];
+	const ctx = fakeContext(() => branch);
+	manager.ensureInitialized(fakePi(sent), ctx, true);
+	const initial = manager.currentIdentity();
+	const invalidDetails = [undefined, {}, { protocol: 1, strategy: "other", windowId: initial?.currentWindowId }];
+	const event = { branchEntries: [], preparation: { firstKeptEntryId: "keep", tokensBefore: 50 } } as never;
+	const matchingDetails = manager.createCompaction(event).details;
+	// Even valid details must not invalidate an initialization with no pending trim.
+	for (const details of [...invalidDetails, matchingDetails]) {
+		manager.recordCompaction(details);
+		manager.synchronize(ctx);
+		expect(manager.currentIdentity()).toEqual(initial);
+		expect(manager.hasPendingTrim()).toBe(false);
+	}
+
+	persistSentMarker(branch, sent[0]!);
+	await manager.startNewWindow(fakePi(sent), ctx, { triggerTurn: true, trimPreviousWindow: true });
+	const pending = manager.currentIdentity();
+	for (const details of [...invalidDetails, matchingDetails]) {
+		manager.recordCompaction(details);
+		expect(manager.currentIdentity()).toEqual(pending);
+		expect(manager.hasPendingTrim()).toBe(true);
+		expect(manager.hasPendingRollover(ctx)).toBe(true);
+	}
+
+	// A matching acknowledgment invalidates derived state, but rebuilding must
+	// preserve the outstanding rollover guard until its marker is persisted.
+	manager.recordCompaction(manager.createCompaction(event).details);
+	expect(manager.hasPendingTrim()).toBe(false);
+	manager.synchronize(ctx);
+	expect(manager.hasPendingRollover(ctx)).toBe(true);
+	expect(await manager.startNewWindow(fakePi(sent), ctx, { triggerTurn: true, trimPreviousWindow: true })).toBe(false);
+	expect(sent).toHaveLength(2);
+	persistSentMarker(branch, sent[1]!);
+	manager.synchronize(ctx);
+	expect(manager.hasPendingRollover(ctx)).toBe(false);
+	expect(manager.hasPendingTrim()).toBe(true);
 });
 
 test("cancels manual and overflow compaction when no rollover trim is pending", () => {
@@ -553,7 +599,12 @@ test("rollover arms a once-only trim that is consumed by the persisted boundary"
 	persistSentMarker(branch, sent[0]!);
 	manager.synchronize(ctx);
 	const persistedEvent = { reason: "threshold", branchEntries: branch, preparation: { firstKeptEntryId: "keep", tokensBefore: 50 } } as never;
-	expect(manager.prepareCompaction(persistedEvent)).toMatchObject({ compaction: { summary: CONTEXT_WINDOW_COMPACTION_SUMMARY } });
+	const proposal = manager.prepareCompaction(persistedEvent);
+	expect(proposal).toMatchObject({ compaction: { summary: CONTEXT_WINDOW_COMPACTION_SUMMARY } });
+	expect(manager.hasPendingTrim()).toBe(true);
+	if (!("compaction" in proposal)) throw new Error("Expected a trim proposal");
+	branch.push({ type: "compaction", id: "committed-trim", ...proposal.compaction });
+	manager.synchronize(ctx);
 	expect(manager.hasPendingTrim()).toBe(false);
 	expect(manager.prepareCompaction(persistedEvent)).toEqual({ cancel: true });
 });
