@@ -1378,11 +1378,12 @@ export default function registerCompactionExtension(
 			for (const existing of Object.keys(event.headers)) {
 				if (!allowedGatewayHeaders.has(existing.toLowerCase())) delete event.headers[existing];
 			}
+			// Keep any caller-supplied version without forcing a Toolkit pin.
+			// The gateway allowlist above already permits it.
 			for (const name of [
 				"authorization",
 				"originator",
 				"user-agent",
-				"version",
 				"session-id",
 				"x-client-request-id",
 				"x-codex-affinity-scope",
