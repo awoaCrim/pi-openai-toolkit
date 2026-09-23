@@ -153,7 +153,8 @@ export function codexContextProviderHeaders(
 		headers.delete("Cookie");
 		headers.set("originator", CODEX_GATEWAY_ORIGINATOR);
 		headers.set("User-Agent", userAgent(CODEX_CLIENT_VERSION));
-		headers.set("version", CODEX_CLIENT_VERSION);
+		// Let the gateway own its version policy; preserve an explicitly configured
+		// version already copied from provider.headers above.
 		headers.set("X-Codex-Affinity-Scope", CODEX_AFFINITY_SCOPE);
 		headers.set("X-Codex-Model", provider.model);
 	}

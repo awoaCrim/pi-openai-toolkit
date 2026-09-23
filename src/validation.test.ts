@@ -814,6 +814,16 @@ test("gateway Remote Context headers preserve session affinity and strip inherit
 	expect(headers["x-api-key"]).toBeUndefined();
 	expect(headers["x-management-key"]).toBeUndefined();
 	expect(headers.traceparent).toBeUndefined();
+
+	// The managed live hook must not inject the Toolkit's own client version, and
+	// must not delete or overwrite a version the caller supplied.
+	const explicitVersion: Record<string, string | null> = { version: "0.154.0" };
+	await beforeProviderHeaders({ type: "before_provider_headers", headers: explicitVersion }, ctx);
+	expect(explicitVersion.version).toBe("0.154.0");
+
+	const noVersion: Record<string, string | null> = {};
+	await beforeProviderHeaders({ type: "before_provider_headers", headers: noVersion }, ctx);
+	expect(noVersion.version).toBeUndefined();
 });
 
 test("manual /compact preserves tool/result ordering + assistant phases and persists the native window", async () => {

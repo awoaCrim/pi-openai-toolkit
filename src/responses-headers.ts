@@ -148,10 +148,11 @@ export function buildResponsesRequestHeaders(
 			headers.set("originator", "pi");
 			headers.set("user-agent", buildCodexUserAgent());
 			headers.set("openai-beta", "responses=experimental");
+			// Preserve the existing native Codex compatibility pin.
+			headers.set("version", CODEX_CLIENT_VERSION);
 		}
-		// Codex backend gating: a request without a new-enough `version` never
-		// reaches model SKUs that arrived behind the gate (gpt-6-astra).
-		headers.set("version", CODEX_CLIENT_VERSION);
+		// Gateways own their version policy. Explicit versions still pass through
+		// the header merge and allowlist, but Toolkit does not generate one.
 		// Prompt-cache/session affinity rides on the conversation identity. The
 		// gateway path also uses the bare model hint above so NEWapi can route
 		// context/compact requests without inspecting their body.
