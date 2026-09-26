@@ -876,13 +876,16 @@ async function handleContextInternal(
 		const remoteActive = await remoteContextActive(ctx, config);
 		if (remoteActive) {
 			try {
+				// Measure the provider-visible current window, not Pi's durable transcript.
+				// The latter still contains retired remote windows and can be inflated by
+				// an upstream error even though this request only carries the live window.
+				const projected = contextWindows.project(event.messages, "remote");
 				contextWindows.recordBudget(
 					pi,
 					ctx,
 					true,
 					config.contextReminderThresholdPercent,
 				);
-				const projected = contextWindows.project(event.messages, "remote");
 				reportProjectionDiagnostics(contextWindows, config, ctx);
 				return projected.length === event.messages.length && projected.every((message, index) => message === event.messages[index])
 					? undefined

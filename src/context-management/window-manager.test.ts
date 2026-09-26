@@ -378,6 +378,46 @@ test("budget checks wait for the current window's own usage anchor", () => {
 	expect(String(sent[0]?.content)).toContain("context tokens remain");
 });
 
+test("budget uses the provider-visible window after an upstream error", () => {
+	const sent: Array<Record<string, unknown>> = [];
+	const manager = new CodexContextWindowManager();
+	const marker = rolloverMarker("w2");
+	manager.restore([marker], "session-1");
+	const markerMessage = {
+		role: "custom",
+		customType: CODEX_CONTEXT_WINDOW_MESSAGE_TYPE,
+		details: marker.details,
+	} as unknown as AgentMessage;
+	const messages = [
+		{ role: "user", content: "retired history ".repeat(50_000) } as unknown as AgentMessage,
+		markerMessage,
+		{ role: "user", content: "live window ".repeat(30_000) } as unknown as AgentMessage,
+		{
+			role: "assistant",
+			content: [],
+			stopReason: "error",
+			errorMessage: "503 no available Codex auth candidates",
+		} as unknown as AgentMessage,
+	];
+	const ctx = {
+		model: { contextWindow: 272_000 },
+		sessionManager: {
+			getBranch: () => [marker, assistantUsage(20_000)],
+			getSessionId: () => "session-1",
+		},
+		// This is Pi's durable-transcript estimate. It includes retired remote
+		// windows and is intentionally past the safety limit for this regression,
+		// while the live window above is only about 90k tokens.
+		getContextUsage: () => ({ contextWindow: 272_000, tokens: 270_000 }),
+	} as never;
+
+	manager.project(messages, "remote");
+	manager.recordBudget(fakePi(sent), ctx, true, 5);
+
+	expect(sent).toHaveLength(0);
+	expect(manager.remaining(ctx).remainingTokens).toBeGreaterThan(0);
+});
+
 function rolloverMarker(windowId: string) {
 	return {
 		type: "custom_message", id: `entry-m-${windowId}`, parentId: null, timestamp: "2026-09-07T00:00:00.000Z",
