@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ProviderHeaders } from "@earendil-works/pi-ai";
-import type {
-	CompactionResult,
-	ExtensionAPI,
-	ExtensionContext,
-	SessionBeforeCompactEvent,
-	SessionEntry,
+import {
+	calculateContextTokens,
+	estimateTokens,
+	type CompactionResult,
+	type ExtensionAPI,
+	type ExtensionContext,
+	type SessionBeforeCompactEvent,
+	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { ContextWindowBudget, type ContextRemaining } from "./window-budget";
 import type { WindowBulkReport } from "./window-bulk";
@@ -86,6 +88,12 @@ export class CodexContextWindowManager {
 	private lastKnownSystemHead: AgentMessage | undefined;
 	private bulkReport: WindowBulkReport | undefined;
 	private bulkSurfacedKey: string | undefined;
+	/**
+	 * Pi's getContextUsage() measures the durable transcript. Remote windows are
+	 * projected only by this extension, so remember the last provider-visible
+	 * estimate for budget decisions and get_context_remaining.
+	 */
+	private projectedContextTokens: number | undefined;
 	private readonly loadThreadHint: ThreadHintLoader;
 
 	constructor(loadThreadHint?: ThreadHintLoader) {
@@ -149,6 +157,7 @@ export class CodexContextWindowManager {
 		this.branchStateInvalidated = false;
 		this.budget.reset();
 		this.trimPendingWindowId = undefined;
+		this.projectedContextTokens = undefined;
 	}
 
 	restore(entries: readonly SessionEntry[], sessionId?: string): void {
@@ -240,6 +249,7 @@ export class CodexContextWindowManager {
 		mode: "off" | "remote",
 	): AgentMessage[] {
 		if (mode === "off") {
+			this.projectedContextTokens = undefined;
 			return messages.filter(
 				(message) => message.role !== "custom" || message.customType !== CODEX_CONTEXT_WINDOW_MESSAGE_TYPE,
 			);
@@ -266,11 +276,16 @@ export class CodexContextWindowManager {
 			this.restoredMarkerId = undefined;
 			this.budget.reset();
 			this.trimPendingWindowId = undefined;
+			this.projectedContextTokens = undefined;
 		}
 		// Projection observes the request view, never durable session state. A
 		// queued rollover marker must not clear the duplicate guard here.
 		const trimmed = boundaryIndex < 0 ? [...messages] : this.trimToWindow(messages, boundaryIndex);
-		return mode === "remote" ? projectEncryptedToolResults(trimmed) : trimmed;
+		const projected = mode === "remote" ? projectEncryptedToolResults(trimmed) : trimmed;
+		this.projectedContextTokens = mode === "remote" && this.identity
+			? estimateProjectedWindowTokens(projected)
+			: undefined;
+		return projected;
 	}
 
 	/**
@@ -363,7 +378,12 @@ export class CodexContextWindowManager {
 		// once-per-window reminder on a false alarm seconds after a successful
 		// rollover, leaving the window silent for the rest of its life.
 		if (!hasAssistantUsageSinceWindowBoundary(ctx.sessionManager.getBranch(), this.sessionId)) return;
-		const reminder = this.budget.record(ctx, this.identity, contextTokens, contextReminderThresholdPercent);
+		const reminder = this.budget.record(
+			ctx,
+			this.identity,
+			contextTokens ?? this.projectedContextTokens,
+			contextReminderThresholdPercent,
+		);
 		if (!reminder) return;
 		sendContextWindowMessage(
 			pi,
@@ -375,7 +395,7 @@ export class CodexContextWindowManager {
 	}
 
 	remaining(ctx: ExtensionContext, contextTokens?: number): ContextRemaining {
-		return this.budget.remaining(ctx, this.identity, contextTokens);
+		return this.budget.remaining(ctx, this.identity, contextTokens ?? this.projectedContextTokens);
 	}
 
 	/**
@@ -701,6 +721,35 @@ function couldBelongToSession(details: unknown, sessionId: string | undefined): 
 
 function matchesSession(markerSessionId: string | undefined, sessionId: string | undefined): boolean {
 	return sessionId === undefined || markerSessionId === sessionId;
+}
+
+function estimateProjectedWindowTokens(messages: readonly AgentMessage[]): number {
+	let lastUsageIndex = -1;
+	let usageTokens = 0;
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		const message = messages[index]!;
+		if (message.role !== "assistant" || message.stopReason === "aborted" || message.stopReason === "error" || !message.usage) continue;
+		const tokens = calculateContextTokens(message.usage);
+		if (tokens <= 0) continue;
+		lastUsageIndex = index;
+		usageTokens = tokens;
+		break;
+	}
+	if (lastUsageIndex < 0) return messages.reduce((total, message) => total + estimateProjectedMessageTokens(message), 0);
+	return usageTokens + messages
+		.slice(lastUsageIndex + 1)
+		.reduce((total, message) => total + estimateProjectedMessageTokens(message), 0);
+}
+
+function estimateProjectedMessageTokens(message: AgentMessage): number {
+	// A synthetic custom marker may be represented without content in a test or
+	// by an older host. It contributes no measurable text; it must not make the
+	// context hook fail closed merely because the diagnostic estimate is missing.
+	if (
+		!("content" in message) ||
+		(typeof message.content !== "string" && !Array.isArray(message.content))
+	) return 0;
+	return estimateTokens(message);
 }
 
 function projectEncryptedToolResults(messages: readonly AgentMessage[]): AgentMessage[] {
