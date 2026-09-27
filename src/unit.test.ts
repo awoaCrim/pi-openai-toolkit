@@ -562,7 +562,7 @@ test("native v1 compact request strips Astra configuration_update items", async 
 	expect(input[0]!.type).not.toBe("configuration_update");
 });
 
-test("codex compaction requests carry the version gate and session affinity headers", async () => {
+test("codex compaction requests carry session affinity headers without a default version", async () => {
 	let fetchInit: RequestInit | undefined;
 	globalThis.fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
 		fetchInit = init;
@@ -594,7 +594,7 @@ test("codex compaction requests carry the version gate and session affinity head
 	});
 
 	const headers = new Headers(fetchInit?.headers);
-	expect(headers.get("version")).toBe("0.153.0");
+	expect(headers.get("version")).toBeNull();
 	expect(headers.get("session-id")).toBe("sess-affinity");
 	expect(headers.get("x-client-request-id")).toBe("sess-affinity");
 	expect(headers.get("chatgpt-account-id")).toBe("acct_9");

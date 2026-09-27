@@ -146,7 +146,6 @@ export function codexContextProviderHeaders(
 		headers.set("ChatGPT-Account-ID", provider.accountId);
 		headers.set("originator", CODEX_TOOL_ORIGINATOR);
 		headers.set("User-Agent", userAgent(CODEX_TOOL_VERSION));
-		headers.set("version", CODEX_TOOL_VERSION);
 	} else {
 		headers.set("Authorization", `Bearer ${provider.apiKey}`);
 		headers.delete("ChatGPT-Account-ID");

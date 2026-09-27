@@ -186,19 +186,15 @@ describe("codex astra extension wiring", () => {
 		expect(fire("before_provider_request", { type: "before_provider_request", payload: first })).toBeUndefined();
 	});
 
-	test("headers hook adds the version gate to codex requests only", () => {
-		const { fire } = createHarness();
+	test("does not register a global native version-header hook for any Codex model", () => {
+		for (const id of ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]) {
+			const { handlers, fire } = createHarness({ model: codexModel({ id }) });
+			expect(handlers.has("before_provider_headers")).toBe(false);
 
-		const headers: Record<string, string | null> = { authorization: "Bearer x" };
-		fire("before_provider_headers", { type: "before_provider_headers", headers });
-		expect(headers.version).toBe("0.153.0");
-		expect(headers.authorization).toBe("Bearer x");
-
-		const otherHeaders: Record<string, string | null> = {};
-		// Re-fire through a handler set built for completions models.
-		const h2 = createHarness({ model: codexModel({ provider: "uwoacrimson", api: "openai-completions" }) });
-		h2.fire("before_provider_headers", { type: "before_provider_headers", headers: otherHeaders });
-		expect(otherHeaders.version).toBeUndefined();
+			const headers: Record<string, string | undefined> = {};
+			fire("before_provider_headers", { type: "before_provider_headers", headers });
+			expect(headers.version).toBeUndefined();
+		}
 	});
 
 	test("a planner blowup cannot break the request path", () => {

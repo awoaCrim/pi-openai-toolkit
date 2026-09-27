@@ -90,11 +90,9 @@ export function buildCodexCliUserAgent(version: string): string {
 }
 
 /**
- * The Codex backend version-gates model availability on the `version` header
- * (the pinned @openai/codex client version). `gpt-6-astra` requires >= 0.153.0;
- * an older or absent pin makes the SKU invisible to discovery and rejects
- * requests that name it. Keep this in sync with the newest gate Oh My Pi pins
- * in @oh-my-pi/pi-wire/codex (`CODEX_CLIENT_VERSION`).
+ * Codex client identity used by synthetic gateway requests in their User-Agent.
+ * Native live and context-management requests do not generate a `version`
+ * header; explicitly configured provider values remain caller-owned.
  */
 export const CODEX_CLIENT_VERSION = "0.153.0";
 
@@ -148,8 +146,6 @@ export function buildResponsesRequestHeaders(
 			headers.set("originator", "pi");
 			headers.set("user-agent", buildCodexUserAgent());
 			headers.set("openai-beta", "responses=experimental");
-			// Preserve the existing native Codex compatibility pin.
-			headers.set("version", CODEX_CLIENT_VERSION);
 		}
 		// Gateways own their version policy. Explicit versions still pass through
 		// the header merge and allowlist, but Toolkit does not generate one.

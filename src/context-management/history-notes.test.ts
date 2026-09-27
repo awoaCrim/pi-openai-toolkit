@@ -46,7 +46,7 @@ test("builds Codex history requests with context and opaque encrypted output", a
 	expect(request?.url).toBe("https://chatgpt.com/backend-api/codex/alpha/history/v2/search_contents");
 	expect(request?.headers.get("x-openai-encrypted-tool-arguments")).toBe("true");
 	expect(request?.headers.get("chatgpt-account-id")).toBe("account");
-	expect(request?.headers.get("version")).toBe("0.0.0");
+	expect(request?.headers.get("version")).toBeNull();
 	expect(await request?.json()).toEqual({ query: "needle", context: { session_id: "session-1", current_agent_name: "/root" } });
 });
 

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { CODEX_CLIENT_VERSION } from "../responses-headers";
 import { codexContextProviderHeaders, resolveCodexContextProvider, _codexProviderTest } from "./codex-provider";
 
 type TestModel = {
@@ -50,8 +51,24 @@ test("resolves native Codex auth from ModelRegistry and preserves account/header
 	expect(result.provider.accountId).toBe("account-1");
 	expect(result.provider.headers["x-test"]).toBe("keep");
 	const headers = codexContextProviderHeaders(result.provider);
-	expect(headers.get("version")).toBe("0.0.0");
+	expect(headers.get("version")).toBeNull();
 	expect(headers.get("user-agent")).toBe(`codex_cli_rs/0.0.0 (${process.platform}; ${process.arch})`);
+});
+
+test("native context headers preserve an explicitly configured version", () => {
+	const provider = {
+		kind: "native-codex",
+		route: "openai-codex",
+		provider: "openai-codex",
+		api: "openai-codex-responses",
+		model: "gpt-5.5",
+		baseUrl: "https://chatgpt.com/backend-api/codex",
+		token,
+		accountId: "account-1",
+		headers: { Version: "0.154.0" },
+	} as const;
+
+	expect(codexContextProviderHeaders(provider).get("version")).toBe("0.154.0");
 });
 
 test("rejects a gateway or other provider even when Codex OAuth is available", async () => {
@@ -144,6 +161,7 @@ test("preserves the bare gateway model and affinity headers", () => {
 	}, { sessionId: "session-1" });
 	expect(headers.get("X-Codex-Model")).toBe("gpt-5.5");
 	expect(headers.get("X-Codex-Affinity-Scope")).toBe("codex-session-v1");
+	expect(headers.get("User-Agent")).toBe(`codex_cli_rs/${CODEX_CLIENT_VERSION} (${process.platform}; ${process.arch})`);
 	expect(headers.get("Session-Id")).toBe("session-1");
 	// The gateway hop no longer receives an automatic client version pin.
 	expect(headers.get("version")).toBeNull();
