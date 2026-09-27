@@ -29,13 +29,13 @@ function runtimeFor(
 	};
 }
 
-test("codex requests carry the backend version gate and conversation affinity headers", () => {
+test("native Codex requests carry identity and conversation affinity headers without a default version", () => {
 	const headers = buildResponsesRequestHeaders(
 		runtimeFor("openai-codex-responses", codexJwt("acct_1"), "sess-42"),
 		{ accept: "application/json" },
 	);
 
-	expect(headers.get("version")).toBe(CODEX_CLIENT_VERSION);
+	expect(headers.get("version")).toBeNull();
 	expect(headers.get("chatgpt-account-id")).toBe("acct_1");
 	expect(headers.get("originator")).toBe("pi");
 	expect(headers.get("openai-beta")).toBe("responses=experimental");
@@ -49,9 +49,20 @@ test("codex affinity headers are omitted without a session id", () => {
 		{ accept: "application/json" },
 	);
 
-	expect(headers.get("version")).toBe(CODEX_CLIENT_VERSION);
+	expect(headers.get("version")).toBeNull();
 	expect(headers.get("session-id")).toBeNull();
 	expect(headers.get("x-client-request-id")).toBeNull();
+});
+
+test("native requests preserve an explicitly configured version", () => {
+	const headers = buildResponsesRequestHeaders(
+		runtimeFor("openai-codex-responses", codexJwt("acct_1"), "sess-42", {
+			headers: { Version: "0.154.0" },
+		}),
+		{ accept: "application/json" },
+	);
+
+	expect(headers.get("version")).toBe("0.154.0");
 });
 
 test("gateway synthetic requests carry bare model affinity and replace inherited credentials", () => {
@@ -140,14 +151,16 @@ test("non-codex responses requests never carry codex headers", () => {
 	expect(headers.get("authorization")).toBe("Bearer sk-key");
 });
 
-test("codex version header respects an explicit null override from provider headers", () => {
-	const runtime = runtimeFor("openai-codex-responses", codexJwt("acct_1"), "sess-42");
-	runtime.headers = { version: null };
+test("native requests honor an explicit null version override", () => {
+	const runtime = runtimeFor("openai-codex-responses", codexJwt("acct_1"), "sess-42", {
+		currentModel: { headers: { Version: "0.154.0" } },
+		headers: { version: null },
+	});
 	const headers = buildResponsesRequestHeaders(runtime, { accept: "application/json" });
 
-	// null is Pi's deletion semantics for configured headers; the codex block
-	// re-asserts its own required values afterwards, so the gate stays present.
-	expect(headers.get("version")).toBe(CODEX_CLIENT_VERSION);
+	// Null is Pi's deletion semantics for configured headers; native requests
+	// do not re-assert an automatic default afterward.
+	expect(headers.get("version")).toBeNull();
 });
 
 test("buildResponsesRequestHeaders falls back to the runtime session id", () => {
