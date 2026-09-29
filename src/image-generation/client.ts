@@ -1,10 +1,11 @@
 import { buildResponsesRequestHeaders } from "../responses-headers";
-import type { ResponsesRuntime } from "../runtime";
+import { normalizeBaseUrl, type ResponsesRuntime } from "../runtime";
 import {
 	extractProviderErrorMessage,
-	parseImageGenerationResponse,
+	parseImagesApiResponse,
 	type ImageGenerationRequestBody,
 } from "./protocol";
+import type { PreparedReferenceImage } from "./types";
 import {
 	IMAGE_REQUEST_TIMEOUT_MS,
 	MAX_IMAGE_ERROR_BYTES,
@@ -39,8 +40,62 @@ export type ImageGenerationFetch = (
 	init?: RequestInit,
 ) => Promise<Response>;
 
-function buildRequestHeaders(runtime: ResponsesRuntime): Headers {
-	return buildResponsesRequestHeaders(runtime, { accept: "application/json" });
+function buildRequestHeaders(runtime: ResponsesRuntime, contentType: string | null = "application/json"): Headers {
+	return buildResponsesRequestHeaders(runtime, { accept: "application/json", contentType });
+}
+
+function buildImagesEndpoint(runtime: ResponsesRuntime, action: ImageGenerationRequestBody["action"]): string {
+	const baseUrl = normalizeBaseUrl(runtime.baseUrl);
+	if (!baseUrl) throw new Error("Image generation requires a provider base URL.");
+	if (baseUrl.endsWith("/responses") || baseUrl.endsWith("/codex/responses")) {
+		throw new Error("Image generation requires the provider base URL, not a resolved Responses URL.");
+	}
+	const suffix = runtime.api === "openai-codex-responses" ? "codex/images" : "images";
+	const baseAlreadyIncludesCodex = runtime.api === "openai-codex-responses" && baseUrl.endsWith("/codex");
+	return `${baseUrl}/${baseAlreadyIncludesCodex ? "images" : suffix}/${action === "edit" ? "edits" : "generations"}`;
+}
+
+function dataUrl(reference: PreparedReferenceImage): string {
+	return `data:${reference.mimeType};base64,${reference.bytes.toString("base64")}`;
+}
+
+function jsonRequestBody(runtime: ResponsesRuntime, body: ImageGenerationRequestBody): Record<string, unknown> {
+	const common = {
+		model: body.model,
+		prompt: body.prompt,
+		n: body.n,
+		size: body.size,
+		quality: body.quality,
+	};
+	if (body.action === "edit") {
+		return {
+			...common,
+			images: body.references.map((reference) => ({ image_url: dataUrl(reference) })),
+		};
+	}
+	return runtime.api === "openai-codex-responses"
+		? common
+		: { ...common, output_format: "png", response_format: "b64_json" };
+}
+
+function multipartRequestBody(body: ImageGenerationRequestBody): FormData {
+	const form = new FormData();
+	form.append("model", body.model);
+	form.append("prompt", body.prompt);
+	form.append("n", String(body.n));
+	form.append("size", body.size);
+	form.append("quality", body.quality);
+	form.append("output_format", "png");
+	form.append("response_format", "b64_json");
+	for (const [index, reference] of body.references.entries()) {
+		const extension = reference.mimeType === "image/jpeg" ? "jpg" : reference.mimeType.slice("image/".length);
+		form.append(
+			"image",
+			new Blob([new Uint8Array(reference.bytes)], { type: reference.mimeType }),
+			`reference-${index + 1}.${extension}`,
+		);
+	}
+	return form;
 }
 
 async function readBoundedBody(
@@ -141,12 +196,16 @@ export async function requestGeneratedImage(args: {
 		? AbortSignal.any([args.signal, timeoutSignal])
 		: timeoutSignal;
 
+	const multipart = args.body.action === "edit" && args.runtime.api === "openai-responses";
+	const transportBody: BodyInit = multipart
+		? multipartRequestBody(args.body)
+		: JSON.stringify(jsonRequestBody(args.runtime, args.body));
 	let response: Response;
 	try {
-		response = await fetchFn(args.runtime.responsesUrl, {
+		response = await fetchFn(buildImagesEndpoint(args.runtime, args.body.action), {
 			method: "POST",
-			headers: buildRequestHeaders(args.runtime),
-			body: JSON.stringify(args.body),
+			headers: buildRequestHeaders(args.runtime, multipart ? null : "application/json"),
+			body: transportBody,
 			signal,
 		});
 	} catch (error) {
@@ -230,7 +289,7 @@ export async function requestGeneratedImage(args: {
 		};
 	}
 
-	const parsed = parseImageGenerationResponse(payload);
+	const parsed = parseImagesApiResponse(payload);
 	if (!parsed.ok) {
 		return {
 			ok: false,
@@ -244,5 +303,8 @@ export async function requestGeneratedImage(args: {
 
 export const _clientTest = {
 	buildRequestHeaders,
+	buildImagesEndpoint,
+	jsonRequestBody,
+	multipartRequestBody,
 	readBoundedBody,
 };

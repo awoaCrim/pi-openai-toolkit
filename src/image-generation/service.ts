@@ -6,6 +6,7 @@ import {
 	copyImageToExplicitPath,
 	prepareExplicitOutputPath,
 	saveCanonicalImage,
+	type ExplicitOutputPlan,
 } from "./artifacts";
 import { requestGeneratedImage } from "./client";
 import { isImageGenerationEnabledForModel } from "./eligibility";
@@ -21,11 +22,14 @@ import {
 import {
 	IMAGE_GENERATION_CAPABLE_APIS,
 	IMAGE_GENERATION_MIME_TYPE,
+	MAX_IMAGE_IDENTIFIER_CHARS,
 	ImageGenerationError,
 	sanitizeImageDiagnostic,
 	type GenerateImageParams,
+	type ImageGenerationBatchDetails,
 	type ImageGenerationExecutionResult,
 	type ImageGenerationFailureCode,
+	type ImageGenerationDetails,
 	type ParsedGeneratedImage,
 } from "./types";
 
@@ -78,7 +82,7 @@ function runtimeFailure(
 		default:
 			return new ImageGenerationError(
 				"missing-runtime",
-				"Unable to resolve the current model's Responses endpoint for image generation.",
+				"Unable to resolve the current model's Images endpoint for image generation.",
 			);
 	}
 }
@@ -107,6 +111,19 @@ function clientFailureCode(reason: string): ImageGenerationFailureCode {
 	}
 }
 
+function asImageGenerationError(value: unknown): ImageGenerationError {
+	if (value instanceof ImageGenerationError) {
+		return new ImageGenerationError(
+			value.code,
+			sanitizeImageDiagnostic(value.message, "Image generation failed."),
+		);
+	}
+	return new ImageGenerationError(
+		"network",
+		sanitizeImageDiagnostic(value instanceof Error ? value.message : value, "Image generation failed."),
+	);
+}
+
 function formatResultText(args: {
 	artifactPath: string;
 	outputPath?: string;
@@ -122,6 +139,85 @@ function formatResultText(args: {
 	if (args.outputPath) lines.push(`Copied to: ${args.outputPath}`);
 	if (args.warning) lines.push(`Warning: ${args.warning}`);
 	return lines.join("\n");
+}
+
+function formatBatchResultText(details: ImageGenerationBatchDetails): string {
+	const lines = [`Generated ${details.succeededCount}/${details.requestedCount} PNG images.`];
+	const failedIndexes = new Set((details.failures ?? []).map((failure) => failure.index));
+	let imageIndex = 0;
+	for (let batchIndex = 0; batchIndex < details.requestedCount; batchIndex += 1) {
+		if (failedIndexes.has(batchIndex)) continue;
+		const image = details.images[imageIndex++];
+		if (image) lines.push(`Image ${batchIndex + 1}: ${image.artifactPath}`);
+	}
+	for (const failure of details.failures ?? []) {
+		lines.push(`Image ${failure.index + 1} failed: ${failure.message}`);
+	}
+	return lines.join("\n");
+}
+
+function batchImageCallId(imageCallId: string, batchIndex: number, batchSize: number): string {
+	if (batchSize === 1) return imageCallId;
+	const suffix = `-batch-${batchIndex + 1}`;
+	return `${imageCallId.slice(0, Math.max(1, MAX_IMAGE_IDENTIFIER_CHARS - suffix.length))}${suffix}`;
+}
+
+async function persistGeneratedImage(args: {
+	generated: ParsedGeneratedImage;
+	params: ReturnType<typeof normalizeGenerateImageParams>;
+	batchIndex: number;
+	toolCallId: string;
+	batchSize: number;
+	imageModel: string;
+	routingModel: string;
+	agentDir: string;
+	sessionId: string;
+	referencesCount: number;
+	explicitOutput?: ExplicitOutputPlan;
+	deps: ImageGenerationServiceDependencies;
+}): Promise<ImageGenerationDetails> {
+	const imageCallId = batchImageCallId(args.generated.imageCallId || args.toolCallId, args.batchIndex, args.batchSize);
+	try {
+		const artifactPath = await args.deps.saveCanonical({
+			bytes: args.generated.bytes,
+			agentDir: args.agentDir,
+			sessionId: args.sessionId,
+			imageCallId,
+		});
+
+		let outputPath: string | undefined;
+		let warning: string | undefined;
+		if (args.explicitOutput) {
+			try {
+				await args.deps.copyExplicit({ bytes: args.generated.bytes, plan: args.explicitOutput });
+				outputPath = args.explicitOutput.path;
+			} catch (error) {
+				warning = sanitizeImageDiagnostic(
+					error instanceof Error ? error.message : error,
+					`The generated image was saved to the canonical artifact, but copying to ${args.explicitOutput.path} failed.`,
+				);
+			}
+		}
+
+		return {
+			artifactPath,
+			...(outputPath ? { outputPath } : {}),
+			routingModel: args.routingModel,
+			imageModel: args.imageModel,
+			imageCallId,
+			...(args.generated.responseId ? { responseId: args.generated.responseId } : {}),
+			mimeType: IMAGE_GENERATION_MIME_TYPE,
+			byteCount: args.generated.bytes.length,
+			width: args.generated.width,
+			height: args.generated.height,
+			edited: args.params.action === "edit",
+			referenceCount: args.referencesCount,
+			...(args.generated.revisedPrompt ? { revisedPrompt: args.generated.revisedPrompt } : {}),
+			...(warning ? { warning } : {}),
+		};
+	} finally {
+		args.generated.bytes.fill(0);
+	}
 }
 
 export function createImageGenerationExecutor(
@@ -174,80 +270,85 @@ export function createImageGenerationExecutor(
 			ctx: args.ctx,
 			signal: args.signal,
 		});
-		let generated: ParsedGeneratedImage | undefined;
 		try {
-			throwIfAborted(args.signal);
-			const body = buildImageGenerationRequest({
-				routingModel: runtimeResolution.runtime.model,
-				imageModel,
-				params,
-				references,
-			});
-			const response = await deps.requestImage({
-				runtime: runtimeResolution.runtime,
-				body,
-				signal: args.signal,
-			});
-			if (!response.ok) {
-				throw new ImageGenerationError(
-					clientFailureCode(response.reason),
-					response.errorMessage,
-				);
-			}
-			generated = response.image;
-
-			const artifactPath = await deps.saveCanonical({
-				bytes: generated.bytes,
-				agentDir,
-				sessionId: args.ctx.sessionManager.getSessionId(),
-				imageCallId: generated.imageCallId || args.toolCallId,
-			});
-
-			let outputPath: string | undefined;
-			let warning: string | undefined;
-			if (explicitOutput) {
-				try {
-					await deps.copyExplicit({ bytes: generated.bytes, plan: explicitOutput });
-					outputPath = explicitOutput.path;
-				} catch (error) {
-					warning = sanitizeImageDiagnostic(
-						error instanceof Error ? error.message : error,
-						`The generated image was saved to the canonical artifact, but copying to ${explicitOutput.path} failed.`,
-					);
+			const jobs = Array.from({ length: params.batchSize }, (_, batchIndex) =>
+				(async () => {
+					throwIfAborted(args.signal);
+					const body = buildImageGenerationRequest({
+						imageModel,
+						params,
+						references,
+					});
+					const response = await deps.requestImage({
+						runtime: runtimeResolution.runtime,
+						body,
+						signal: args.signal,
+					});
+					if (!response.ok) {
+						throw new ImageGenerationError(
+							clientFailureCode(response.reason),
+							sanitizeImageDiagnostic(response.errorMessage, "Image generation request failed."),
+						);
+					}
+					return persistGeneratedImage({
+						generated: response.image,
+						params,
+						batchIndex,
+						toolCallId: args.toolCallId,
+						batchSize: params.batchSize,
+						imageModel,
+						routingModel: `${runtimeResolution.runtime.provider}/${runtimeResolution.runtime.model}`,
+						agentDir,
+						sessionId: args.ctx.sessionManager.getSessionId(),
+						referencesCount: references.length,
+						explicitOutput,
+						deps,
+					});
+				})(),
+			);
+			const settled = await Promise.allSettled(jobs);
+			const images: ImageGenerationDetails[] = [];
+			const failures: ImageGenerationBatchDetails["failures"] = [];
+			for (const [index, result] of settled.entries()) {
+				if (result.status === "fulfilled") {
+					images.push(result.value);
+				} else {
+					const error = asImageGenerationError(result.reason);
+					failures.push({ index, code: error.code, message: error.message });
 				}
 			}
 
-			const edited = references.length > 0;
-			const details = {
-				artifactPath,
-				...(outputPath ? { outputPath } : {}),
-				routingModel: `${runtimeResolution.runtime.provider}/${runtimeResolution.runtime.model}`,
-				imageModel,
-				imageCallId: generated.imageCallId,
-				...(generated.responseId ? { responseId: generated.responseId } : {}),
-				mimeType: IMAGE_GENERATION_MIME_TYPE,
-				byteCount: generated.bytes.length,
-				width: generated.width,
-				height: generated.height,
-				edited,
-				referenceCount: references.length,
-				...(generated.revisedPrompt ? { revisedPrompt: generated.revisedPrompt } : {}),
-				...(warning ? { warning } : {}),
+			if (images.length === 0) {
+				const firstFailure = settled.find((result) => result.status === "rejected");
+				throw asImageGenerationError(firstFailure && firstFailure.status === "rejected" ? firstFailure.reason : "Image generation failed.");
+			}
+
+			if (params.batchSize === 1) {
+				const details = images[0]!;
+				return {
+					details,
+					text: formatResultText({
+						artifactPath: details.artifactPath,
+						outputPath: details.outputPath,
+						warning: details.warning,
+						edited: details.edited,
+						width: details.width,
+						height: details.height,
+					}),
+				};
+			}
+
+			const batchDetails: ImageGenerationBatchDetails = {
+				batch: true,
+				requestedCount: params.batchSize,
+				succeededCount: images.length,
+				failedCount: failures.length,
+				images,
+				...(failures.length > 0 ? { failures } : {}),
 			};
-			return {
-				details,
-				text: formatResultText({
-					artifactPath,
-					outputPath,
-					warning,
-					edited,
-					width: generated.width,
-					height: generated.height,
-				}),
-			};
+			return { details: batchDetails, text: formatBatchResultText(batchDetails) };
 		} finally {
 			deps.clearReferences(references);
-			generated?.bytes.fill(0);
 		}
 	};
 }

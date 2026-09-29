@@ -23,8 +23,9 @@ export const IMAGE_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 export const MAX_IMAGE_PATH_CHARS = 4096;
 export const MAX_IMAGE_DIAGNOSTIC_CHARS = 4096;
 export const MAX_IMAGE_IDENTIFIER_CHARS = 256;
-/** Upper bound for a configured or requested `image_generation` model id. */
+/** Upper bound for a configured or requested Images API model id. */
 export const MAX_IMAGE_MODEL_ID_CHARS = 256;
+export const MAX_IMAGE_BATCH_SIZE = 10;
 export const MAX_IMAGE_DIMENSION = 100_000;
 
 export type ImageGenerationCapableApi = (typeof IMAGE_GENERATION_CAPABLE_APIS)[number];
@@ -45,8 +46,10 @@ export type GenerateImageParams = {
 	outputPath?: string | null;
 	size?: ImageGenerationSize;
 	quality?: ImageGenerationQuality;
-	/** Optional bare image model id that must exist in `imageGeneration.models`. */
+	/** Optional bare image model id that must exist in the configured image model allowlist. */
 	model?: string | null;
+	/** Number of independent image requests to run concurrently. */
+	batchSize?: number | null;
 };
 
 export type NormalizedGenerateImageParams = {
@@ -56,6 +59,7 @@ export type NormalizedGenerateImageParams = {
 	size: ImageGenerationSize;
 	quality: ImageGenerationQuality;
 	action: ImageGenerationAction;
+	batchSize: number;
 	/** Trimmed requested model id, or undefined when the caller omitted it. */
 	model?: string;
 };
@@ -92,8 +96,25 @@ export type ImageGenerationDetails = {
 	warning?: string;
 };
 
+export type ImageGenerationBatchFailure = {
+	index: number;
+	code: ImageGenerationFailureCode;
+	message: string;
+};
+
+export type ImageGenerationBatchDetails = {
+	batch: true;
+	requestedCount: number;
+	succeededCount: number;
+	failedCount: number;
+	images: ImageGenerationDetails[];
+	failures?: ImageGenerationBatchFailure[];
+};
+
+export type ImageGenerationToolDetails = ImageGenerationDetails | ImageGenerationBatchDetails;
+
 export type ImageGenerationExecutionResult = {
-	details: ImageGenerationDetails;
+	details: ImageGenerationToolDetails;
 	text: string;
 };
 
@@ -119,6 +140,35 @@ export type ImageGenerationFailureCode =
 	| "malformed-response"
 	| "no-image"
 	| "artifact-write-failed";
+
+function isImageGenerationFailureCode(value: unknown): value is ImageGenerationFailureCode {
+	switch (value) {
+		case "aborted":
+		case "timeout":
+		case "disabled":
+		case "unsupported-model":
+		case "missing-runtime":
+		case "invalid-parameters":
+		case "reference-input-invalid":
+		case "reference-upload-approval-required":
+		case "reference-upload-declined":
+		case "output-path-invalid":
+		case "output-path-approval-required":
+		case "output-path-declined":
+		case "authentication":
+		case "rate-limit":
+		case "request-rejected":
+		case "backend-unavailable":
+		case "network":
+		case "oversized-response":
+		case "malformed-response":
+		case "no-image":
+		case "artifact-write-failed":
+			return true;
+		default:
+			return false;
+	}
+}
 
 export class ImageGenerationError extends Error {
 	readonly code: ImageGenerationFailureCode;
@@ -168,6 +218,47 @@ export function isImageGenerationDetails(value: unknown): value is ImageGenerati
 		(value.revisedPrompt === undefined || isBoundedString(value.revisedPrompt, MAX_IMAGE_DIAGNOSTIC_CHARS)) &&
 		(value.warning === undefined || isBoundedString(value.warning, MAX_IMAGE_DIAGNOSTIC_CHARS))
 	);
+}
+
+function isBoundedIndex(value: unknown, maximum: number): value is number {
+	return typeof value === "number" && Number.isInteger(value) && value >= 0 && value < maximum;
+}
+
+export function isImageGenerationBatchDetails(value: unknown): value is ImageGenerationBatchDetails {
+	if (!isRecord(value) || value.batch !== true) return false;
+	if (
+		typeof value.requestedCount !== "number" ||
+		!Number.isInteger(value.requestedCount) ||
+		value.requestedCount < 2 ||
+		value.requestedCount > MAX_IMAGE_BATCH_SIZE ||
+		typeof value.succeededCount !== "number" ||
+		!Number.isInteger(value.succeededCount) ||
+		value.succeededCount < 1 ||
+		value.succeededCount > value.requestedCount ||
+		typeof value.failedCount !== "number" ||
+		!Number.isInteger(value.failedCount) ||
+		value.failedCount !== value.requestedCount - value.succeededCount ||
+		!Array.isArray(value.images) ||
+		value.images.length !== value.succeededCount ||
+		!value.images.every(isImageGenerationDetails)
+	) {
+		return false;
+	}
+	if (value.failedCount === 0) return value.failures === undefined;
+	if (!Array.isArray(value.failures) || value.failures.length !== value.failedCount) return false;
+	const requestedCount = value.requestedCount;
+	const indexes = new Set<number>();
+	return value.failures.every((failure) => {
+		if (!isRecord(failure) || !isBoundedIndex(failure.index, requestedCount)) return false;
+		if (!isImageGenerationFailureCode(failure.code) || !isBoundedString(failure.message, MAX_IMAGE_DIAGNOSTIC_CHARS)) return false;
+		if (indexes.has(failure.index)) return false;
+		indexes.add(failure.index);
+		return true;
+	});
+}
+
+export function isImageGenerationToolDetails(value: unknown): value is ImageGenerationToolDetails {
+	return isImageGenerationDetails(value) || isImageGenerationBatchDetails(value);
 }
 
 export function sanitizeImageDiagnostic(value: unknown, fallback: string): string {

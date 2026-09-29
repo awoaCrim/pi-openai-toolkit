@@ -21,7 +21,7 @@ import {
 	MAX_GENERATED_IMAGE_BYTES,
 	isImageGenerationDetails,
 	type GenerateImageParams,
-	type ImageGenerationDetails,
+	type ImageGenerationToolDetails,
 } from "./types";
 
 export type ImageGenerationRenderState = Record<string, never>;
@@ -54,7 +54,7 @@ function isPathInsideOrEqual(root: string, candidate: string): boolean {
 	return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
 }
 
-function resultText(result: AgentToolResult<ImageGenerationDetails>): string {
+function resultText(result: AgentToolResult<ImageGenerationToolDetails>): string {
 	return result.content
 		.filter((block): block is { type: "text"; text: string } => block.type === "text")
 		.map((block) => block.text)
@@ -148,7 +148,7 @@ function textOnly(args: {
 export function createImageGenerationResultRenderer(
 	deps: ImageRendererDependencies = DEFAULT_RENDER_DEPS,
 ): (
-	result: AgentToolResult<ImageGenerationDetails>,
+	result: AgentToolResult<ImageGenerationToolDetails>,
 	options: ToolRenderResultOptions,
 	theme: Theme,
 	context: ImageGenerationRenderContext,

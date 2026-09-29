@@ -3,7 +3,7 @@ import type { ResponsesRuntime } from "../runtime";
 import { DEFAULT_IMAGE_GENERATION_MODEL } from "../types";
 import { _clientTest, requestGeneratedImage } from "./client";
 import { buildImageGenerationRequest, normalizeGenerateImageParams } from "./protocol";
-import { completedImageResponse } from "./test-helpers";
+import { completedImageResponse, validPng } from "./test-helpers";
 
 function runtime(overrides: Partial<ResponsesRuntime> = {}): ResponsesRuntime {
 	return {
@@ -38,17 +38,16 @@ function codexToken(accountId: string): string {
 	].join(".");
 }
 
-function body() {
+function body(overrides: Parameters<typeof normalizeGenerateImageParams>[0] = {}) {
 	return buildImageGenerationRequest({
-		routingModel: "gpt-5.5",
 		imageModel: DEFAULT_IMAGE_GENERATION_MODEL,
-		params: normalizeGenerateImageParams({ prompt: "draw a cat" }),
+		params: normalizeGenerateImageParams({ prompt: "draw a cat", ...overrides }),
 		references: [],
 	});
 }
 
 describe("image generation client", () => {
-	test("preserves provider headers and only adds bearer auth when absent", () => {
+	test("preserves provider headers and supports omitting content-type for multipart", () => {
 		const headers = _clientTest.buildRequestHeaders(
 			runtime({
 				headers: {
@@ -64,11 +63,11 @@ describe("image generation client", () => {
 		expect(headers.get("content-type")).toBe("application/json");
 		expect(headers.get("accept")).toBe("application/json");
 
-		const bearer = _clientTest.buildRequestHeaders(runtime());
-		expect(bearer.get("authorization")).toBe("Bearer sk-secret");
+		const multipartHeaders = _clientTest.buildRequestHeaders(runtime(), null);
+		expect(multipartHeaders.has("content-type")).toBe(false);
 	});
 
-	test("adds the established Codex Responses headers for a current Codex model", () => {
+	test("adds the established Codex headers for a current Codex model", () => {
 		const token = codexToken("acct_image");
 		const headers = _clientTest.buildRequestHeaders(
 			runtime({
@@ -91,9 +90,30 @@ describe("image generation client", () => {
 		expect(headers.get("user-agent")).toContain("pi (");
 	});
 
-	test("sends one non-streaming request and parses the completed image", async () => {
+	test("builds API-family-specific image endpoints", () => {
+		expect(_clientTest.buildImagesEndpoint(runtime(), "generate")).toBe(
+			"https://gateway.example/v1/images/generations",
+		);
+		expect(_clientTest.buildImagesEndpoint(runtime(), "edit")).toBe("https://gateway.example/v1/images/edits");
+		expect(
+			_clientTest.buildImagesEndpoint(
+				runtime({ api: "openai-codex-responses", baseUrl: "https://chatgpt.com/backend-api" }),
+				"generate",
+			),
+		).toBe("https://chatgpt.com/backend-api/codex/images/generations");
+		expect(
+			_clientTest.buildImagesEndpoint(
+				runtime({ api: "openai-codex-responses", baseUrl: "https://chatgpt.com/backend-api/codex" }),
+				"edit",
+			),
+		).toBe("https://chatgpt.com/backend-api/codex/images/edits");
+		expect(() => _clientTest.buildImagesEndpoint(runtime({ baseUrl: "https://gateway.example/v1/responses" }), "generate"))
+			.toThrow("provider base URL");
+	});
+
+	test("sends one independent JSON Images request without Responses tool fields", async () => {
 		let calls = 0;
-		let capturedUrl: string | undefined;
+		let capturedUrl = "";
 		let capturedInit: RequestInit | undefined;
 		const result = await requestGeneratedImage({
 			runtime: runtime(),
@@ -111,9 +131,70 @@ describe("image generation client", () => {
 
 		expect(result.ok).toBe(true);
 		expect(calls).toBe(1);
-		expect(capturedUrl).toBe("https://gateway.example/v1/responses");
+		expect(capturedUrl).toBe("https://gateway.example/v1/images/generations");
 		expect(capturedInit?.method).toBe("POST");
-		expect(JSON.parse(String(capturedInit?.body))).toEqual(body());
+		const requestBody = JSON.parse(String(capturedInit?.body)) as Record<string, unknown>;
+		expect(requestBody).toEqual({
+			model: DEFAULT_IMAGE_GENERATION_MODEL,
+			prompt: "draw a cat",
+			n: 1,
+			size: "auto",
+			quality: "auto",
+			output_format: "png",
+			response_format: "b64_json",
+		});
+		expect(requestBody).not.toHaveProperty("tools");
+		expect(requestBody).not.toHaveProperty("tool_choice");
+		expect(requestBody).not.toHaveProperty("input");
+	});
+
+	test("uses multipart for a standard-provider edit request", async () => {
+		const reference = { path: "ref.png", mimeType: "image/png" as const, bytes: validPng() };
+		const editBody = buildImageGenerationRequest({
+			imageModel: "gpt-image-2.5",
+			params: normalizeGenerateImageParams({ prompt: "edit", referenceImagePaths: ["ref.png"] }),
+			references: [reference],
+		});
+		let capturedInit: RequestInit | undefined;
+		const result = await requestGeneratedImage({
+			runtime: runtime(),
+			body: editBody,
+			fetchFn: async (_input, init) => {
+				capturedInit = init;
+				return new Response(JSON.stringify(completedImageResponse()), { status: 200 });
+			},
+		});
+		expect(result.ok).toBe(true);
+		expect(capturedInit?.body).toBeInstanceOf(FormData);
+		expect((capturedInit?.body as FormData).get("model")).toBe("gpt-image-2.5");
+		expect((capturedInit?.body as FormData).get("prompt")).toBe("edit");
+		expect((capturedInit?.body as FormData).getAll("image")).toHaveLength(1);
+		expect((capturedInit?.headers as Headers).has("content-type")).toBe(false);
+	});
+
+	test("uses the Codex Images JSON edit shape", async () => {
+		const reference = { path: "ref.png", mimeType: "image/png" as const, bytes: validPng() };
+		const editBody = buildImageGenerationRequest({
+			imageModel: "gpt-image-2",
+			params: normalizeGenerateImageParams({ prompt: "edit", referenceImagePaths: ["ref.png"] }),
+			references: [reference],
+		});
+		let capturedUrl = "";
+		let capturedInit: RequestInit | undefined;
+		const result = await requestGeneratedImage({
+			runtime: runtime({ api: "openai-codex-responses", baseUrl: "https://chatgpt.com/backend-api" }),
+			body: editBody,
+			fetchFn: async (input, init) => {
+				capturedUrl = String(input);
+				capturedInit = init;
+				return new Response(JSON.stringify(completedImageResponse()), { status: 200 });
+			},
+		});
+		expect(result.ok).toBe(true);
+		expect(capturedUrl).toBe("https://chatgpt.com/backend-api/codex/images/edits");
+		const requestBody = JSON.parse(String(capturedInit?.body)) as Record<string, unknown>;
+		expect(requestBody).toMatchObject({ model: "gpt-image-2", prompt: "edit", n: 1 });
+		expect(requestBody.images).toEqual([{ image_url: `data:image/png;base64,${validPng().toString("base64")}` }]);
 	});
 
 	test("maps rate limits without exposing raw bodies and never retries", async () => {
@@ -129,7 +210,6 @@ describe("image generation client", () => {
 				);
 			},
 		});
-
 		expect(result).toEqual({
 			ok: false,
 			reason: "rate-limit",
@@ -139,59 +219,22 @@ describe("image generation client", () => {
 		expect(calls).toBe(1);
 	});
 
-	test("recognizes provider usage-limit errors even when returned as HTTP 400", async () => {
-		const result = await requestGeneratedImage({
+	test("fails closed on oversized responses and preserves cancellation", async () => {
+		const oversized = await requestGeneratedImage({
 			runtime: runtime(),
 			body: body(),
-			fetchFn: async () =>
-				new Response(
-					JSON.stringify({
-						error: {
-							code: "usage_limit_reached",
-							message: "Monthly image usage limit reached.",
-						},
-					}),
-					{ status: 400, headers: { "content-type": "application/json" } },
-				),
+			fetchFn: async () => new Response("{}", { status: 200, headers: { "content-length": String(49 * 1024 * 1024) } }),
 		});
-		expect(result).toEqual({
-			ok: false,
-			reason: "rate-limit",
-			status: 400,
-			errorMessage: "Monthly image usage limit reached.",
-		});
-	});
+		expect(oversized).toEqual(expect.objectContaining({ ok: false, reason: "oversized-response", status: 200 }));
 
-	test("fails closed on oversized response bodies", async () => {
-		const result = await requestGeneratedImage({
-			runtime: runtime(),
-			body: body(),
-			fetchFn: async () =>
-				new Response("{}", {
-					status: 200,
-					headers: { "content-length": String(49 * 1024 * 1024) },
-				}),
-		});
-		expect(result).toEqual(
-			expect.objectContaining({ ok: false, reason: "oversized-response", status: 200 }),
-		);
-	});
-
-	test("preserves caller cancellation", async () => {
 		const controller = new AbortController();
 		controller.abort();
-		const result = await requestGeneratedImage({
+		const cancelled = await requestGeneratedImage({
 			runtime: runtime(),
 			body: body(),
 			signal: controller.signal,
-			fetchFn: async () => {
-				throw new DOMException("aborted", "AbortError");
-			},
+			fetchFn: async () => { throw new DOMException("aborted", "AbortError"); },
 		});
-		expect(result).toEqual({
-			ok: false,
-			reason: "aborted",
-			errorMessage: "Image generation was cancelled.",
-		});
+		expect(cancelled).toEqual({ ok: false, reason: "aborted", errorMessage: "Image generation was cancelled." });
 	});
 });

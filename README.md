@@ -168,7 +168,7 @@ Toolkit does not fall back between routes. See [search configuration](docs/confi
 
 ### Generate an image
 
-Requires a Responses session and may incur provider charges. Enable it with an image model your provider supports:
+Requires an eligible Responses-capable session and may incur provider charges. The local Pi tool sends a separate Images API request to the current provider (`/images/generations` or `/images/edits`; Codex uses `/codex/images/...`) rather than adding an image tool to the conversation request. Enable it with an image model your provider supports:
 
 ```json
 {
@@ -183,7 +183,7 @@ Requires a Responses session and may incur provider charges. Enable it with an i
 }
 ```
 
-Ask Pi to generate an image or edit explicitly supplied local references using `openai_generate_image`. The default model must be in `allowedModels`; image settings are global. See [image configuration](docs/configuration.md#images).
+Ask Pi to generate an image or edit explicitly supplied local references using `openai_generate_image`. The selected image model is sent in the independent request; the active conversation model remains the routing/auth model. Set the tool's optional `model` to another exact `allowedModels` entry, or use `batchSize` (1-10) for concurrent independent variants. Batch calls save canonical artifacts and cannot use a single-file `outputPath`; image settings are global. See [image configuration](docs/configuration.md#images).
 
 ### Review tool calls automatically
 

@@ -168,7 +168,7 @@ Toolkit 不会在路由之间自动回退。后端要求见[搜索配置](docs/c
 
 ### 生成图片
 
-需要 Responses 会话，并可能产生服务商费用。选择服务商支持的生图模型后启用：
+需要符合条件的 Responses-capable 会话，并可能产生服务商费用。Pi 工具会向当前服务商发送独立的 Images API 请求（`/images/generations` 或 `/images/edits`；Codex 使用 `/codex/images/...`），不会把生图 tool 加入普通对话请求。选择服务商支持的生图模型后启用：
 
 ```json
 {
@@ -183,7 +183,7 @@ Toolkit 不会在路由之间自动回退。后端要求见[搜索配置](docs/c
 }
 ```
 
-让 Pi 通过 `openai_generate_image` 生成图片，或编辑明确提供的本地参考图。默认模型必须在 `allowedModels` 中；生图设置全局生效。详见[生图配置](docs/configuration.md#images)。
+让 Pi 通过 `openai_generate_image` 生成图片，或编辑明确提供的本地参考图。选中的生图模型会写入独立请求；当前对话模型仍只负责路由和认证。工具的可选 `model` 必须精确匹配 `allowedModels`，也可以使用 `batchSize`（1-10）并发生成多个独立变体。批量调用会保存 canonical artifacts，不能同时指定单文件 `outputPath`；生图设置全局生效。详见[生图配置](docs/configuration.md#images)。
 
 ### 启用工具调用自动审查
 
