@@ -9,13 +9,14 @@ import {
 	IMAGE_GENERATION_QUALITIES,
 	IMAGE_GENERATION_SIZES,
 	IMAGE_GENERATION_TOOL_NAME,
+	MAX_IMAGE_BATCH_SIZE,
 	MAX_IMAGE_MODEL_ID_CHARS,
 	MAX_IMAGE_PATH_CHARS,
 	MAX_IMAGE_PROMPT_CHARS,
 	MAX_REFERENCE_IMAGE_COUNT,
 	ImageGenerationError,
 	sanitizeImageDiagnostic,
-	type ImageGenerationDetails,
+	type ImageGenerationToolDetails,
 } from "./types";
 
 const registeredApis = new WeakSet<object>();
@@ -82,6 +83,18 @@ const GenerateImageParameters = Type.Object(
 				},
 			),
 		),
+		batchSize: Type.Optional(
+			Type.Union(
+				[
+					Type.Null(),
+					Type.Integer({ minimum: 1, maximum: MAX_IMAGE_BATCH_SIZE }),
+				],
+				{
+					description:
+						"Run this many independent image requests concurrently (1-10). Batch requests use generated artifacts and cannot set outputPath.",
+				},
+			),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -111,12 +124,12 @@ export function registerImageGenerationExtension(
 	if (registeredApis.has(pi)) return;
 	registeredApis.add(pi);
 
-	pi.registerTool<typeof GenerateImageParameters, ImageGenerationDetails, Record<string, never>>({
+	pi.registerTool<typeof GenerateImageParameters, ImageGenerationToolDetails, Record<string, never>>({
 		name: IMAGE_GENERATION_TOOL_NAME,
 		label: "OpenAI Generate Image",
 		description:
-			"Generate a PNG image, or edit from one to five user-approved local reference images, through the current Responses-capable model and a configured hosted image_generation model. This is a paid provider operation.",
-		promptSnippet: "Generate or edit PNG images through the current Responses-capable model and a configured imageGeneration.allowedModels entry.",
+			"Generate PNG images, or edit from one to five user-approved local reference images, through an independent Images API request using a configured image model. This is a paid provider operation; batchSize runs independent requests concurrently.",
+		promptSnippet: "Generate or edit PNG images through an independent Images API request and a configured imageGeneration.allowedModels entry.",
 		promptGuidelines: [
 			"Use openai_generate_image when the user explicitly asks to create, draw, render, or edit a raster image and the active model speaks a Responses API.",
 			"Do not call openai_generate_image speculatively: it consumes the user's provider or gateway image quota.",
@@ -124,6 +137,7 @@ export function registerImageGenerationExtension(
 			"Set referenceImagePaths to null unless the user explicitly identified local files; never invent paths or placeholder strings, and remember upload requires user approval.",
 			"Set outputPath to null unless the user explicitly asks for a destination; never invent a destination or placeholder string, and otherwise use the default Pi agent artifact.",
 			"Set model to null unless the user named an image model configured in imageGeneration.allowedModels; never invent or guess a model id, and remember an unlisted model fails before the paid request.",
+			"Use batchSize only when the user asks for multiple variants; each batch item is an independent paid request, and batchSize cannot be combined with outputPath.",
 			"Do not substitute Python, browser automation, shell scripts, or unrelated image tools for an eligible image request.",
 		],
 		parameters: GenerateImageParameters,

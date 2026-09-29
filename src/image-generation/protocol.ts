@@ -4,6 +4,7 @@ import {
 	IMAGE_GENERATION_QUALITIES,
 	IMAGE_GENERATION_SIZES,
 	MAX_GENERATED_IMAGE_BYTES,
+	MAX_IMAGE_BATCH_SIZE,
 	MAX_IMAGE_DIAGNOSTIC_CHARS,
 	MAX_IMAGE_DIMENSION,
 	MAX_IMAGE_IDENTIFIER_CHARS,
@@ -26,26 +27,13 @@ const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/
 const DATA_URL_PATTERN = /^data:image\/[a-z0-9.+-]+;base64,(.*)$/is;
 
 export type ImageGenerationRequestBody = {
+	action: NormalizedGenerateImageParams["action"];
 	model: string;
-	store: false;
-	stream: false;
-	parallel_tool_calls: false;
-	input: Array<{
-		role: "user";
-		content: Array<
-			| { type: "input_text"; text: string }
-			| { type: "input_image"; image_url: string; detail: "auto" }
-		>;
-	}>;
-	tools: Array<{
-		type: "image_generation";
-		model: string;
-		action: "generate" | "edit";
-		size: NormalizedGenerateImageParams["size"];
-		quality: NormalizedGenerateImageParams["quality"];
-		output_format: "png";
-	}>;
-	tool_choice: { type: "image_generation" };
+	prompt: string;
+	n: 1;
+	size: NormalizedGenerateImageParams["size"];
+	quality: NormalizedGenerateImageParams["quality"];
+	references: readonly PreparedReferenceImage[];
 };
 
 export type ParsedImageResponseResult =
@@ -137,6 +125,22 @@ function normalizeRequestedModel(value: unknown): string | undefined {
 	return trimmed;
 }
 
+function normalizeBatchSize(value: unknown): number {
+	if (value === null || value === undefined) return 1;
+	if (
+		typeof value !== "number" ||
+		!Number.isInteger(value) ||
+		value < 1 ||
+		value > MAX_IMAGE_BATCH_SIZE
+	) {
+		throw new ImageGenerationError(
+			"invalid-parameters",
+			`batchSize must be an integer from 1 to ${MAX_IMAGE_BATCH_SIZE}.`,
+		);
+	}
+	return value;
+}
+
 /**
  * Configured model ids are only trusted as far as the shared bounds: unusable entries are
  * dropped, and an empty or malformed list falls back to the shipped default model.
@@ -153,7 +157,7 @@ function usableImageModels(models: readonly string[] | undefined): string[] {
 }
 
 /**
- * Resolve the nested `image_generation` model for one call. An omitted request selects the
+ * Resolve the independent Images API model for one call. An omitted request selects the
  * explicit default when supplied (v2), or the first configured model for legacy callers.
  * An explicit request must match a configured id exactly before any paid dispatch.
  */
@@ -213,6 +217,13 @@ export function normalizeGenerateImageParams(
 
 	const referenceImagePaths = normalizePathList(params.referenceImagePaths);
 	const outputPath = normalizeOutputPath(params.outputPath);
+	const batchSize = normalizeBatchSize(params.batchSize);
+	if (batchSize > 1 && outputPath !== undefined) {
+		throw new ImageGenerationError(
+			"invalid-parameters",
+			"outputPath cannot be used when batchSize is greater than 1; use the generated artifacts instead.",
+		);
+	}
 
 	return {
 		prompt,
@@ -221,12 +232,12 @@ export function normalizeGenerateImageParams(
 		size,
 		quality,
 		model: normalizeRequestedModel(params.model),
+		batchSize,
 		action: referenceImagePaths.length > 0 ? "edit" : "generate",
 	};
 }
 
 export function buildImageGenerationRequest(args: {
-	routingModel: string;
 	imageModel: string;
 	params: NormalizedGenerateImageParams;
 	references: readonly PreparedReferenceImage[];
@@ -238,34 +249,14 @@ export function buildImageGenerationRequest(args: {
 			"A configured image generation model is required.",
 		);
 	}
-	const content: ImageGenerationRequestBody["input"][number]["content"] = [
-		{ type: "input_text", text: args.params.prompt },
-	];
-	for (const reference of args.references) {
-		content.push({
-			type: "input_image",
-			image_url: `data:${reference.mimeType};base64,${reference.bytes.toString("base64")}`,
-			detail: "auto",
-		});
-	}
-
 	return {
-		model: args.routingModel,
-		store: false,
-		stream: false,
-		parallel_tool_calls: false,
-		input: [{ role: "user", content }],
-		tools: [
-			{
-				type: "image_generation",
-				model: imageModel,
-				action: args.params.action,
-				size: args.params.size,
-				quality: args.params.quality,
-				output_format: "png",
-			},
-		],
-		tool_choice: { type: "image_generation" },
+		action: args.params.action,
+		model: imageModel,
+		prompt: args.params.prompt,
+		n: 1,
+		size: args.params.size,
+		quality: args.params.quality,
+		references: args.references,
 	};
 }
 
@@ -390,7 +381,7 @@ export function extractProviderErrorMessage(value: unknown, fallback: string): s
 	return fallback;
 }
 
-export function parseImageGenerationResponse(value: unknown): ParsedImageResponseResult {
+export function parseImagesApiResponse(value: unknown): ParsedImageResponseResult {
 	if (!isRecord(value)) {
 		return {
 			ok: false,
@@ -398,75 +389,47 @@ export function parseImageGenerationResponse(value: unknown): ParsedImageRespons
 			errorMessage: "Image generation returned a non-object response.",
 		};
 	}
-
-	if (value.status !== "completed") {
-		return {
-			ok: false,
-			reason: "request-rejected",
-			errorMessage: extractProviderErrorMessage(
-				value,
-				`Image generation did not complete (status: ${String(value.status ?? "unknown")}).`,
-			),
-		};
-	}
-	if (!Array.isArray(value.output)) {
+	if (!Array.isArray(value.data)) {
 		return {
 			ok: false,
 			reason: "malformed-response",
-			errorMessage: "Image generation response did not contain an output array.",
+			errorMessage: "Image generation response did not contain a data array.",
 		};
 	}
-
-	const calls = new Map<string, { result: string; revisedPrompt?: string }>();
-	for (let index = 0; index < value.output.length; index += 1) {
-		const item = value.output[index];
-		if (!isRecord(item) || item.type !== "image_generation_call") continue;
-		if (item.status !== "completed") continue;
-		const result = typeof item.result === "string"
-			? item.result
-			: typeof item.b64_json === "string"
-				? item.b64_json
-				: undefined;
-		if (!result?.trim()) continue;
-		const id = normalizedOptionalString(item.id, MAX_IMAGE_IDENTIFIER_CHARS) ?? `image_generation_${index}`;
-		const revisedPrompt = normalizedOptionalString(item.revised_prompt, MAX_IMAGE_DIAGNOSTIC_CHARS);
-		const existing = calls.get(id);
-		if (existing && existing.result !== result) {
-			return {
-				ok: false,
-				reason: "malformed-response",
-				errorMessage: "Image generation returned conflicting results for one image call.",
-			};
-		}
-		calls.set(id, { result, revisedPrompt: revisedPrompt ?? existing?.revisedPrompt });
-	}
-
-	if (calls.size === 0) {
+	if (value.data.length === 0) {
 		return {
 			ok: false,
 			reason: "no-image",
 			errorMessage: "Image generation completed without a usable image result.",
 		};
 	}
-	if (calls.size !== 1) {
+	if (value.data.length !== 1) {
 		return {
 			ok: false,
 			reason: "malformed-response",
-			errorMessage: "Image generation returned more than one image result for a single-image request.",
+			errorMessage: "Image generation returned more than one image for a single request.",
 		};
 	}
 
-	const [imageCallId, call] = [...calls.entries()][0]!;
-	const decoded = decodeGeneratedPng(call.result);
+	const item = value.data[0];
+	if (!isRecord(item) || typeof item.b64_json !== "string" || !item.b64_json.trim()) {
+		return {
+			ok: false,
+			reason: "no-image",
+			errorMessage: "Image generation response did not contain base64 image data.",
+		};
+	}
+	const decoded = decodeGeneratedPng(item.b64_json);
 	if (!decoded.ok) return decoded;
 
 	return {
 		ok: true,
 		image: {
 			bytes: decoded.bytes,
-			imageCallId,
+			imageCallId:
+				normalizedOptionalString(item.id, MAX_IMAGE_IDENTIFIER_CHARS) ?? "image_generation_0",
 			responseId: normalizedOptionalString(value.id, MAX_IMAGE_IDENTIFIER_CHARS),
-			revisedPrompt: call.revisedPrompt,
+			revisedPrompt: normalizedOptionalString(item.revised_prompt, MAX_IMAGE_DIAGNOSTIC_CHARS),
 			width: decoded.width,
 			height: decoded.height,
 		},

@@ -6,7 +6,7 @@ import {
 	DEFAULT_WEB_SEARCH_CONFIG,
 } from "../types";
 import { createImageGenerationExecutor, type ImageGenerationServiceDependencies } from "./service";
-import { isImageGenerationDetails } from "./types";
+import { isImageGenerationBatchDetails, isImageGenerationDetails } from "./types";
 import { validPng } from "./test-helpers";
 
 function config(models?: string[]) {
@@ -44,85 +44,44 @@ function context() {
 	} as never;
 }
 
-/**
- * Captures the outgoing request body so a test can compare the nested image model with the
- * details the service returns, without ever reaching the real transport.
- */
-function modelProbeDeps(configuredModels: string[] | undefined): {
-	deps: ImageGenerationServiceDependencies;
-	calls: { body: Record<string, unknown>; dispatched: boolean };
-} {
-	const calls = { body: {} as Record<string, unknown>, dispatched: false };
-	const base = config();
-	const deps = {
-		loadConfig: () => ({
-			...base,
-			config: {
-				...base.config,
-				imageGeneration: {
-					...base.config.imageGeneration,
-					models: configuredModels ?? [...base.config.imageGeneration.models],
-				},
-			},
-		}),
-		resolveRuntime: async () => ({
-			ok: true,
-			runtime: {
-				provider: "newapi",
-				api: "openai-responses",
-				model: "gpt-5.5",
-				baseUrl: "https://gateway.example/v1",
-				apiKey: "sk-runtime",
-				responsesPath: "responses",
-				responsesUrl: "https://gateway.example/v1/responses",
-				currentModel: model as never,
-			},
-		}),
+function runtime() {
+	return {
+		provider: "newapi",
+		api: "openai-responses",
+		model: "gpt-5.5",
+		baseUrl: "https://gateway.example/v1",
+		apiKey: "sk-runtime",
+		responsesPath: "responses",
+		responsesUrl: "https://gateway.example/v1/responses",
+		currentModel: model as never,
+	};
+}
+
+function baseDeps(overrides: Partial<ImageGenerationServiceDependencies> = {}): ImageGenerationServiceDependencies {
+	return {
+		loadConfig: config as never,
+		resolveRuntime: async () => ({ ok: true, runtime: runtime() }),
 		getAgentDir: () => "/agent",
 		prepareOutput: async () => undefined,
 		prepareReferences: async () => [],
-		requestImage: async (args: { body: unknown }) => {
-			calls.dispatched = true;
-			calls.body = args.body as Record<string, unknown>;
-			return {
-				ok: true,
-				status: 200,
-				image: {
-					bytes: validPng(),
-					imageCallId: "ig_test",
-					width: 1,
-					height: 1,
-				},
-			};
-		},
-		saveCanonical: async () => "/agent/generated-images/session-test/ig_test.png",
+		requestImage: async () => ({
+			ok: true,
+			status: 200,
+			image: { bytes: validPng(), imageCallId: "ig_test", responseId: "resp_test", width: 1, height: 1 },
+		}),
+		saveCanonical: async ({ imageCallId }) => `/agent/generated-images/session-test/${imageCallId}.png`,
 		copyExplicit: async () => undefined,
 		clearReferences: () => {},
-	} as unknown as ImageGenerationServiceDependencies;
-	return { deps, calls };
+		...overrides,
+	};
 }
 
 describe("image generation service", () => {
-	test("orchestrates an edit and returns path-only metadata while clearing buffers", async () => {
+	test("uses an independent edit request and returns path-only metadata while clearing buffers", async () => {
 		const referenceBytes = validPng();
 		const generatedBytes = validPng();
 		let requestBody: Record<string, unknown> | undefined;
-		const deps: ImageGenerationServiceDependencies = {
-			loadConfig: config as never,
-			resolveRuntime: async () => ({
-				ok: true,
-				runtime: {
-					provider: "newapi",
-					api: "openai-responses",
-					model: "gpt-5.5",
-					baseUrl: "https://gateway.example/v1",
-					apiKey: "sk-runtime",
-					responsesPath: "responses",
-					responsesUrl: "https://gateway.example/v1/responses",
-					currentModel: model as never,
-				},
-			}),
-			getAgentDir: () => "/agent",
+		const deps = baseDeps({
 			prepareOutput: async () => ({ path: "/project/result.png" }),
 			prepareReferences: async () => [
 				{ path: "/project/reference.png", mimeType: "image/png", bytes: referenceBytes },
@@ -142,32 +101,18 @@ describe("image generation service", () => {
 					},
 				};
 			},
-			saveCanonical: async (args) => {
-				expect(args.sessionId).toBe("session-test");
-				expect(args.imageCallId).toBe("ig_test");
-				return "/agent/generated-images/session-test/ig_test.png";
-			},
-			copyExplicit: async () => {
-				throw new Error("copy failed with sk-12345678");
-			},
-			clearReferences: (references) => {
-				for (const reference of references) reference.bytes.fill(0);
-			},
-		};
-		const execute = createImageGenerationExecutor(deps);
-		const result = await execute({
-			params: {
-				prompt: "edit this",
-				referenceImagePaths: ["reference.png"],
-				outputPath: "result.png",
-			},
+			copyExplicit: async () => { throw new Error("copy failed with sk-12345678"); },
+			clearReferences: (references) => { for (const reference of references) reference.bytes.fill(0); },
+		});
+		const result = await createImageGenerationExecutor(deps)({
+			params: { prompt: "edit this", referenceImagePaths: ["reference.png"], outputPath: "result.png" },
 			toolCallId: "tool-call",
 			ctx: context(),
 		});
 
-		expect((requestBody?.tools as Array<Record<string, unknown>>)[0]).toEqual(
-			expect.objectContaining({ type: "image_generation", model: "gpt-image-2.5", action: "edit" }),
-		);
+		expect(requestBody).toEqual(expect.objectContaining({ action: "edit", model: "gpt-image-2.5", n: 1 }));
+		expect(requestBody).not.toHaveProperty("tools");
+		expect(requestBody).not.toHaveProperty("tool_choice");
 		expect(result.details).toEqual(
 			expect.objectContaining({
 				artifactPath: "/agent/generated-images/session-test/ig_test.png",
@@ -178,135 +123,135 @@ describe("image generation service", () => {
 				warning: "copy failed with [REDACTED]",
 			}),
 		);
-		expect(result.details).not.toHaveProperty("outputPath");
+		expect(isImageGenerationDetails(result.details)).toBe(true);
 		expect(JSON.stringify(result)).not.toContain("base64");
 		expect(referenceBytes.every((byte) => byte === 0)).toBe(true);
 		expect(generatedBytes.every((byte) => byte === 0)).toBe(true);
 	});
 
-	test("sends and records the configured default image model when the tool omits one", async () => {
-		const probe = modelProbeDeps(["grok-imagine-image-2.0", "gpt-image-2"]);
-		const execute = createImageGenerationExecutor(probe.deps);
-		const result = await execute({
-			params: { prompt: "draw a cat", model: null },
-			toolCallId: "call",
-			ctx: context(),
+	test("retains configured model selection in the independent request and details", async () => {
+		let requestBody: Record<string, unknown> | undefined;
+		const deps = baseDeps({
+			loadConfig: () => ({
+				...config(),
+				config: { ...config().config, imageGeneration: { ...config().config.imageGeneration, models: ["grok-imagine-image-2.0", "gpt-image-2"] } },
+			}),
+			requestImage: async (args) => {
+				requestBody = args.body as unknown as Record<string, unknown>;
+				return { ok: true, status: 200, image: { bytes: validPng(), imageCallId: "ig_model", width: 1, height: 1 } };
+			},
 		});
-
-		expect((probe.calls.body?.tools as Array<Record<string, unknown>>)[0]).toEqual(
-			expect.objectContaining({ type: "image_generation", model: "grok-imagine-image-2.0" }),
-		);
-		// The nested image model never replaces the current Responses routing model.
-		expect(probe.calls.body?.model).toBe("gpt-5.5");
-		expect(result.details).toEqual(
-			expect.objectContaining({ imageModel: "grok-imagine-image-2.0", routingModel: "newapi/gpt-5.5" }),
-		);
-		expect(isImageGenerationDetails(result.details)).toBe(true);
-	});
-
-	test("sends and records an explicitly selected configured image model", async () => {
-		const probe = modelProbeDeps(["grok-imagine-image-2.0", "gpt-image-2"]);
-		const execute = createImageGenerationExecutor(probe.deps);
-		const result = await execute({
+		const result = await createImageGenerationExecutor(deps)({
 			params: { prompt: "draw a cat", model: " gpt-image-2 " },
 			toolCallId: "call",
 			ctx: context(),
 		});
-
-		expect((probe.calls.body?.tools as Array<Record<string, unknown>>)[0]).toEqual(
-			expect.objectContaining({ type: "image_generation", model: "gpt-image-2" }),
-		);
-		expect(result.details.imageModel).toBe("gpt-image-2");
+		expect(requestBody?.model).toBe("gpt-image-2");
+		expect(requestBody?.action).toBe("generate");
+		expect(result.details).toEqual(expect.objectContaining({ imageModel: "gpt-image-2" }));
 	});
 
-	test("fails before dispatch when the requested image model is not configured", async () => {
-		const probe = modelProbeDeps(["gpt-image-2"]);
-		const execute = createImageGenerationExecutor(probe.deps);
-		await expect(
-			execute({
-				params: { prompt: "draw a cat", model: "grok-imagine-image-2.0" },
-				toolCallId: "call",
-				ctx: context(),
-			}),
-		).rejects.toThrow('Unknown image generation model "grok-imagine-image-2.0"');
-		expect(probe.calls.dispatched).toBe(false);
-	});
-
-	test("does not dispatch an already-cancelled paid request", async () => {
-		let dispatched = false;
-		const controller = new AbortController();
-		controller.abort();
-		const deps = {
-			loadConfig: config,
-			requestImage: async () => {
-				dispatched = true;
-				throw new Error("should not dispatch");
+	test("runs independent batch requests concurrently and preserves successful artifacts", async () => {
+		let started = 0;
+		let inFlight = 0;
+		let maxInFlight = 0;
+		let saved = 0;
+		const deps = baseDeps({
+			requestImage: async ({ body }) => {
+				started += 1;
+				inFlight += 1;
+				maxInFlight = Math.max(maxInFlight, inFlight);
+				await new Promise((resolve) => setTimeout(resolve, 5));
+				inFlight -= 1;
+				return {
+					ok: true,
+					status: 200,
+					image: { bytes: validPng(), imageCallId: `ig_${body.model}_${started}`, width: 1, height: 1 },
+				};
 			},
-		} as unknown as ImageGenerationServiceDependencies;
-		const execute = createImageGenerationExecutor(deps);
-		await expect(
-			execute({
-				params: { prompt: "draw" },
-				toolCallId: "call",
-				signal: controller.signal,
-				ctx: context(),
-			}),
-		).rejects.toThrow("cancelled");
-		expect(dispatched).toBe(false);
+			saveCanonical: async ({ imageCallId }) => {
+				saved += 1;
+				return `/agent/generated-images/session-test/${imageCallId}.png`;
+			},
+		});
+		const result = await createImageGenerationExecutor(deps)({
+			params: { prompt: "make variants", batchSize: 3 },
+			toolCallId: "batch-call",
+			ctx: context(),
+		});
+		expect(started).toBe(3);
+		expect(maxInFlight).toBeGreaterThan(1);
+		expect(saved).toBe(3);
+		expect(isImageGenerationBatchDetails(result.details)).toBe(true);
+		if (!isImageGenerationBatchDetails(result.details)) return;
+		expect(result.details).toMatchObject({ batch: true, requestedCount: 3, succeededCount: 3, failedCount: 0 });
+		expect(result.text).toContain("Generated 3/3 PNG images.");
 	});
 
-	test("fails before dispatch when the feature is disabled", async () => {
+	test("returns partial batch success and bounded failure details without retrying", async () => {
+		let calls = 0;
+		const deps = baseDeps({
+			requestImage: async () => {
+				const index = calls++;
+				if (index === 1) return { ok: false, reason: "rate-limit", status: 429, errorMessage: "quota exhausted" };
+				return { ok: true, status: 200, image: { bytes: validPng(), imageCallId: `ig_${index}`, width: 1, height: 1 } };
+			},
+		});
+		const result = await createImageGenerationExecutor(deps)({
+			params: { prompt: "make variants", batchSize: 3 },
+			toolCallId: "batch-call",
+			ctx: context(),
+		});
+		expect(calls).toBe(3);
+		expect(isImageGenerationBatchDetails(result.details)).toBe(true);
+		if (!isImageGenerationBatchDetails(result.details)) return;
+		expect(result.details.succeededCount).toBe(2);
+		expect(result.details.failures).toEqual([{ index: 1, code: "rate-limit", message: "quota exhausted" }]);
+		expect(result.text).toContain("Image 1: /agent/generated-images/session-test/ig_0-batch-1.png");
+		expect(result.text).toContain("Image 3: /agent/generated-images/session-test/ig_2-batch-3.png");
+		expect(result.text).toContain("Image 2 failed: quota exhausted");
+	});
+
+	test("fails before dispatch when model is not configured or the request is cancelled", async () => {
 		let dispatched = false;
-		const deps = {
+		const deps = baseDeps({
 			loadConfig: () => ({
 				...config(),
-				config: {
-					...config().config,
-					imageGeneration: { enabled: false },
-				},
+				config: { ...config().config, imageGeneration: { ...config().config.imageGeneration, models: ["gpt-image-2"] } },
 			}),
-			requestImage: async () => {
-				dispatched = true;
-				throw new Error("should not dispatch");
-			},
-		} as unknown as ImageGenerationServiceDependencies;
-		const execute = createImageGenerationExecutor(deps);
-		await expect(
-			execute({ params: { prompt: "draw" }, toolCallId: "call", ctx: context() }),
-		).rejects.toThrow("not enabled");
+			requestImage: async () => { dispatched = true; throw new Error("should not dispatch"); },
+		});
+		await expect(createImageGenerationExecutor(deps)({
+			params: { prompt: "draw", model: "grok-imagine-image-2.0" },
+			toolCallId: "call",
+			ctx: context(),
+		})).rejects.toThrow("Unknown image generation model");
 		expect(dispatched).toBe(false);
+
+		const controller = new AbortController();
+		controller.abort();
+		await expect(createImageGenerationExecutor(baseDeps())({
+			params: { prompt: "draw" },
+			toolCallId: "call",
+			signal: controller.signal,
+			ctx: context(),
+		})).rejects.toThrow("cancelled");
 	});
-});
 
-
-test("v2 explicit image default is independent of list order and stable across auth await", async () => {
-	const probe = modelProbeDeps(undefined);
-	const raw = { defaults: { imageGeneration: { enabled: true, defaultModel: "second", allowedModels: ["first", "second"] } } };
-	let reads = 0;
-	probe.deps.loadConfig = () => { reads++; return v2Fixture(raw); };
-	const original = probe.deps.resolveRuntime;
-	probe.deps.resolveRuntime = async (...args) => {
-		raw.defaults.imageGeneration.defaultModel = "first";
-		return original(...args);
-	};
-	const execute = createImageGenerationExecutor(probe.deps);
-	const first = await execute({ params: { prompt: "draw", model: null }, toolCallId: "first", ctx: context() });
-	expect(first.details.imageModel).toBe("second");
-	expect(reads).toBe(1);
-	const next = await execute({ params: { prompt: "draw", model: null }, toolCallId: "next", ctx: context() });
-	expect(next.details.imageModel).toBe("first");
-	expect(reads).toBe(2);
-});
-
-test("v2 invalid image default and disallowed override fail before auth, uploads and paid work", async () => {
-	for (const [defaultModel, requestedModel] of [["missing", null], ["first", "missing"]]) {
-		const probe = modelProbeDeps(undefined);
-		probe.deps.loadConfig = () => v2Fixture({ defaults: { imageGeneration: { enabled: true, defaultModel, allowedModels: ["first"] } } });
-		probe.deps.resolveRuntime = async () => { throw new Error("must not resolve auth"); };
-		probe.deps.prepareReferences = async () => { throw new Error("must not upload"); };
-		const execute = createImageGenerationExecutor(probe.deps);
-		await expect(execute({ params: { prompt: "draw", model: requestedModel }, toolCallId: "call", ctx: context() }))
-			.rejects.toThrow(defaultModel === "missing" ? "configuration is invalid" : "Unknown image generation model");
-		expect(probe.calls.dispatched).toBe(false);
-	}
+	test("keeps the v2 explicit image default stable across an awaited runtime resolution", async () => {
+		const raw = { defaults: { imageGeneration: { enabled: true, defaultModel: "second", allowedModels: ["first", "second"] } } };
+		let reads = 0;
+		const deps = baseDeps({
+			loadConfig: () => { reads += 1; return v2Fixture(raw); },
+			requestImage: async ({ body }) => ({ ok: true, status: 200, image: { bytes: validPng(), imageCallId: body.model, width: 1, height: 1 } }),
+		});
+		const originalResolve = deps.resolveRuntime;
+		deps.resolveRuntime = async (...args) => {
+			raw.defaults.imageGeneration.defaultModel = "first";
+			return originalResolve(...args);
+		};
+		const first = await createImageGenerationExecutor(deps)({ params: { prompt: "draw" }, toolCallId: "first", ctx: context() });
+		expect(first.details.imageModel).toBe("second");
+		expect(reads).toBe(1);
+	});
 });

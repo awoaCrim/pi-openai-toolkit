@@ -107,7 +107,8 @@ export function clampCodexSessionId(sessionId: string | undefined): string | und
 
 export type ResponsesHeaderOptions = {
 	accept: string;
-	contentType?: string;
+	/** `null` omits content-type so a multipart FormData body can set its boundary. */
+	contentType?: string | null;
 	/** Conversation identity for Codex cache-affinity headers; clamped to 64 chars here. */
 	sessionId?: string;
 };
@@ -121,7 +122,11 @@ export function buildResponsesRequestHeaders(
 		runtime.codexAffinity ? filterCodexGatewayHeaders(mergedHeaders) : mergedHeaders,
 	);
 	headers.set("accept", options.accept);
-	headers.set("content-type", options.contentType ?? "application/json");
+	if (options.contentType === null) {
+		headers.delete("content-type");
+	} else {
+		headers.set("content-type", options.contentType ?? "application/json");
+	}
 	if (!headers.has("authorization")) {
 		headers.set("authorization", `Bearer ${runtime.apiKey}`);
 	}

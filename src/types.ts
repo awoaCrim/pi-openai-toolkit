@@ -151,9 +151,9 @@ export type WebSearchConfig = {
 export type ImageGenerationConfig = {
 	enabled: boolean;
 	/**
-	 * Bare `image_generation` tool model ids this toolkit may send, without a `provider/` prefix.
-	 * The first entry is the default; `openai_generate_image`'s optional `model` argument may
-	 * select any other entry in this order-preserving list.
+	 * Bare Images API model ids this toolkit may send, without a `provider/` prefix.
+	 * The first legacy entry is the default; `openai_generate_image`'s optional `model` argument
+	 * may select any other entry in this order-preserving list.
 	 */
 	models: string[];
 };

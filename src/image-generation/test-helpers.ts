@@ -24,13 +24,11 @@ export function validWebp(): Buffer {
 export function completedImageResponse(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 	return {
 		id: "resp_image_test",
-		status: "completed",
-		output: [
+		created: 1,
+		data: [
 			{
-				type: "image_generation_call",
 				id: "ig_test",
-				status: "completed",
-				result: VALID_PNG_BASE64,
+				b64_json: VALID_PNG_BASE64,
 				revised_prompt: "A revised prompt",
 			},
 		],
