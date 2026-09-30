@@ -184,6 +184,16 @@
         }
       }
     },
+    "responsesWebSocket": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
     "autoMode": {
       "type": "object",
       "additionalProperties": false,
@@ -294,6 +304,9 @@
         },
         "imageGeneration": {
           "$ref": "#/$defs/imageGeneration"
+        },
+        "responsesWebSocket": {
+          "$ref": "#/$defs/responsesWebSocket"
         },
         "autoMode": {
           "$ref": "#/$defs/autoMode"

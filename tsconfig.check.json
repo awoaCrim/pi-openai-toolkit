@@ -33,6 +33,8 @@
     "src/auto-mode/policy.ts",
     "src/auto-mode/reviewer.ts",
     "src/auto-mode/types.ts",
+    "src/responses-websocket/extension.ts",
+    "src/responses-websocket/transport.ts",
     "src/model-scope.ts",
     "src/native-fallback.ts",
     "src/payload-rewrite.ts",

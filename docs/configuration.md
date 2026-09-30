@@ -21,6 +21,7 @@ Create the file and parent directory if absent. This example states the shipped 
       "defaultModel": "grok-imagine-image-2.0",
       "allowedModels": ["grok-imagine-image-2.0"]
     },
+    "responsesWebSocket": { "enabled": false },
     "autoMode": { "available": false }
   },
   "models": {},
@@ -82,6 +83,27 @@ The SDK native compact call reports its intentional cancellation; the visible ha
 Only `models["provider/model-id"].compatibility.transport` is configurable: `"standard"` is the internal baseline and `"codex-gateway"` is an exact opt-in. There is no global `defaults.compatibility` and no built-in gateway model list.
 
 This selects an existing Toolkit protocol profile, independently of context mode. It does not change Pi's provider, API, endpoint, or model. The same decoded document supplies compatibility for search, image generation, and a separately named compaction producer. A successful config resolution is not a backend capability test. When Pi selects a `pi-virtual` model, Toolkit uses Pi's runtime resolver (when available) to obtain the physical provider/model for capability, authentication, and endpoint checks; if that route cannot be verified, the feature fails closed instead of treating the virtual entry as an OpenAI model.
+
+---
+
+### Responses WebSocket transport
+
+The Responses WebSocket extension is disabled by default. Enable it globally with `defaults.responsesWebSocket.enabled: true`; it is intentionally not a model-scoped override. Restart or reload Pi after changing this setting. An invalid or legacy configuration keeps the feature disabled.
+
+The extension is an API-adapter override, not a provider registration. It applies to GPT model IDs whose Pi API is `openai-responses`, regardless of provider name. The active model's `baseUrl`, `apiKey`, configured headers, session id, and payload remain the source of truth.
+
+The extension honors Pi's global `transport` setting:
+
+| Pi `transport` | Behavior |
+| --- | --- |
+| `auto` | Try `wss://.../responses?model=...` first; fall back to the original SSE adapter only before a stream starts. |
+| `websocket` | Require the WebSocket path; do not fall back to SSE. |
+| `websocket-cached` | Use the WebSocket path with the same strict behavior. |
+| `sse` | Bypass the extension and use the original HTTP/SSE adapter. |
+
+The endpoint is derived from the model's base URL by appending `/responses` when needed and switching `https:`/`http:` to `wss:`/`ws:`. The first frame is a standard `response.create` object and incoming frames are passed through Pi's existing Responses event normalizer. The upstream must support the standard Responses WebSocket contract; this does not rewrite a server that only exposes Codex's `/codex/responses` path or Codex-only authentication.
+
+This feature does not write Pi settings, model files, auth files, or global extensions. To keep the Toolkit adapter disabled, set `defaults.responsesWebSocket.enabled` to `false` or omit it. Once enabled, Pi's global `transport: "sse"` still bypasses the WebSocket path for a request.
 
 ---
 

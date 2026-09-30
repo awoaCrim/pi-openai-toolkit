@@ -48,6 +48,7 @@ describe("Compaction and Web Search integration", () => {
 			"./src/image-generation/extension.ts",
 			"./src/auto-mode/extension.ts",
 			"./src/codex-astra/extension.ts",
+			"./src/responses-websocket/extension.ts",
 		]);
 		expect(packageJson.files ?? []).not.toContain("extensions/compaction.ts");
 		expect(packageJson.files ?? []).not.toContain("extensions/web-search.ts");
