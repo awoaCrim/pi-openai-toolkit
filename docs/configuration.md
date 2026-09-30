@@ -96,12 +96,12 @@ The extension honors Pi's global `transport` setting:
 
 | Pi `transport` | Behavior |
 | --- | --- |
-| `auto` | Try `wss://.../responses?model=...` first; fall back to the original SSE adapter only before a stream starts. |
-| `websocket` | Require the WebSocket path; do not fall back to SSE. |
-| `websocket-cached` | Use the WebSocket path with the same strict behavior. |
+| `auto` | Try `wss://.../responses?model=...` first; fall back to the original SSE adapter only before a stream starts. With a stable session id, reuse the WebSocket and send a continuation delta when possible. |
+| `websocket` | Require the WebSocket path; do not fall back to SSE. This mode opens a request-scoped connection. |
+| `websocket-cached` | Require the WebSocket path and keep a session-scoped connection for later turns. |
 | `sse` | Bypass the extension and use the original HTTP/SSE adapter. |
 
-The endpoint is derived from the model's base URL by appending `/responses` when needed and switching `https:`/`http:` to `wss:`/`ws:`. The first frame is a standard `response.create` object and incoming frames are passed through Pi's existing Responses event normalizer. The upstream must support the standard Responses WebSocket contract; this does not rewrite a server that only exposes Codex's `/codex/responses` path or Codex-only authentication.
+The endpoint is derived from the model's base URL by appending `/responses` when needed and switching `https:`/`http:` to `wss:`/`ws:`. The first frame is a standard `response.create` object and incoming frames are passed through Pi's existing Responses event normalizer. For `auto` and `websocket-cached`, Toolkit caches an open socket by session/model/endpoint/auth identity for up to five minutes idle or 55 minutes of age. When the current transcript has the cached request and response as a prefix, the next frame uses `previous_response_id` and only the new input items; if it cannot prove that relationship, it sends the full payload instead. A missing session id or `cacheRetention: "none"` disables reuse. The upstream must support the standard Responses WebSocket contract, including continuation semantics for `previous_response_id`; this does not rewrite a server that only exposes Codex's `/codex/responses` path or Codex-only authentication.
 
 This feature does not write Pi settings, model files, auth files, or global extensions. To keep the Toolkit adapter disabled, set `defaults.responsesWebSocket.enabled` to `false` or omit it. Once enabled, Pi's global `transport: "sse"` still bypasses the WebSocket path for a request.
 
