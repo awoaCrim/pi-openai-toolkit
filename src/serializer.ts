@@ -178,12 +178,52 @@ export function serializeMessagesToCompactRequest<TApi extends Api>(args: {
 	};
 }
 
+/**
+ * Async compaction serializer used by live synthetic requests. Pi exposes model
+ * image limits and newer versions expose a public resize helper; keep the
+ * historical sync API for callers/tests while applying those limits only at the
+ * actual request edge.
+ */
+export async function serializeMessagesToCompactRequestWithLimits<TApi extends Api>(args: {
+	model: Model<TApi>;
+	messages: AgentMessage[];
+	instructions: string;
+}): Promise<NativeCompactionRequestBody> {
+	return {
+		model: args.model.id,
+		input: await serializeMessagesToResponsesInputWithLimits(args.model, args.messages),
+		instructions: sanitizeSurrogates(args.instructions),
+	};
+}
+
 export function serializeMessagesToResponsesInput<TApi extends Api>(
 	model: Model<TApi>,
 	messages: AgentMessage[],
 	options: SerializeResponsesMessagesOptions = {},
 ): ResponsesInputItem[] {
 	return serializeLlmMessagesToResponsesInput(model, convertToLlm(messages), options);
+}
+
+export async function serializeMessagesToResponsesInputWithLimits<TApi extends Api>(
+	model: Model<TApi>,
+	messages: AgentMessage[],
+	options: SerializeResponsesMessagesOptions = {},
+): Promise<ResponsesInputItem[]> {
+	return applyModelImageInputLimits(
+		model,
+		serializeMessagesToResponsesInput(model, messages, options),
+	);
+}
+
+export async function serializeLlmMessagesToResponsesInputWithLimits<TApi extends Api>(
+	model: Model<TApi>,
+	messages: Message[],
+	options: SerializeResponsesMessagesOptions = {},
+): Promise<ResponsesInputItem[]> {
+	return applyModelImageInputLimits(
+		model,
+		serializeLlmMessagesToResponsesInput(model, messages, options),
+	);
 }
 
 /**
@@ -251,6 +291,180 @@ export function serializeLlmMessagesToResponsesInput<TApi extends Api>(
 	}
 
 	return input;
+}
+
+type ImageResizeOptions = {
+	maxWidth?: number;
+	maxHeight?: number;
+	maxBytes?: number;
+	jpegQuality?: number;
+};
+
+type ModelImageInputLimits = {
+	resize?: ImageResizeOptions;
+	maxPerMessage?: number;
+	maxPerRequest?: number;
+};
+
+type ResizeImageResult = {
+	data: string;
+	mimeType: string;
+};
+
+type ResizeImageFunction = (
+	inputBytes: Uint8Array,
+	mimeType: string,
+	options?: ImageResizeOptions,
+) => Promise<ResizeImageResult | null>;
+
+let resizeImageLoader: Promise<ResizeImageFunction | undefined> | undefined;
+
+function getModelImageInputLimits(model: Model<Api>): ModelImageInputLimits | undefined {
+	return (model as Model<Api> & { inputLimits?: { images?: ModelImageInputLimits } }).inputLimits?.images;
+}
+
+function readNonNegativeLimit(value: unknown, name: string): number | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+		throw new Error(`Model image input limit ${name} is invalid.`);
+	}
+	return value;
+}
+
+function normalizeResizeOptions(value: unknown): ImageResizeOptions | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const candidate = value as Record<string, unknown>;
+	const options: ImageResizeOptions = {};
+	for (const key of ["maxWidth", "maxHeight", "maxBytes"] as const) {
+		const number = candidate[key];
+		if (number === undefined) continue;
+		if (typeof number !== "number" || !Number.isFinite(number) || number <= 0) {
+			throw new Error(`Model image resize option ${key} is invalid.`);
+		}
+		options[key] = Math.floor(number);
+	}
+	if (candidate.jpegQuality !== undefined) {
+		if (
+			typeof candidate.jpegQuality !== "number" ||
+			!Number.isFinite(candidate.jpegQuality) ||
+			candidate.jpegQuality <= 0 ||
+			candidate.jpegQuality > 100
+		) {
+			throw new Error("Model image resize option jpegQuality is invalid.");
+		}
+		options.jpegQuality = candidate.jpegQuality;
+	}
+	return Object.keys(options).length > 0 ? options : undefined;
+}
+
+async function loadResizeImage(): Promise<ResizeImageFunction | undefined> {
+	resizeImageLoader ??= (async () => {
+		try {
+			const module = await import("@earendil-works/pi-coding-agent") as {
+				resizeImage?: ResizeImageFunction;
+			};
+			return typeof module.resizeImage === "function" ? module.resizeImage : undefined;
+		} catch {
+			// Pi 0.87 does not export the helper. The request must fail closed when
+			// a newer model explicitly requires a resize rather than sending a
+			// potentially oversized image unchanged.
+			return undefined;
+		}
+	})();
+	return resizeImageLoader;
+}
+
+function inputContentArray(item: ResponsesInputItem): ResponsesInputContentItem[] | undefined {
+	if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+	const candidate = item as Record<string, unknown>;
+	if (candidate.type === "function_call_output") {
+		return Array.isArray(candidate.output) ? candidate.output as ResponsesInputContentItem[] : undefined;
+	}
+	return Array.isArray(candidate.content) ? candidate.content as ResponsesInputContentItem[] : undefined;
+}
+
+function isInputImage(item: ResponsesInputContentItem): item is ResponsesImageInputItem {
+	return item.type === "input_image";
+}
+
+function decodeDataImage(imageUrl: string): { mimeType: string; bytes: Uint8Array } {
+	const separator = imageUrl.indexOf(",");
+	const prefix = separator >= 0 ? imageUrl.slice(0, separator) : "";
+	if (!prefix.startsWith("data:") || !prefix.endsWith(";base64") || separator < 0) {
+		throw new Error("Model image input has an invalid data URL.");
+	}
+	const mimeType = prefix.slice("data:".length, -";base64".length);
+	if (!mimeType) throw new Error("Model image input has no MIME type.");
+	return { mimeType, bytes: Buffer.from(imageUrl.slice(separator + 1), "base64") };
+}
+
+async function resizeInputImage(
+	image: ResponsesImageInputItem,
+	options: ImageResizeOptions,
+): Promise<ResponsesImageInputItem> {
+	const resizeImage = await loadResizeImage();
+	if (!resizeImage) {
+		throw new Error("The active Pi version cannot resize an image required by model input limits.");
+	}
+	const source = decodeDataImage(image.image_url);
+	const resized = await resizeImage(source.bytes, source.mimeType, options);
+	if (!resized || typeof resized.data !== "string" || typeof resized.mimeType !== "string") {
+		throw new Error("Model image input could not be resized within the provider limits.");
+	}
+	return {
+		...image,
+		image_url: `data:${resized.mimeType};base64,${resized.data}`,
+	};
+}
+
+/** Enforce Pi's per-message/request image limits without mutating serialized input. */
+export async function applyModelImageInputLimits<TApi extends Api>(
+	model: Model<TApi>,
+	input: ResponsesInputItem[],
+): Promise<ResponsesInputItem[]> {
+	const limits = getModelImageInputLimits(model);
+	if (!limits) return input;
+
+	const maxPerMessage = readNonNegativeLimit(limits.maxPerMessage, "maxPerMessage");
+	const maxPerRequest = readNonNegativeLimit(limits.maxPerRequest, "maxPerRequest");
+	const resizeOptions = normalizeResizeOptions(limits.resize);
+	let requestImageCount = 0;
+	const output: ResponsesInputItem[] = [];
+
+	for (const item of input) {
+		const content = inputContentArray(item);
+		if (!content) {
+			output.push(item);
+			continue;
+		}
+		const imageCount = content.filter(isInputImage).length;
+		if (maxPerMessage !== undefined && imageCount > maxPerMessage) {
+			throw new Error(`Model accepts at most ${maxPerMessage} image(s) per message.`);
+		}
+		if (maxPerRequest !== undefined && requestImageCount + imageCount > maxPerRequest) {
+			throw new Error(`Model accepts at most ${maxPerRequest} image(s) per request.`);
+		}
+		requestImageCount += imageCount;
+
+		if (!resizeOptions || imageCount === 0) {
+			output.push(item);
+			continue;
+		}
+		const resizedContent: ResponsesInputContentItem[] = [];
+		for (const contentItem of content) {
+			resizedContent.push(isInputImage(contentItem)
+				? await resizeInputImage(contentItem, resizeOptions)
+				: contentItem);
+		}
+		const itemRecord = item as Record<string, unknown>;
+		if (itemRecord.type === "function_call_output") {
+			output.push({ ...item, output: resizedContent } as ResponsesInputItem);
+		} else {
+			output.push({ ...item, content: resizedContent } as ResponsesInputItem);
+		}
+	}
+
+	return output;
 }
 
 export function createResponsesInputParitySignature(input: readonly unknown[]): string[] {

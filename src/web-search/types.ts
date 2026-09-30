@@ -1,13 +1,21 @@
+import { VIRTUAL_MODEL_API } from "../runtime";
 import { getExactModelKey, isExactModelAllowed } from "../model-scope";
 import type { WebSearchConfig, WebSearchRoute } from "../types";
 
-export const WEB_SEARCH_CAPABLE_APIS = ["openai-responses", "openai-codex-responses"] as const;
+export const WEB_SEARCH_CAPABLE_APIS = [
+	"openai-responses",
+	"openai-codex-responses",
+	"azure-openai-responses",
+] as const;
+/** The provider-relative alpha endpoint is only verified for OpenAI/Codex routes. */
+export const WEB_SEARCH_STANDALONE_APIS = ["openai-responses", "openai-codex-responses"] as const;
 export const WEB_SEARCH_SOURCE_INCLUDE = "web_search_call.action.sources";
 export const WEB_SEARCH_PROMPT_MARKER = "<!-- pi-openai-toolkit:web-search -->";
 export const WEB_RUN_TOOL_NAME = "web_run";
 export const LOCAL_WEB_SEARCH_TOOL_NAME = "web_search";
 
 export type WebSearchCapableApi = (typeof WEB_SEARCH_CAPABLE_APIS)[number];
+export type WebSearchStandaloneApi = (typeof WEB_SEARCH_STANDALONE_APIS)[number];
 export type WebSearchRouteSource = "exact" | "default" | "legacy" | "none";
 export type WebSearchRouteUnavailableReason = "missing-model" | "unsupported-api" | "invalid-route";
 
@@ -76,7 +84,13 @@ function selectedRoute(args: {
 			reason: "missing-model",
 		};
 	}
-	if (args.route !== "local" && !isWebSearchCapableApi(args.model?.api)) {
+	if (
+		args.route !== "local" &&
+		args.model?.api !== VIRTUAL_MODEL_API &&
+		(args.route === "standalone-alpha"
+			? !isWebSearchStandaloneCapableApi(args.model?.api)
+			: !isWebSearchCapableApi(args.model?.api))
+	) {
 		return {
 			route: args.route,
 			source: args.source,
@@ -95,6 +109,10 @@ function selectedRoute(args: {
 
 export function isWebSearchCapableApi(api: unknown): api is WebSearchCapableApi {
 	return typeof api === "string" && (WEB_SEARCH_CAPABLE_APIS as readonly string[]).includes(api);
+}
+
+export function isWebSearchStandaloneCapableApi(api: unknown): api is WebSearchStandaloneApi {
+	return typeof api === "string" && (WEB_SEARCH_STANDALONE_APIS as readonly string[]).includes(api);
 }
 
 /**
@@ -127,7 +145,11 @@ export function resolveWebSearchRoute(args: {
 		return selectedRoute({ route: config.defaultRoute, source: "default", model, modelKey });
 	}
 
-	if (modelKey && isExactModelAllowed(model, config.models) && isWebSearchCapableApi(model?.api)) {
+	if (
+		modelKey &&
+		isExactModelAllowed(model, config.models) &&
+		(model?.api === VIRTUAL_MODEL_API || isWebSearchCapableApi(model?.api))
+	) {
 		return selectedRoute({ route: "hosted", source: "legacy", model, modelKey });
 	}
 

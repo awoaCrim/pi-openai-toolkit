@@ -50,7 +50,7 @@ function createHarness(eligible = true) {
 	const details: ImageGenerationDetails = {
 		artifactPath: "/agent/generated-images/session/ig.png",
 		routingModel: "newapi/gpt-5.5",
-		imageModel: "gpt-image-2",
+		imageModel: "test-image-model",
 		imageCallId: "ig_test",
 		mimeType: "image/png",
 		byteCount: 100,

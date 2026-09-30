@@ -53,20 +53,22 @@ import {
 	rewriteResponsesPayloadWithNativeReplay,
 	hasInvalidatedCompactionContext,
 	removeNativeCompactionRetainedMessages,
-	serializeLiveTailToResponsesInput,
+	serializeLiveTailToResponsesInputWithLimits,
 } from "./payload-rewrite";
 import { getCompactionRequestExtras, rememberRequestContext } from "./request-context-cache";
 import { resolveWebSearchRoute } from "./web-search/types";
 import { executeRemoteV2Compaction } from "./remote-v2-client";
 import {
+	rememberPhysicalModel,
+	resolveEffectiveModel,
 	resolveNativeCompactionEnvironment,
 	resolveRemoteCompactionExecution,
 	parseModelSpec,
 	type RemoteCompactionExecution,
 } from "./runtime";
 import {
-	serializeMessagesToCompactRequest,
-	serializeMessagesToResponsesInput,
+	serializeMessagesToCompactRequestWithLimits,
+	serializeMessagesToResponsesInputWithLimits,
 	type NativeCompactionRequestBody,
 	type ResponsesInputItem,
 } from "./serializer";
@@ -181,6 +183,14 @@ function notifyWarning(ctx: ExtensionContext, message: string): void {
 	if (ctx.hasUI) {
 		ctx.ui.notify(`${COMPACTION_EXTENSION_ID}: ${message}`, "warning");
 	}
+}
+
+async function resolveContextCapabilityModel(
+	ctx: ExtensionContext,
+	model: ExtensionContext["model"] = ctx.model,
+): Promise<ExtensionContext["model"]> {
+	const effective = await resolveEffectiveModel(ctx, model);
+	return effective.ok ? effective.model : undefined;
 }
 
 async function isRemoteContextActive(
@@ -362,14 +372,14 @@ async function runResponsesNativeCompact(
 			}
 			const input: ResponsesInputItem[] = [
 				...(cloneOpaqueWindow(details.compactedWindow) as ResponsesInputItem[]),
-				...serializeMessagesToResponsesInput(
+				...(await serializeMessagesToResponsesInputWithLimits(
 					compactor.currentModel,
 					[...projection.messages.slice(summaryIndex + 1)],
 					{ firstSystemMessageIsUpdate: true },
-				),
+				)),
 			];
 			request = {
-				model: compactor.model,
+				model: compactor.requestModel ?? compactor.model,
 				input,
 				instructions,
 			};
@@ -377,10 +387,10 @@ async function runResponsesNativeCompact(
 			const liveTailEntries = branchEntries.slice(latestNativeCompaction.index + 1);
 			const input: ResponsesInputItem[] = [
 				...(cloneOpaqueWindow(details.compactedWindow) as ResponsesInputItem[]),
-				...serializeLiveTailToResponsesInput({ model: compactor.currentModel, entries: liveTailEntries }),
+				...(await serializeLiveTailToResponsesInputWithLimits({ model: compactor.currentModel, entries: liveTailEntries })),
 			];
 			request = {
-				model: compactor.model,
+				model: compactor.requestModel ?? compactor.model,
 				input,
 				instructions,
 			};
@@ -397,17 +407,19 @@ async function runResponsesNativeCompact(
 			if (!projection.ok) {
 				return { outcome: "unprojected-input", reason: projection.reason };
 			}
-			request = serializeMessagesToCompactRequest({
+			const serialized = await serializeMessagesToCompactRequestWithLimits({
 				model: compactor.currentModel,
 				messages: [...projection.messages],
 				instructions,
 			});
+			request = { ...serialized, model: compactor.requestModel ?? serialized.model };
 		} else {
-			request = serializeMessagesToCompactRequest({
+			const serialized = await serializeMessagesToCompactRequestWithLimits({
 				model: compactor.currentModel,
 				messages: getLegacySessionContextMessages(event, ctx),
 				instructions,
 			});
+			request = { ...serialized, model: compactor.requestModel ?? serialized.model };
 		}
 	} else {
 		writeDebugArtifact(
@@ -441,7 +453,7 @@ async function runResponsesNativeCompact(
 	const extras = getCompactionRequestExtras({
 		provider: consumer.provider,
 		api: consumer.api,
-		model: consumer.model,
+		model: consumer.requestModel ?? consumer.model,
 		baseUrl: consumer.baseUrl,
 		sessionId: getSessionId(ctx),
 	}, compactor.currentModel);
@@ -591,8 +603,9 @@ async function handleSessionBeforeCompact(
 
 	// Remote Context management owns this eligible Codex session. It persists a
 	// no-summary boundary and deliberately never calls remote_compaction_v2.
-	if (isCodexContextModel(ctx.model, config)) {
-		if (await remoteContextActive(ctx, config)) {
+	const contextModel = await resolveContextCapabilityModel(ctx);
+	if (isCodexContextModel(contextModel, config)) {
+		if (await remoteContextActive(ctx, config, contextModel)) {
 			try {
 				dependencies.contextWindows.synchronize(ctx);
 				if (event.reason === "manual" && dependencies.manualCompact && !dependencies.manualCompact.isMaintenance) {
@@ -864,6 +877,7 @@ async function handleContextInternal(
 	}
 
 	if (config.contextManagement === "remote") {
+		const contextModel = await resolveContextCapabilityModel(ctx);
 		try {
 			contextWindows.synchronize(ctx);
 		} catch {
@@ -873,7 +887,7 @@ async function handleContextInternal(
 			return undefined;
 		}
 
-		const remoteActive = await remoteContextActive(ctx, config);
+		const remoteActive = await remoteContextActive(ctx, config, contextModel);
 		if (remoteActive) {
 			try {
 				// Measure the provider-visible current window, not Pi's durable transcript.
@@ -902,8 +916,8 @@ async function handleContextInternal(
 		// older compaction-replay path. Gateway traffic must also fail closed when
 		// its transport capability is unavailable; otherwise Pi could send an
 		// ordinary unscoped request and lose CPA OAuth/session affinity.
-		if (isCodexContextModel(ctx.model, config)) {
-			if (isCodexGatewayModel(ctx.model, config.gatewayContextModels)) {
+		if (isCodexContextModel(contextModel, config)) {
+			if (isCodexGatewayModel(contextModel, config.gatewayContextModels)) {
 				notifyRemoteContextFailure(ctx, "codex-context-unavailable");
 				reportPiContextHookFailure(ctx, "codex-context-unavailable");
 				ctx.abort();
@@ -982,6 +996,9 @@ async function handleBeforeProviderRequest(
 		return undefined;
 	}
 
+	const contextModel = config.contextManagement === "remote"
+		? await resolveContextCapabilityModel(ctx)
+		: undefined;
 	if (config.contextManagement === "remote") {
 		try {
 			contextWindows.synchronize(ctx);
@@ -991,7 +1008,7 @@ async function handleBeforeProviderRequest(
 			return undefined;
 		}
 	}
-	if (config.contextManagement === "remote" && await remoteContextActive(ctx, config)) {
+	if (config.contextManagement === "remote" && await remoteContextActive(ctx, config, contextModel)) {
 		try {
 			return contextWindows.rewritePayload(event.payload, ctx);
 		} catch {
@@ -1000,12 +1017,12 @@ async function handleBeforeProviderRequest(
 			return undefined;
 		}
 	}
-	if (isCodexContextModel(ctx.model, config)) {
+	if (isCodexContextModel(contextModel, config)) {
 		// Keep Codex Remote mutually exclusive with the legacy replay pipeline
 		// when authentication or tool ownership is unavailable. Gateway traffic
 		// cannot continue as an ordinary Responses request because that would
 		// silently lose the required CPA session/account selection.
-		if (isCodexGatewayModel(ctx.model, config.gatewayContextModels)) {
+		if (isCodexGatewayModel(contextModel, config.gatewayContextModels)) {
 			notifyRemoteContextFailure(ctx, "codex-context-unavailable");
 			ctx.abort();
 		}
@@ -1057,7 +1074,7 @@ async function handleBeforeProviderRequest(
 		{
 			provider: runtime.provider,
 			api: runtime.api,
-			model: runtime.model,
+			model: runtime.requestModel ?? runtime.model,
 			baseUrl: runtime.baseUrl,
 			sessionId: getSessionId(ctx),
 		},
@@ -1255,11 +1272,12 @@ export default function registerCompactionExtension(
 		const config = resolved.config.compaction;
 		if (resolved.invalidFeatures.length > 0) return;
 		if (!config.enabled) return;
+		const contextModel = await resolveContextCapabilityModel(ctx);
 
 		let activationReason: string | undefined;
 		// Only models the built-in Remote Context coverage targets may activate or
 		// warn; everything else silently runs Pi's normal compaction path.
-		if (config.contextManagement === "remote" && isCodexContextModel(ctx.model, config) && !active) {
+		if (config.contextManagement === "remote" && isCodexContextModel(contextModel, config) && !active) {
 			if (syncOutcome.registrationState === "conflict") {
 				activationReason = "tool-name-conflict";
 				notifyRemoteContextFailure(ctx, activationReason);
@@ -1361,10 +1379,11 @@ export default function registerCompactionExtension(
 		const resolved = contextOperation(dependencies.loadConfig, ctx);
 		requireContextPolicy(resolved, ctx);
 		const config = resolved.config.compaction;
-		if (!isCodexContextModel(ctx.model, config)) return;
-		const active = await remoteContextActive(ctx, config);
+		const contextModel = await resolveContextCapabilityModel(ctx);
+		if (!isCodexContextModel(contextModel, config)) return;
+		const active = await remoteContextActive(ctx, config, contextModel);
 		if (!active) {
-			if (isCodexGatewayModel(ctx.model, config.gatewayContextModels)) {
+			if (isCodexGatewayModel(contextModel, config.gatewayContextModels)) {
 				notifyRemoteContextFailure(ctx, "codex-context-unavailable");
 				ctx.abort();
 			}
@@ -1402,11 +1421,13 @@ export default function registerCompactionExtension(
 		contextWindows.rewriteHeaders(event.headers, ctx);
 	});
 	pi.on("message_end", async (event, ctx) => {
+		rememberPhysicalModel(ctx, event.message);
 		const resolved = contextOperation(dependencies.loadConfig, ctx);
 		requireContextPolicy(resolved, ctx);
 		const config = resolved.config.compaction;
-		if (!isCodexContextModel(ctx.model, config) || !tools.isRegistered) return undefined;
-		if (!(await remoteContextActive(ctx, config))) return undefined;
+		const contextModel = await resolveContextCapabilityModel(ctx);
+		if (!isCodexContextModel(contextModel, config) || !tools.isRegistered) return undefined;
+		if (!(await remoteContextActive(ctx, config, contextModel))) return undefined;
 		const message = routeContextNamespaceToolMessage(event.message);
 		return message === event.message ? undefined : { message };
 	});

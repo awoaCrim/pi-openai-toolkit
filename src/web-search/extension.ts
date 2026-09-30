@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { assertConfigValid, loadToolkitConfig, resolveToolkitConfig, type ResolvedToolkitConfig } from "../config";
 import { notifyConfigIssues } from "../config/notifications";
-import { resolveResponsesEnvironment, type ResponsesEnvironmentResolution } from "../runtime";
+import { registerPhysicalModelObserver, resolveResponsesEnvironment, type ResponsesEnvironmentResolution } from "../runtime";
 import {
 	requestAlphaSearch,
 	normalizeStandaloneWebRunCommands,
@@ -18,7 +18,7 @@ import {
 	LOCAL_WEB_SEARCH_TOOL_NAME,
 	resolveWebSearchRoute,
 	WEB_RUN_TOOL_NAME,
-	WEB_SEARCH_CAPABLE_APIS,
+	WEB_SEARCH_STANDALONE_APIS,
 	type WebSearchModel,
 	type WebSearchRouteResolution,
 } from "./types";
@@ -245,7 +245,7 @@ export async function executeStandaloneWebRun(args: {
 
 	const runtime = await resolveRuntime(args.ctx, {
 		enabled: config.webSearch.enabled,
-		responsesApis: WEB_SEARCH_CAPABLE_APIS,
+		responsesApis: WEB_SEARCH_STANDALONE_APIS,
 		codexGatewayModels: resolved.gatewayModelKeys,
 	});
 	if (!runtime.ok) throw standaloneRuntimeFailure(runtime);
@@ -379,6 +379,7 @@ export function registerWebSearchExtension(
 ): void {
 	if (registeredApis.has(pi)) return;
 	registeredApis.add(pi);
+	registerPhysicalModelObserver(pi);
 
 	const states = { webSearch: cloneToolState(), webRun: cloneToolState() };
 	let standaloneRegistrationSucceeded = false;

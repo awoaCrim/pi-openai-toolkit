@@ -1,6 +1,6 @@
 {
   "name": "pi-openai-toolkit",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "private": false,
   "type": "module",
   "engines": {
@@ -126,10 +126,10 @@
     "@earendil-works/pi-tui": ">=0.87.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.87.0",
-    "@earendil-works/pi-ai": "0.87.0",
-    "@earendil-works/pi-coding-agent": "0.87.0",
-    "@earendil-works/pi-tui": "0.87.0",
+    "@earendil-works/pi-agent-core": "0.99.1",
+    "@earendil-works/pi-ai": "0.99.1",
+    "@earendil-works/pi-coding-agent": "0.99.1",
+    "@earendil-works/pi-tui": "0.99.1",
     "@types/node": "24.12.4",
     "bun": "1.2.23",
     "typescript": "5.9.3"

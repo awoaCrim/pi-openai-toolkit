@@ -127,7 +127,12 @@ export function buildResponsesRequestHeaders(
 	} else {
 		headers.set("content-type", options.contentType ?? "application/json");
 	}
-	if (!headers.has("authorization")) {
+	if (runtime.api === "azure-openai-responses") {
+		// Azure OpenAI authenticates Responses requests with `api-key`; do not
+		// forward an inherited bearer token from a model/provider header.
+		headers.delete("authorization");
+		headers.set("api-key", runtime.apiKey);
+	} else if (!headers.has("authorization")) {
 		headers.set("authorization", `Bearer ${runtime.apiKey}`);
 	}
 

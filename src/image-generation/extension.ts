@@ -2,6 +2,7 @@ import { StringEnum, Type, type Static } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadToolkitConfig, resolveToolkitConfig } from "../config";
 import { notifyConfigIssues } from "../config/notifications";
+import { registerPhysicalModelObserver } from "../runtime";
 import { executeImageGeneration } from "./service";
 import { isImageGenerationEnabledForModel } from "./eligibility";
 import { renderImageGenerationResult } from "./render";
@@ -54,13 +55,13 @@ const GenerateImageParameters = Type.Object(
 				],
 				{
 					description:
-						"Use null when the user did not explicitly request a destination; otherwise provide the requested explicit .png file path.",
+						"Use null when the user did not explicitly request a destination; otherwise provide an explicit .png, .jpg, .jpeg, or .webp file path matching the provider output format.",
 				},
 			),
 		),
 		size: Type.Optional(
 			StringEnum(IMAGE_GENERATION_SIZES, {
-				description: "Requested PNG dimensions, or auto.",
+				description: "Requested raster-image dimensions, or auto.",
 			}),
 		),
 		quality: Type.Optional(
@@ -123,13 +124,14 @@ export function registerImageGenerationExtension(
 ): void {
 	if (registeredApis.has(pi)) return;
 	registeredApis.add(pi);
+	registerPhysicalModelObserver(pi);
 
 	pi.registerTool<typeof GenerateImageParameters, ImageGenerationToolDetails, Record<string, never>>({
 		name: IMAGE_GENERATION_TOOL_NAME,
 		label: "OpenAI Generate Image",
 		description:
-			"Generate PNG images, or edit from one to five user-approved local reference images, through an independent Images API request using a configured image model. This is a paid provider operation; batchSize runs independent requests concurrently.",
-		promptSnippet: "Generate or edit PNG images through an independent Images API request and a configured imageGeneration.allowedModels entry.",
+			"Generate raster images, or edit from one to five user-approved local reference images, through an independent Images API request using a configured image model. PNG, JPEG, and WebP responses are validated and saved in their actual format. This is a paid provider operation; batchSize runs independent requests concurrently.",
+		promptSnippet: "Generate or edit raster images through an independent Images API request and a configured imageGeneration.allowedModels entry.",
 		promptGuidelines: [
 			"Use openai_generate_image when the user explicitly asks to create, draw, render, or edit a raster image and the active model speaks a Responses API.",
 			"Do not call openai_generate_image speculatively: it consumes the user's provider or gateway image quota.",

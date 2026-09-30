@@ -1,7 +1,7 @@
 import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { assertConfigValid, loadToolkitConfig, resolveToolkitConfig } from "../config";
 import { notifyConfigIssues } from "../config/notifications";
-import { resolveResponsesEnvironment } from "../runtime";
+import { resolveEffectiveModel, resolveResponsesEnvironment, VIRTUAL_MODEL_API } from "../runtime";
 import {
 	copyImageToExplicitPath,
 	prepareExplicitOutputPath,
@@ -21,7 +21,6 @@ import {
 } from "./references";
 import {
 	IMAGE_GENERATION_CAPABLE_APIS,
-	IMAGE_GENERATION_MIME_TYPE,
 	MAX_IMAGE_IDENTIFIER_CHARS,
 	ImageGenerationError,
 	sanitizeImageDiagnostic,
@@ -124,16 +123,28 @@ function asImageGenerationError(value: unknown): ImageGenerationError {
 	);
 }
 
+function formatImageMimeType(mimeType: ImageGenerationDetails["mimeType"]): string {
+	switch (mimeType) {
+		case "image/png":
+			return "PNG";
+		case "image/jpeg":
+			return "JPEG";
+		case "image/webp":
+			return "WebP";
+	}
+}
+
 function formatResultText(args: {
 	artifactPath: string;
 	outputPath?: string;
 	warning?: string;
 	edited: boolean;
+	mimeType: ImageGenerationDetails["mimeType"];
 	width: number;
 	height: number;
 }): string {
 	const lines = [
-		`${args.edited ? "Edited" : "Generated"} PNG image (${args.width}x${args.height}).`,
+		`${args.edited ? "Edited" : "Generated"} ${formatImageMimeType(args.mimeType)} image (${args.width}x${args.height}).`,
 		`Artifact: ${args.artifactPath}`,
 	];
 	if (args.outputPath) lines.push(`Copied to: ${args.outputPath}`);
@@ -142,7 +153,7 @@ function formatResultText(args: {
 }
 
 function formatBatchResultText(details: ImageGenerationBatchDetails): string {
-	const lines = [`Generated ${details.succeededCount}/${details.requestedCount} PNG images.`];
+	const lines = [`Generated ${details.succeededCount}/${details.requestedCount} images.`];
 	const failedIndexes = new Set((details.failures ?? []).map((failure) => failure.index));
 	let imageIndex = 0;
 	for (let batchIndex = 0; batchIndex < details.requestedCount; batchIndex += 1) {
@@ -183,13 +194,18 @@ async function persistGeneratedImage(args: {
 			agentDir: args.agentDir,
 			sessionId: args.sessionId,
 			imageCallId,
+			mimeType: args.generated.mimeType,
 		});
 
 		let outputPath: string | undefined;
 		let warning: string | undefined;
 		if (args.explicitOutput) {
 			try {
-				await args.deps.copyExplicit({ bytes: args.generated.bytes, plan: args.explicitOutput });
+				await args.deps.copyExplicit({
+					bytes: args.generated.bytes,
+					plan: args.explicitOutput,
+					mimeType: args.generated.mimeType,
+				});
 				outputPath = args.explicitOutput.path;
 			} catch (error) {
 				warning = sanitizeImageDiagnostic(
@@ -206,7 +222,7 @@ async function persistGeneratedImage(args: {
 			imageModel: args.imageModel,
 			imageCallId,
 			...(args.generated.responseId ? { responseId: args.generated.responseId } : {}),
-			mimeType: IMAGE_GENERATION_MIME_TYPE,
+			mimeType: args.generated.mimeType,
 			byteCount: args.generated.bytes.length,
 			width: args.generated.width,
 			height: args.generated.height,
@@ -235,7 +251,18 @@ export function createImageGenerationExecutor(
 		notifyConfigIssues(args.ctx, resolved);
 		assertConfigValid(resolved, "imageGeneration", "compatibility");
 		const { config } = resolved;
-		if (!isImageGenerationEnabledForModel(args.ctx.model, config.imageGeneration)) {
+		let effectiveModel = args.ctx.model;
+		if (args.ctx.model?.api === VIRTUAL_MODEL_API) {
+			const effective = await resolveEffectiveModel(args.ctx);
+			if (!effective.ok) {
+				throw new ImageGenerationError(
+					"unsupported-model",
+					"Image generation is unavailable because the virtual model could not be resolved to a physical model.",
+				);
+			}
+			effectiveModel = effective.model;
+		}
+		if (!isImageGenerationEnabledForModel(args.ctx.model, config.imageGeneration, effectiveModel)) {
 			throw new ImageGenerationError(
 				"unsupported-model",
 				"Image generation is not enabled for the current provider/model-id.",
@@ -332,6 +359,7 @@ export function createImageGenerationExecutor(
 						outputPath: details.outputPath,
 						warning: details.warning,
 						edited: details.edited,
+						mimeType: details.mimeType,
 						width: details.width,
 						height: details.height,
 					}),

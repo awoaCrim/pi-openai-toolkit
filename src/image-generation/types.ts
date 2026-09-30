@@ -1,4 +1,7 @@
 export const IMAGE_GENERATION_TOOL_NAME = "openai_generate_image";
+/** Image formats accepted from independent Images API responses. */
+export const IMAGE_GENERATION_MIME_TYPES = ["image/png", "image/jpeg", "image/webp"] as const;
+/** Backward-compatible default format for callers that construct PNG-only fixtures. */
 export const IMAGE_GENERATION_MIME_TYPE = "image/png" as const;
 export const IMAGE_GENERATION_CAPABLE_APIS = [
 	"openai-responses",
@@ -32,7 +35,19 @@ export type ImageGenerationCapableApi = (typeof IMAGE_GENERATION_CAPABLE_APIS)[n
 export type ImageGenerationSize = (typeof IMAGE_GENERATION_SIZES)[number];
 export type ImageGenerationQuality = (typeof IMAGE_GENERATION_QUALITIES)[number];
 export type ImageGenerationAction = "generate" | "edit";
-export type ReferenceImageMimeType = "image/png" | "image/jpeg" | "image/webp";
+export type ImageGenerationMimeType = (typeof IMAGE_GENERATION_MIME_TYPES)[number];
+export type ReferenceImageMimeType = ImageGenerationMimeType;
+
+export function imageFileExtension(mimeType: ImageGenerationMimeType): "png" | "jpg" | "webp" {
+	switch (mimeType) {
+		case "image/png":
+			return "png";
+		case "image/jpeg":
+			return "jpg";
+		case "image/webp":
+			return "webp";
+	}
+}
 
 export type ImageGenerationModel = {
 	api?: string;
@@ -72,6 +87,7 @@ export type PreparedReferenceImage = {
 
 export type ParsedGeneratedImage = {
 	bytes: Buffer;
+	mimeType: ImageGenerationMimeType;
 	imageCallId: string;
 	responseId?: string;
 	revisedPrompt?: string;
@@ -86,7 +102,7 @@ export type ImageGenerationDetails = {
 	imageModel: string;
 	imageCallId: string;
 	responseId?: string;
-	mimeType: typeof IMAGE_GENERATION_MIME_TYPE;
+	mimeType: ImageGenerationMimeType;
 	byteCount: number;
 	width: number;
 	height: number;
@@ -188,6 +204,10 @@ function isBoundedString(value: unknown, maxChars: number): value is string {
 	return typeof value === "string" && value.trim().length > 0 && value.length <= maxChars;
 }
 
+function isImageGenerationMimeType(value: unknown): value is ImageGenerationMimeType {
+	return (IMAGE_GENERATION_MIME_TYPES as readonly string[]).includes(value as string);
+}
+
 export function isImageGenerationDetails(value: unknown): value is ImageGenerationDetails {
 	if (!isRecord(value)) return false;
 	return (
@@ -197,7 +217,7 @@ export function isImageGenerationDetails(value: unknown): value is ImageGenerati
 		isBoundedString(value.imageModel, MAX_IMAGE_MODEL_ID_CHARS) &&
 		isBoundedString(value.imageCallId, MAX_IMAGE_IDENTIFIER_CHARS) &&
 		(value.responseId === undefined || isBoundedString(value.responseId, MAX_IMAGE_IDENTIFIER_CHARS)) &&
-		value.mimeType === IMAGE_GENERATION_MIME_TYPE &&
+		isImageGenerationMimeType(value.mimeType) &&
 		typeof value.byteCount === "number" &&
 		Number.isInteger(value.byteCount) &&
 		value.byteCount > 0 &&

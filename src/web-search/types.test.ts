@@ -77,6 +77,15 @@ describe("resolveWebSearchRoute", () => {
 		});
 	});
 
+	test("legacy allowlists keep a virtual model eligible until execution resolves its physical API", () => {
+		expect(resolve({ provider: "router", api: "pi-virtual", id: "auto" }, { models: ["router/auto"] })).toEqual({
+			route: "hosted",
+			source: "legacy",
+			modelKey: "router/auto",
+			available: true,
+		});
+	});
+
 	test("explicit hosted and standalone routes fail closed on unsupported APIs", () => {
 		const model = { provider: "gateway", api: "openai-completions", id: "gpt-6-astra" };
 		expect(resolve(model, { routes: { "gateway/gpt-6-astra": "hosted" } })).toMatchObject({

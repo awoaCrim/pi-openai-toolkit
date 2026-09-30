@@ -139,7 +139,6 @@ describe("image generation client", () => {
 			prompt: "draw a cat",
 			n: 1,
 			size: "auto",
-			quality: "auto",
 			output_format: "png",
 			response_format: "b64_json",
 		});
@@ -151,7 +150,7 @@ describe("image generation client", () => {
 	test("uses multipart for a standard-provider edit request", async () => {
 		const reference = { path: "ref.png", mimeType: "image/png" as const, bytes: validPng() };
 		const editBody = buildImageGenerationRequest({
-			imageModel: "gpt-image-2.5",
+			imageModel: "grok-imagine-image-2.0",
 			params: normalizeGenerateImageParams({ prompt: "edit", referenceImagePaths: ["ref.png"] }),
 			references: [reference],
 		});
@@ -166,8 +165,9 @@ describe("image generation client", () => {
 		});
 		expect(result.ok).toBe(true);
 		expect(capturedInit?.body).toBeInstanceOf(FormData);
-		expect((capturedInit?.body as FormData).get("model")).toBe("gpt-image-2.5");
+		expect((capturedInit?.body as FormData).get("model")).toBe("grok-imagine-image-2.0");
 		expect((capturedInit?.body as FormData).get("prompt")).toBe("edit");
+		expect((capturedInit?.body as FormData).get("quality")).toBeNull();
 		expect((capturedInit?.body as FormData).getAll("image")).toHaveLength(1);
 		expect((capturedInit?.headers as Headers).has("content-type")).toBe(false);
 	});
@@ -175,7 +175,7 @@ describe("image generation client", () => {
 	test("uses the Codex Images JSON edit shape", async () => {
 		const reference = { path: "ref.png", mimeType: "image/png" as const, bytes: validPng() };
 		const editBody = buildImageGenerationRequest({
-			imageModel: "gpt-image-2",
+			imageModel: "test-image-model",
 			params: normalizeGenerateImageParams({ prompt: "edit", referenceImagePaths: ["ref.png"] }),
 			references: [reference],
 		});
@@ -193,7 +193,7 @@ describe("image generation client", () => {
 		expect(result.ok).toBe(true);
 		expect(capturedUrl).toBe("https://chatgpt.com/backend-api/codex/images/edits");
 		const requestBody = JSON.parse(String(capturedInit?.body)) as Record<string, unknown>;
-		expect(requestBody).toMatchObject({ model: "gpt-image-2", prompt: "edit", n: 1 });
+		expect(requestBody).toMatchObject({ model: "test-image-model", prompt: "edit", n: 1 });
 		expect(requestBody.images).toEqual([{ image_url: `data:image/png;base64,${validPng().toString("base64")}` }]);
 	});
 

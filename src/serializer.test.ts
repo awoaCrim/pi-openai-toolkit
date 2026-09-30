@@ -3,6 +3,7 @@ import type { Message, Model } from "@earendil-works/pi-ai";
 import {
 	serializeLlmMessagesToResponsesInput,
 	serializeMessagesToResponsesInput,
+	serializeMessagesToResponsesInputWithLimits,
 } from "./serializer";
 const model: Model<"openai-responses"> = {
 	provider: "openai", api: "openai-responses", id: "gpt-6-astra", name: "GPT-6 Astra",
@@ -63,6 +64,41 @@ describe("Responses trailing tool pairing", () => {
 		]) {
 			expect(serializeMessagesToResponsesInput(model, messages).some((item) => item.type === "function_call_output")).toBe(false);
 		}
+	});
+});
+
+describe("Responses image input limits", () => {
+	const limitedModel: Model<"openai-responses"> = {
+		...model,
+		input: ["text", "image"],
+		inputLimits: { images: { maxPerMessage: 1, maxPerRequest: 2 } },
+	};
+	const image = { type: "image" as const, data: "AQ==", mimeType: "image/png" };
+
+	test("enforces per-message and per-request counts without mutating messages", async () => {
+		const one = { role: "user" as const, content: [image], timestamp: 1 };
+		const before = structuredClone(one);
+		const serialized = await serializeMessagesToResponsesInputWithLimits(limitedModel, [one]);
+		expect(serialized).toEqual([{
+			role: "user",
+			content: [{ type: "input_image", detail: "auto", image_url: "data:image/png;base64,AQ==" }],
+		}]);
+		expect(one).toEqual(before);
+
+		await expect(
+			serializeMessagesToResponsesInputWithLimits(limitedModel, [{
+				role: "user", content: [image, image], timestamp: 2,
+			}]),
+		).rejects.toThrow("per message");
+		const requestLimitedModel: Model<"openai-responses"> = {
+			...limitedModel,
+			inputLimits: { images: { maxPerMessage: 2, maxPerRequest: 2 } },
+		};
+		await expect(
+			serializeMessagesToResponsesInputWithLimits(requestLimitedModel, [one, {
+				role: "user", content: [image, image], timestamp: 3,
+			}]),
+		).rejects.toThrow("per request");
 	});
 });
 

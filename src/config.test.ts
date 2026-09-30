@@ -57,7 +57,7 @@ describe("loadToolkitConfig", () => {
 			...DEFAULT_WEB_SEARCH_CONFIG,
 			models: [...DEFAULT_WEB_SEARCH_CONFIG.models],
 		});
-		expect(loaded.config.imageGeneration).toEqual({ enabled: false, models: ["gpt-image-2.5"] });
+		expect(loaded.config.imageGeneration).toEqual({ enabled: false, models: ["grok-imagine-image-2.0"] });
 		expect(loaded.config.imageGeneration.models).not.toBe(DEFAULT_IMAGE_GENERATION_CONFIG.models);
 		expect(loaded.config.autoMode).toEqual({
 			...DEFAULT_AUTO_MODE_CONFIG,
@@ -93,7 +93,7 @@ describe("loadToolkitConfig", () => {
 				},
 				imageGeneration: {
 					enabled: false,
-					models: [" gpt-image-2 ", "grok-imagine-image-2.0", "", "grok-imagine-image-2.0"],
+					models: [" test-image-model ", "grok-imagine-image-2.0", "", "grok-imagine-image-2.0"],
 				},
 				autoMode: {
 					enabled: true,
@@ -144,7 +144,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.webSearch).toEqual({ enabled: false, models: ["provider/model"] });
 		expect(loaded.config.imageGeneration).toEqual({
 			enabled: false,
-			models: ["gpt-image-2", "grok-imagine-image-2.0"],
+			models: ["test-image-model", "grok-imagine-image-2.0"],
 		});
 		expect(loaded.config.autoMode).toEqual({
 			enabled: true,
@@ -331,7 +331,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.responsesApis).toEqual(["openai-responses"]);
 		expect(loaded.config.compaction.gatewayContextModels).toEqual([]);
 		expect(loaded.config.webSearch).toEqual({ enabled: true, models: ["provider/model"] });
-		expect(loaded.config.imageGeneration).toEqual({ enabled: false, models: ["gpt-image-2.5"] });
+		expect(loaded.config.imageGeneration).toEqual({ enabled: false, models: ["grok-imagine-image-2.0"] });
 		expect(loaded.config.autoMode).toEqual({
 			...DEFAULT_AUTO_MODE_CONFIG,
 			models: [],
@@ -355,7 +355,7 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config.compaction.enabled).toBe(true);
 		expect(loaded.config.webSearch.enabled).toBe(true);
 		expect(loaded.config.imageGeneration.enabled).toBe(false);
-		expect(loaded.config.imageGeneration.models).toEqual(["gpt-image-2.5"]);
+		expect(loaded.config.imageGeneration.models).toEqual(["grok-imagine-image-2.0"]);
 		expect(loaded.config.autoMode.reviewerModel).toBeUndefined();
 		expect(loaded.warnings).toEqual([
 			"Ignoring legacyEnabled: unknown field.",
@@ -373,35 +373,35 @@ describe("loadToolkitConfig", () => {
 	test("imageGeneration.models keeps order, normalizes entries, and falls back with warnings", () => {
 		const customPath = writeTempConfig(
 			JSON.stringify({
-				imageGeneration: { enabled: true, models: ["grok-imagine-image-2.0", "gpt-image-2"] },
+				imageGeneration: { enabled: true, models: ["grok-imagine-image-2.0", "test-image-model"] },
 			}),
 		);
 		const custom = loadToolkitConfig(customPath);
 		expect(custom.warnings).toEqual([]);
 		expect(custom.config.imageGeneration).toEqual({
 			enabled: true,
-			models: ["grok-imagine-image-2.0", "gpt-image-2"],
+			models: ["grok-imagine-image-2.0", "test-image-model"],
 		});
 
 		const emptyPath = writeTempConfig(JSON.stringify({ imageGeneration: { models: [] } }));
 		const empty = loadToolkitConfig(emptyPath);
-		expect(empty.config.imageGeneration.models).toEqual(["gpt-image-2.5"]);
+		expect(empty.config.imageGeneration.models).toEqual(["grok-imagine-image-2.0"]);
 		expect(empty.warnings).toEqual([
-			"Ignoring imageGeneration.models: expected at least one model id; using gpt-image-2.5.",
+			"Ignoring imageGeneration.models: expected at least one model id; using grok-imagine-image-2.0.",
 		]);
 
 		const blankPath = writeTempConfig(JSON.stringify({ imageGeneration: { models: [" ", "\t"] } }));
 		const blank = loadToolkitConfig(blankPath);
-		expect(blank.config.imageGeneration.models).toEqual(["gpt-image-2.5"]);
+		expect(blank.config.imageGeneration.models).toEqual(["grok-imagine-image-2.0"]);
 		expect(blank.warnings).toEqual([
-			"Ignoring imageGeneration.models: expected at least one model id; using gpt-image-2.5.",
+			"Ignoring imageGeneration.models: expected at least one model id; using grok-imagine-image-2.0.",
 		]);
 
 		const malformedPath = writeTempConfig(
-			JSON.stringify({ imageGeneration: { models: ["gpt-image-2", 42] } }),
+			JSON.stringify({ imageGeneration: { models: ["test-image-model", 42] } }),
 		);
 		const malformed = loadToolkitConfig(malformedPath);
-		expect(malformed.config.imageGeneration.models).toEqual(["gpt-image-2.5"]);
+		expect(malformed.config.imageGeneration.models).toEqual(["grok-imagine-image-2.0"]);
 		expect(malformed.warnings).toEqual([
 			"Ignoring imageGeneration.models: expected a string array.",
 		]);
@@ -412,7 +412,7 @@ describe("loadToolkitConfig", () => {
 			}),
 		);
 		const oversized = loadToolkitConfig(oversizedPath);
-		expect(oversized.config.imageGeneration.models).toEqual(["gpt-image-2.5"]);
+		expect(oversized.config.imageGeneration.models).toEqual(["grok-imagine-image-2.0"]);
 		expect(oversized.warnings).toEqual([
 			"Ignoring imageGeneration.models: each model id must be at most 256 characters.",
 		]);
