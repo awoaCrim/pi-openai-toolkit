@@ -8,7 +8,7 @@ import {
 	type RemoteV2ContextSource,
 } from "../types";
 
-export type ConfigFeature = "context" | "webSearch" | "imageGeneration" | "autoMode" | "compatibility" | "diagnostics";
+export type ConfigFeature = "context" | "webSearch" | "imageGeneration" | "autoMode" | "compatibility" | "responsesWebSocket" | "diagnostics";
 export type SearchRoute = "unmanaged" | "local" | "hosted" | "standalone-alpha";
 export type DiagnosticsConfig = {
 	level: "error" | "warn" | "info" | "debug";
@@ -42,6 +42,7 @@ export type EffectiveToolkitPolicy = {
 	context: ContextPolicy;
 	webSearch: { route: SearchRoute };
 	imageGeneration: { enabled: boolean; defaultModel: string; allowedModels: string[] };
+	responsesWebSocket: { enabled: boolean };
 	autoMode: AutoModePolicy;
 	compatibility: { transport: "standard" | "codex-gateway" };
 	diagnostics: DiagnosticsConfig;
@@ -74,7 +75,7 @@ export type ConfigDocumentSnapshot = {
 	issues: ConfigIssue[];
 };
 export const CONFIG_FEATURES: readonly ConfigFeature[] = [
-	"context", "webSearch", "imageGeneration", "autoMode", "compatibility", "diagnostics",
+	"context", "webSearch", "imageGeneration", "autoMode", "compatibility", "responsesWebSocket", "diagnostics",
 ];
 
 /** Independent per-operation defaults, preserving the existing shipped policy. */
@@ -103,6 +104,7 @@ export function createPolicyDefaults(): EffectiveToolkitPolicy {
 			defaultModel: DEFAULT_IMAGE_GENERATION_MODEL,
 			allowedModels: [DEFAULT_IMAGE_GENERATION_MODEL],
 		},
+		responsesWebSocket: { enabled: false },
 		autoMode: {
 			...autoOptions,
 			available: false,

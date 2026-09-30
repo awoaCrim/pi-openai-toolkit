@@ -13,7 +13,7 @@
  * {
  *   "schemaVersion": 2,
  *   "$schema": "…metadata only…",
- *   "defaults": { "context": …, "webSearch": …, "imageGeneration": …, "autoMode": … },
+ *   "defaults": { "context": …, "webSearch": …, "imageGeneration": …, "responsesWebSocket": …, "autoMode": … },
  *   "models": { "provider/model-id": { "context": …, "webSearch": …, "autoMode": …, "compatibility": … } },
  *   "diagnostics": { … }
  * }
@@ -29,7 +29,8 @@
  *   raw values and unknown subtrees are never copied into diagnostics.
  * - `defaults.compatibility` is not a recognized scope: the standard transport is internal and
  *   the Codex gateway transport stays an exact-model opt-in.
- * - Image output settings (`defaults.imageGeneration`) and `diagnostics` are global only.
+ * - Image output settings (`defaults.imageGeneration`), Responses WebSocket transport
+ *   (`defaults.responsesWebSocket`), and `diagnostics` are global only.
  * - Exact model keys and model references use the legacy `provider/model-id` grammar: no
  *   whitespace, globs or bracket patterns. Keys are trimmed like the legacy decoder, and two
  *   raw keys that normalize to the same key are rejected instead of resolved last-wins.
@@ -120,7 +121,7 @@ const DIAGNOSTIC_LEVELS = ["error", "warn", "info", "debug"] as const;
 const LEGACY_ROOT_KEYS = ["compaction", "webSearch", "imageGeneration", "autoMode"] as const;
 
 const ROOT_KEYS = new Set(["$schema", "schemaVersion", "defaults", "models", "diagnostics"]);
-const DEFAULTS_KEYS = new Set(["context", "webSearch", "imageGeneration", "autoMode"]);
+const DEFAULTS_KEYS = new Set(["context", "webSearch", "imageGeneration", "responsesWebSocket", "autoMode"]);
 const MODEL_OVERRIDE_KEYS = new Set(["context", "webSearch", "autoMode", "compatibility"]);
 const CONTEXT_KEYS = new Set(["mode", "remoteCompaction", "nativeFallback", "remoteWindows"]);
 const REMOTE_COMPACTION_KEYS = new Set(["model", "inputSource", "allowContinuityBreak", "apis"]);
@@ -128,6 +129,7 @@ const NATIVE_FALLBACK_KEYS = new Set(["enabled", "model", "thinkingLevel"]);
 const REMOTE_WINDOWS_KEYS = new Set(["leaveManagedMode", "reminderThresholdPercent"]);
 const WEB_SEARCH_KEYS = new Set(["route"]);
 const IMAGE_GENERATION_KEYS = new Set(["enabled", "defaultModel", "allowedModels"]);
+const RESPONSES_WEBSOCKET_KEYS = new Set(["enabled"]);
 const AUTO_MODE_KEYS = new Set([
 	"available",
 	"reviewerModel",
@@ -170,6 +172,7 @@ const FEATURE_NAMES: ReadonlyMap<string, ConfigFeature> = new Map<string, Config
 	["compaction", "context"],
 	["webSearch", "webSearch"],
 	["imageGeneration", "imageGeneration"],
+	["responsesWebSocket", "responsesWebSocket"],
 	["autoMode", "autoMode"],
 	["compatibility", "compatibility"],
 	["diagnostics", "diagnostics"],
@@ -194,6 +197,7 @@ const POLICY_LEAVES: readonly { leaf: string; feature: ConfigFeature }[] = [
 	{ leaf: "imageGeneration.enabled", feature: "imageGeneration" },
 	{ leaf: "imageGeneration.defaultModel", feature: "imageGeneration" },
 	{ leaf: "imageGeneration.allowedModels", feature: "imageGeneration" },
+	{ leaf: "responsesWebSocket.enabled", feature: "responsesWebSocket" },
 	{ leaf: "autoMode.available", feature: "autoMode" },
 	{ leaf: "autoMode.reviewerModel", feature: "autoMode" },
 	{ leaf: "autoMode.gate", feature: "autoMode" },
@@ -841,6 +845,25 @@ function applyImageGenerationSettings(
 	);
 }
 
+function applyResponsesWebSocketSettings(
+	raw: Record<string, unknown>,
+	scope: Scope,
+	state: ResolutionState,
+): void {
+	reportUnknownKeys(raw, RESPONSES_WEBSOCKET_KEYS, scope, state, "responsesWebSocket");
+
+	applyField(
+		raw,
+		{ key: "enabled", leaf: "responsesWebSocket.enabled", feature: "responsesWebSocket" },
+		scope,
+		state,
+		readBoolean,
+		(value) => {
+			state.policy.responsesWebSocket.enabled = value;
+		},
+	);
+}
+
 function applyAutoModeSettings(
 	raw: Record<string, unknown>,
 	scope: Scope,
@@ -1149,6 +1172,15 @@ function applyImageGenerationScope(
 	if (group) applyImageGenerationSettings(group.raw, group.scope, state);
 }
 
+function applyResponsesWebSocketScope(
+	container: Record<string, unknown>,
+	scope: Scope,
+	state: ResolutionState,
+): void {
+	const group = openGroup(container, "responsesWebSocket", scope, state, "responsesWebSocket");
+	if (group) applyResponsesWebSocketSettings(group.raw, group.scope, state);
+}
+
 function applyAutoModeScope(
 	container: Record<string, unknown>,
 	scope: Scope,
@@ -1190,6 +1222,7 @@ function applyDefaults(doc: Record<string, unknown>, state: ResolutionState): vo
 	applyContextScope(raw, scope, state);
 	applyWebSearchScope(raw, scope, state);
 	applyImageGenerationScope(raw, scope, state);
+	applyResponsesWebSocketScope(raw, scope, state);
 	applyAutoModeScope(raw, scope, state);
 }
 

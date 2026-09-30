@@ -208,6 +208,7 @@ function fromLegacy(loaded: LoadedToolkitConfig, model: WebSearchModel | undefin
 		defaultModel: config.imageGeneration.models[0],
 		allowedModels: [...config.imageGeneration.models],
 	};
+	policy.responsesWebSocket = { enabled: false };
 	const { enabled, models, reviewerModel, classifier, ...auto } = config.autoMode;
 	policy.autoMode = {
 		...structuredClone(auto),

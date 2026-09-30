@@ -22,6 +22,22 @@ describe("v2 policy resolution", () => {
 		visit(result.policy);
 	});
 
+	test("keeps the Responses WebSocket feature disabled until explicitly enabled in defaults", () => {
+		expect(resolve({ schemaVersion: 2 }).policy.responsesWebSocket.enabled).toBe(false);
+		const enabled = resolve({ schemaVersion: 2, defaults: { responsesWebSocket: { enabled: true } } });
+		expect(enabled.invalidFeatures).not.toContain("responsesWebSocket");
+		expect(enabled.policy.responsesWebSocket.enabled).toBe(true);
+		expect(enabled.origins["responsesWebSocket.enabled"]).toEqual({
+			kind: "defaults",
+			path: "defaults.responsesWebSocket.enabled",
+		});
+		const invalid = resolve({ schemaVersion: 2, defaults: { responsesWebSocket: { enabled: "yes" } } });
+		expect(invalid.invalidFeatures).toContain("responsesWebSocket");
+		expect(invalid.policy.responsesWebSocket.enabled).toBe(false);
+		const modelScoped = resolve({ schemaVersion: 2, models: { [key]: { responsesWebSocket: { enabled: true } } } });
+		expect(modelScoped.invalidFeatures).toContain("responsesWebSocket");
+	});
+
 	test("merges known fields, replaces arrays, preserves false/zero, and clears nullable references", () => {
 		const result = resolve({ schemaVersion: 2, defaults: {
 			context: { remoteCompaction: { model: " p/producer ", apis: ["openai-responses"] } },
