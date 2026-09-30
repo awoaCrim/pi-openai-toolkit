@@ -105,7 +105,7 @@ The Toolkit WebSocket adapter is disabled by default. Enable it globally for GPT
 }
 ```
 
-It reuses the selected model's provider, base URL, credentials, headers, and model ID without registering another provider. Pi's `transport: "auto"` tries WebSocket first and falls back to SSE before streaming starts; `transport: "sse"` keeps the original HTTP/SSE path. Restart or reload Pi after changing the Toolkit setting. See [WebSocket configuration](docs/configuration.md#responses-websocket-transport).
+It reuses the selected model's provider, base URL, credentials, headers, and model ID without registering another provider. Pi's `transport: "auto"` tries WebSocket first and falls back to SSE before streaming starts; with a stable session it also reuses the socket and sends only the new continuation input when the transcript matches. Use `transport: "websocket-cached"` to require that cached path, or `transport: "sse"` to keep the original HTTP/SSE path. Restart or reload Pi after changing the Toolkit setting. See [WebSocket configuration](docs/configuration.md#responses-websocket-transport).
 
 ### Auto Mode
 

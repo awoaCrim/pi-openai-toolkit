@@ -8,6 +8,7 @@ import {
 import type { FetchFunction } from "@earendil-works/pi-ai";
 import {
 	buildResponsesWebSocketUrl,
+	closeResponsesWebSocketSessions,
 	createResponsesWebSocketProvider,
 	shouldUseResponsesWebSocket,
 } from "./transport";
@@ -102,20 +103,22 @@ function installFakeWebSocket(options: { fail?: boolean } = {}): { instances: Fa
 			this.record.sent.push(data);
 			const request = JSON.parse(data) as { type?: string };
 			if (request.type !== "response.create") throw new Error("unexpected websocket frame");
+			const turn = this.record.sent.length;
+			const text = turn === 1 ? "hello" : "second";
 			const output = {
 				type: "message",
-				id: "msg_1",
+				id: `msg_${turn}`,
 				role: "assistant",
 				status: "completed",
-				content: [{ type: "output_text", text: "hello", annotations: [] }],
+				content: [{ type: "output_text", text, annotations: [] }],
 			};
 			const events = [
-				{ type: "response.created", response: { id: "resp_1", status: "in_progress", output: [] } },
+				{ type: "response.created", response: { id: `resp_${turn}`, status: "in_progress", output: [] } },
 				{ type: "response.output_item.added", output_index: 0, item: output },
-				{ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "hello" },
+				{ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: text },
 				{ type: "response.output_item.done", output_index: 0, item: output },
 				{ type: "response.completed", response: {
-					id: "resp_1", status: "completed", output: [output],
+					id: `resp_${turn}`, status: "completed", output: [output],
 					usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
 				} },
 			];
@@ -142,6 +145,7 @@ function originalResponsesProvider() {
 }
 
 afterEach(() => {
+	closeResponsesWebSocketSessions();
 	globalThis.WebSocket = originalWebSocket;
 });
 
@@ -198,6 +202,42 @@ describe("Responses WebSocket transport", () => {
 			// drain
 		}
 		expect(instances[0]!.headers?.authorization).toBe("Bearer header-key");
+	});
+
+	test("reuses the session socket and sends only the post-response input delta", async () => {
+		const { instances } = installFakeWebSocket();
+		let fallbackCalls = 0;
+		const fallback: FetchFunction = async () => {
+			fallbackCalls++;
+			return textResponse("fallback");
+		};
+		const provider = createResponsesWebSocketProvider(originalResponsesProvider(), true);
+		const options = { transport: "auto" as const, apiKey: "test-key", sessionId: "session-1", fetch: fallback };
+		const firstEvents = [];
+		for await (const event of provider.stream(model(), context(), options)) firstEvents.push(event);
+		const done = firstEvents.find((event) => event.type === "done");
+		if (!done || done.type !== "done") throw new Error("first response did not complete");
+
+		const secondContext = normalizeContext({
+			messages: [
+				{ role: "user", content: "hello", timestamp: 1 },
+				done.message,
+				{ role: "user", content: "second", timestamp: 3 },
+			],
+		});
+		const secondEvents = [];
+		for await (const event of provider.stream(model(), secondContext, options)) secondEvents.push(event);
+
+		expect(fallbackCalls).toBe(0);
+		expect(instances).toHaveLength(1);
+		expect(instances[0]!.sent).toHaveLength(2);
+		const firstFrame = JSON.parse(instances[0]!.sent[0]!) as Record<string, unknown>;
+		const secondFrame = JSON.parse(instances[0]!.sent[1]!) as Record<string, unknown>;
+		expect(firstFrame.previous_response_id).toBeUndefined();
+		expect(secondFrame.previous_response_id).toBe("resp_1");
+		expect(secondFrame.input).toHaveLength(1);
+		expect(JSON.stringify(secondFrame.input)).not.toContain("hello");
+		expect(secondEvents.some((event) => event.type === "text_delta" && event.delta === "second")).toBe(true);
 	});
 
 	test("auto falls back to the original HTTP/SSE fetch before WS emits a response", async () => {
