@@ -8,7 +8,12 @@ export function validPng(): Buffer {
 }
 
 export function validJpeg(): Buffer {
-	return Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00, 0xff, 0xd9]);
+	return Buffer.from([
+		0xff, 0xd8,
+		0xff, 0xc0, 0x00, 0x0b,
+		0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x11, 0x00,
+		0xff, 0xd9,
+	]);
 }
 
 export function validWebp(): Buffer {
@@ -40,7 +45,7 @@ export function imageDetails(artifactPath: string): ImageGenerationDetails {
 	return {
 		artifactPath,
 		routingModel: "newapi/gpt-5.5",
-		imageModel: "gpt-image-2",
+		imageModel: "test-image-model",
 		imageCallId: "ig_test",
 		responseId: "resp_image_test",
 		mimeType: "image/png",

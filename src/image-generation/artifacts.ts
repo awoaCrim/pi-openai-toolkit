@@ -20,13 +20,17 @@ import {
 } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+	IMAGE_GENERATION_MIME_TYPE,
 	MAX_IMAGE_PATH_CHARS,
 	ImageGenerationError,
+	imageFileExtension,
 	sanitizeImageDiagnostic,
+	type ImageGenerationMimeType,
 } from "./types";
 
 export type ExplicitOutputPlan = {
 	path: string;
+	extension?: string;
 };
 
 function isPathInsideOrEqual(root: string, candidate: string): boolean {
@@ -105,10 +109,15 @@ export async function prepareExplicitOutputPath(args: {
 }): Promise<ExplicitOutputPlan | undefined> {
 	if (args.rawPath === undefined) return undefined;
 	const trimmed = args.rawPath.trim();
-	if (!trimmed || trimmed.length > MAX_IMAGE_PATH_CHARS || extname(trimmed).toLowerCase() !== ".png") {
+	const extension = extname(trimmed).toLowerCase();
+	if (
+		!trimmed ||
+		trimmed.length > MAX_IMAGE_PATH_CHARS ||
+		![".png", ".jpg", ".jpeg", ".webp"].includes(extension)
+	) {
 		throw new ImageGenerationError(
 			"output-path-invalid",
-			"outputPath must be a non-empty .png file path.",
+			"outputPath must be a non-empty .png, .jpg, .jpeg, or .webp file path.",
 		);
 	}
 
@@ -127,7 +136,7 @@ export async function prepareExplicitOutputPath(args: {
 		realDirectory(args.agentDir),
 		realDirectory(args.ctx.cwd),
 	]);
-	if (isPathInsideOrEqual(agentRoot, target)) return { path: target };
+	if (isPathInsideOrEqual(agentRoot, target)) return { path: target, extension };
 
 	if (isPathInsideOrEqual(projectRoot, target)) {
 		if (!args.ctx.isProjectTrusted()) {
@@ -136,7 +145,7 @@ export async function prepareExplicitOutputPath(args: {
 				"Writing generated images inside an untrusted project is not allowed.",
 			);
 		}
-		return { path: target };
+		return { path: target, extension };
 	}
 
 	if (!args.ctx.hasUI) {
@@ -148,7 +157,7 @@ export async function prepareExplicitOutputPath(args: {
 	const approved = await args.ctx.ui.confirm(
 		"Write generated image outside safe roots?",
 		[
-			"The generated PNG will be copied to this external path without overwriting an existing file:",
+			"The generated image will be copied to this external path without overwriting an existing file:",
 			"",
 			target,
 			"",
@@ -160,7 +169,7 @@ export async function prepareExplicitOutputPath(args: {
 	if (!approved) {
 		throw new ImageGenerationError("output-path-declined", "External output path was declined.");
 	}
-	return { path: target };
+	return { path: target, extension };
 }
 
 async function publishBytesNoOverwrite(bytes: Uint8Array, target: string): Promise<void> {
@@ -190,15 +199,18 @@ export async function saveCanonicalImage(args: {
 	agentDir: string;
 	sessionId: string;
 	imageCallId: string;
+	mimeType?: ImageGenerationMimeType;
 }): Promise<string> {
 	const root = getGeneratedImagesRoot(args.agentDir);
+	const mimeType = args.mimeType ?? IMAGE_GENERATION_MIME_TYPE;
+	const extension = imageFileExtension(mimeType);
 	const sessionPart = sanitizePathPart(args.sessionId, "session");
 	const imagePart = sanitizePathPart(args.imageCallId, "image_generation");
 	const directory = join(root, sessionPart);
 
 	for (let index = 1; index <= 1000; index += 1) {
 		const suffix = index === 1 ? "" : `-${index}`;
-		const target = join(directory, `${imagePart}${suffix}.png`);
+		const target = join(directory, `${imagePart}${suffix}.${extension}`);
 		try {
 			await publishBytesNoOverwrite(args.bytes, target);
 			return target;
@@ -222,7 +234,16 @@ export async function saveCanonicalImage(args: {
 export async function copyImageToExplicitPath(args: {
 	bytes: Uint8Array;
 	plan: ExplicitOutputPlan;
+	mimeType?: ImageGenerationMimeType;
 }): Promise<void> {
+	const mimeType = args.mimeType ?? IMAGE_GENERATION_MIME_TYPE;
+	const extension = args.plan.extension ?? extname(args.plan.path).toLowerCase();
+	const expectedExtension = `.${imageFileExtension(mimeType)}`;
+	const extensionMatches = extension === expectedExtension ||
+		(mimeType === "image/jpeg" && extension === ".jpeg");
+	if (!extensionMatches) {
+		throw new Error(`Output path extension ${extension || "(none)"} does not match generated ${mimeType} data.`);
+	}
 	const currentTarget = await resolveWriteTarget(args.plan.path);
 	if (currentTarget !== args.plan.path) {
 		throw new Error("Output path changed after approval.");

@@ -15,12 +15,12 @@ import {
 	type Component,
 } from "@earendil-works/pi-tui";
 import { getGeneratedImagesRoot } from "./artifacts";
-import { isValidPng, readPngDimensions } from "./protocol";
+import { readImageMetadata } from "./protocol";
 import {
-	IMAGE_GENERATION_MIME_TYPE,
 	MAX_GENERATED_IMAGE_BYTES,
 	isImageGenerationDetails,
 	type GenerateImageParams,
+	type ImageGenerationMimeType,
 	type ImageGenerationToolDetails,
 } from "./types";
 
@@ -66,6 +66,7 @@ class DiskBackedImageResult extends Container {
 	readonly artifactPath?: string;
 	readonly fileSize?: number;
 	readonly mtimeMs?: number;
+	readonly mimeType?: ImageGenerationMimeType;
 	readonly showImages: boolean;
 	readonly textValue: string;
 
@@ -74,6 +75,7 @@ class DiskBackedImageResult extends Container {
 		artifactPath?: string;
 		fileSize?: number;
 		mtimeMs?: number;
+		mimeType?: ImageGenerationMimeType;
 		showImages: boolean;
 		base64?: string;
 		theme: Theme;
@@ -83,6 +85,7 @@ class DiskBackedImageResult extends Container {
 		this.artifactPath = args.artifactPath;
 		this.fileSize = args.fileSize;
 		this.mtimeMs = args.mtimeMs;
+		this.mimeType = args.mimeType;
 		this.showImages = args.showImages;
 		this.textValue = `${args.text}\n${args.previewWarning ?? ""}`;
 		this.addChild(new Text(args.theme.fg("toolOutput", args.text), 0, 0));
@@ -94,7 +97,7 @@ class DiskBackedImageResult extends Container {
 			this.addChild(
 				new Image(
 					args.base64,
-					IMAGE_GENERATION_MIME_TYPE,
+					args.mimeType ?? "image/png",
 					{ fallbackColor: (text) => args.theme.fg("toolOutput", text) },
 					{ maxWidthCells: 60, filename: args.artifactPath },
 				),
@@ -107,6 +110,7 @@ class DiskBackedImageResult extends Container {
 		artifactPath?: string;
 		fileSize?: number;
 		mtimeMs?: number;
+		mimeType?: ImageGenerationMimeType;
 		showImages: boolean;
 		previewWarning?: string;
 	}): boolean {
@@ -115,6 +119,7 @@ class DiskBackedImageResult extends Container {
 			this.artifactPath === args.artifactPath &&
 			this.fileSize === args.fileSize &&
 			this.mtimeMs === args.mtimeMs &&
+			this.mimeType === args.mimeType &&
 			this.showImages === args.showImages
 		);
 	}
@@ -204,6 +209,7 @@ export function createImageGenerationResultRenderer(
 				artifactPath: realArtifact,
 				fileSize: info.size,
 				mtimeMs: info.mtimeMs,
+				mimeType: result.details.mimeType,
 				showImages: true,
 			})
 		) {
@@ -221,13 +227,14 @@ export function createImageGenerationResultRenderer(
 				previewWarning: "Image preview unavailable: the artifact could not be read.",
 			});
 		}
-		if (bytes.length !== info.size || !isValidPng(bytes) || !readPngDimensions(bytes)) {
+		const metadata = readImageMetadata(bytes);
+		if (bytes.length !== info.size || !metadata || metadata.mimeType !== result.details.mimeType) {
 			bytes.fill(0);
 			return textOnly({
 				text,
 				theme,
 				context,
-				previewWarning: "Image preview unavailable: the artifact is not a valid PNG.",
+				previewWarning: "Image preview unavailable: the artifact is not a valid supported image.",
 			});
 		}
 		const base64 = bytes.toString("base64");
@@ -237,6 +244,7 @@ export function createImageGenerationResultRenderer(
 			artifactPath: realArtifact,
 			fileSize: info.size,
 			mtimeMs: info.mtimeMs,
+			mimeType: metadata.mimeType,
 			showImages: true,
 			base64,
 			theme,

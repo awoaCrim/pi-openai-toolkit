@@ -9,7 +9,13 @@ import type {
 	NativeCompactionEntry,
 	NativeCompactionInputProvenance,
 } from "./types";
-import { serializeMessagesToResponsesInput, type ResponsesInputContentItem, type ResponsesInputItem, type ResponsesInputMessageItem } from "./serializer";
+import {
+	serializeMessagesToResponsesInput,
+	serializeMessagesToResponsesInputWithLimits,
+	type ResponsesInputContentItem,
+	type ResponsesInputItem,
+	type ResponsesInputMessageItem,
+} from "./serializer";
 
 export type NativeReplaySegments = {
 	boundaryIndex: number;
@@ -365,6 +371,15 @@ export function serializeLiveTailToResponsesInput<TApi extends Api>(args: {
 	entries: readonly SessionEntry[];
 }): ResponsesInputItem[] {
 	return serializeMessagesToResponsesInput(args.model, collectReplayMessages(args.entries), {
+		firstSystemMessageIsUpdate: true,
+	});
+}
+
+export async function serializeLiveTailToResponsesInputWithLimits<TApi extends Api>(args: {
+	model: Model<TApi>;
+	entries: readonly SessionEntry[];
+}): Promise<ResponsesInputItem[]> {
+	return serializeMessagesToResponsesInputWithLimits(args.model, collectReplayMessages(args.entries), {
 		firstSystemMessageIsUpdate: true,
 	});
 }

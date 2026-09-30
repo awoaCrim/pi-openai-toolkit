@@ -5,43 +5,42 @@
 [![npm 版本](https://img.shields.io/npm/v/pi-openai-toolkit.svg)](https://www.npmjs.com/package/pi-openai-toolkit)
 [![许可证：MIT](https://img.shields.io/npm/l/pi-openai-toolkit.svg)](LICENSE)
 
-[英文版](README.md)
+[English](README.md)
+
+## 概览
+
+Toolkit 为 Pi 提供上下文管理、托管工具、生图和工具调用审查，同时沿用 Pi 现有的模型、提供商、认证和会话设置。下面的全局 `config.json` 是 Toolkit 功能的策略文件。
+
+需要 Pi 0.87.0+ 和 Node.js 22.19.0+。v0.19.0 已适配并验证 Pi 0.87.0 到 0.99.1 及后续版本。
 
 ## 功能
 
-| 功能 | 用途 |
+| 功能 | 作用 |
 | --- | --- |
-| Codex 远程上下文 | 通过适配的 Codex 协议切换窗口，用 `history` 找回较早的工作内容。 |
+| Codex 远程上下文 | 切换到新的上下文窗口，并通过 `history` 找回较早的工作内容。 |
 | 远程压缩 v2 | 使用加密的服务端检查点继续 Responses 会话。 |
-| 联网搜索 | 按模型选择本地 `pi-web-access`、Responses `web_search` 或实验性的 CPA `web_run`。 |
-| 图像生成 | 使用 Responses 托管生图工具生成或编辑图片。 |
+| 联网搜索 | 按模型选择不受 Toolkit 管理、本地、托管或 standalone 搜索。 |
+| 图像生成 | 通过独立的 Images API 请求生成或编辑栅格图片。 |
+| 图片输入限制 | 在压缩和 replay 时应用 `inputLimits.images` 的缩放及单消息、单请求限制。 |
 | 工具调用审查 | 通过 Toolkit 审批门禁，让审查模型判断指定调用是否可以执行。 |
-
-本包沿用 Pi 已有的模型、认证和会话，不新增提供商或模型。
 
 ## 安装
 
-需要 Pi 0.87.0+ 和 Node.js 22.19.0+。
+Toolkit 需要 Node.js 22.19.0+ 和 Pi 0.87.0 或更高版本。即使扩展只安装到某个项目，配置仍使用全局路径：
+
+`~/.pi/agent/extensions/pi-openai-toolkit/config.json`
+
+需要时创建文件及其父目录。新文件使用配置格式 v2。对于没有 `schemaVersion` 的旧文件，编辑前先运行 `/toolkit-config migration-preview`。详见[迁移指南](docs/configuration.md#legacy-compatibility-and-migration)。
+
+## 快速开始
+
+安装 Toolkit：
 
 ```bash
 pi install npm:pi-openai-toolkit
 ```
 
-加上 `--local` 可安装到当前项目。无论安装位置如何，Toolkit 都使用全局配置：
-
-`~/.pi/agent/extensions/pi-openai-toolkit/config.json`
-
-文件不存在时，创建文件及所需目录。将下方 Toolkit 示例合并到已有的**配置格式 v2** 文件，不要覆盖其他设置。无版本号的旧配置请先运行 `/toolkit-config migration-preview`，详见[迁移指南](docs/configuration.md#legacy-compatibility-and-migration)。
-
-默认情况下，符合条件的模型启用远程压缩 v2；远程上下文窗口、生图和自动模式关闭，搜索不由 Toolkit 管理。使用相关功能仍需后端支持。
-
-## 快速开始：启用远程上下文
-
-如果只需要搜索、生图或工具调用审查，可跳到[常见用法](#常见用法)。
-
-### 使用 Pi 内置的 Codex 提供商
-
-先登录 Pi 的 `openai-codex` 提供商，再添加以下 Toolkit 配置：
+然后将下面的策略写入 Toolkit 的 `config.json`，启用 Codex 远程上下文：
 
 ```json
 {
@@ -52,162 +51,139 @@ pi install npm:pi-openai-toolkit
 }
 ```
 
-使用 Codex 模型目录中的实际模型 ID 启动 Pi：
+照常使用 Pi 启动和选择模型。远程上下文生效后，会出现 `new_context`、`get_context_remaining`、`history` 和 `notes`。运行 `/compact` 即可保存当前工作并进入新窗口。
 
-```bash
-pi --model openai-codex/<model-id>
-```
+对于符合条件的模型，远程压缩 v2 是默认上下文模式。其他 Toolkit 功能见下面的配置参考。
 
-检查是否出现 `new_context`、`get_context_remaining`、`history` 和 `notes`。工具出现表示已激活，不代表后端兼容性已经验证。较早窗口可通过 `history` 检索，不会加载到每次请求中。
+## 配置参考
 
-### 使用兼容网关
+Toolkit 只读取 `~/.pi/agent/extensions/pi-openai-toolkit/config.json`。用 `defaults` 设置通用策略，用 `models["provider/model-id"]` 精确覆盖单个模型。修改已有 v2 文件时，只合并需要的字段，不要覆盖无关设置。
 
-网关必须支持 `openai-responses` 和 Codex 远程上下文协议，仅支持普通对话还不够。
-
-如果模型已在 `~/.pi/agent/models.json` 注册，可跳过注册示例。
-
-<details>
-<summary>在 Pi 中注册网关模型</summary>
-
-将以下内容合并到 Pi 的模型文件。按实际情况替换提供商名称、URL、密钥变量、模型 ID 和限制值；其中的数字仅为示例。
-
-```json
-{
-  "providers": {
-    "my-gateway": {
-      "baseUrl": "https://your-gateway.example/v1",
-      "api": "openai-responses",
-      "apiKey": "$MY_GATEWAY_KEY",
-      "models": [{
-        "id": "gpt-5.6-luna",
-        "name": "GPT-5.6 Luna",
-        "reasoning": true,
-        "input": ["text"],
-        "contextWindow": 272000,
-        "maxTokens": 128000
-      }]
-    }
-  }
-}
-```
-
-PowerShell 中设置密钥：
-
-```powershell
-$env:MY_GATEWAY_KEY = "replace-with-your-gateway-key"
-```
-
-或使用 POSIX shell：
-
-```bash
-export MY_GATEWAY_KEY="replace-with-your-gateway-key"
-```
-
-在同一个终端中启动 Pi。
-
-</details>
-
-在 Toolkit 配置中填写已注册的精确 `提供商/模型 ID`：
-
-```json
-{
-  "schemaVersion": 2,
-  "models": {
-    "my-gateway/gpt-5.6-luna": {
-      "context": { "mode": "remote-windows" },
-      "compatibility": { "transport": "codex-gateway" }
-    }
-  }
-}
-```
-
-```bash
-pi --model my-gateway/gpt-5.6-luna
-```
-
-检查是否出现上面列出的上下文工具。如果没有，使用 `/toolkit-config`，并检查通知、模型键、API、认证和 URL。
-
-## 常见用法
-
-### 用 `/compact` 保存工作并切换窗口
-
-远程上下文已激活时，运行 `/compact` 可将工作状态保存到 notes，再进入新窗口，不生成会话摘要。命令后可以附加要求。
-
-如需独立的检查点模型，在 `defaults` 或精确模型覆盖下设置 `context.remoteCompaction.model`。目标模型须在同一后端及账号下支持远程上下文；不设置则使用当前模型。Toolkit 会在继续工作前恢复原模型和思考等级。详见[上下文配置与要求](docs/configuration.md#context)。
-
-### 使用服务端压缩
-
-将 `context.mode` 设为 `"remote-compaction"`（默认值），使用加密的 Responses 检查点；设为 `"pi"` 则由 Pi 管理上下文。高级输入和回退选项见[配置参考](docs/configuration.md#context)。
-
-### 选择联网搜索路由
-
-设置默认路由，并按模型覆盖：
+下面是一份完整的 v2 配置结构。可选功能默认关闭，适合作为起点；启用功能时修改对应字段即可。
 
 ```json
 {
   "schemaVersion": 2,
   "defaults": {
-    "webSearch": { "route": "local" }
+    "context": {
+      "mode": "remote-compaction",
+      "remoteCompaction": {
+        "model": null,
+        "inputSource": "legacy",
+        "allowContinuityBreak": false,
+        "apis": ["openai-responses", "openai-codex-responses"]
+      },
+      "nativeFallback": {
+        "enabled": true,
+        "model": null,
+        "thinkingLevel": "off"
+      },
+      "remoteWindows": {
+        "leaveManagedMode": "warn",
+        "reminderThresholdPercent": 5
+      }
+    },
+    "webSearch": {
+      "route": "unmanaged"
+    },
+    "imageGeneration": {
+      "enabled": false,
+      "defaultModel": "image-model-id",
+      "allowedModels": ["image-model-id"]
+    },
+    "autoMode": {
+      "available": false,
+      "reviewerModel": null,
+      "gate": "side-effect",
+      "extraTools": [],
+      "timeoutMs": 30000,
+      "transcript": true,
+      "evidenceTools": true,
+      "maxEvidenceRounds": 3,
+      "classifier": {
+        "enabled": false,
+        "model": null,
+        "timeoutMs": 15000,
+        "maxLag": 2
+      },
+      "circuitBreaker": {
+        "consecutiveDenials": 3,
+        "recentDenials": 10,
+        "windowSize": 50
+      }
+    }
   },
   "models": {
-    "my-gateway/gpt-5.6-luna": {
-      "webSearch": { "route": "hosted" }
+    "provider/model-id": {
+      "webSearch": {
+        "route": "hosted"
+      },
+      "compatibility": {
+        "transport": "standard"
+      }
     }
+  },
+  "diagnostics": {
+    "level": "info",
+    "notifyOnLoad": false,
+    "captureRequests": false,
+    "captureResponses": false,
+    "redactSensitiveData": true,
+    "artifactRoot": "~/.pi/agent/artifacts/pi-openai-toolkit/compaction"
   }
 }
 ```
+
+### 上下文管理
+
+`context.mode` 用来选择上下文策略：
+
+| 值 | 行为 |
+| --- | --- |
+| `remote-compaction` | 使用加密的 Responses 检查点。这是符合条件模型的默认值。 |
+| `remote-windows` | 在所选后端支持时使用 Codex 上下文窗口。 |
+| `pi` | 将上下文管理交给 Pi。 |
+
+需要单独的检查点生产模型时，设置 `context.remoteCompaction.model`。该模型需要支持与当前模型相同的上下文流程。生产模型、回退和 replay 规则见[上下文配置与要求](docs/configuration.md#context)。
+
+### 兼容性
+
+`models["provider/model-id"].compatibility.transport` 默认值为 `"standard"`。确实需要 Toolkit 网关协议的精确模型，可以设置为 `"codex-gateway"`。提供商注册和 endpoint 配置仍由 Pi 管理，Toolkit 使用 Pi 已解析的模型和认证信息。必要时参见[提供商特定配置说明](docs/configuration.md#provider-specific-responses-endpoints)。
+
+### 联网搜索
+
+在 `defaults` 或精确模型下设置 `webSearch.route`：
 
 | 路由 | 行为 |
 | --- | --- |
-| `unmanaged` | 由 Pi 和其他扩展管理搜索。 |
-| `local` | 保留现有本地 `pi-web-access` 工具。 |
+| `unmanaged` | 将搜索交给 Pi 和其他扩展管理。 |
+| `local` | 保留现有的本地 `pi-web-access` 工具。 |
 | `hosted` | 使用带来源标注的 Responses `web_search`。 |
-| `standalone-alpha` | 在支持 `/alpha/search` 的 CPA/Codex 网关上使用实验性的 `web_run`。 |
+| `standalone-alpha` | 使用实验性的 standalone 搜索路由。 |
 
-Toolkit 不会在路由之间自动回退。后端要求见[搜索配置](docs/configuration.md#web-search)。
+Toolkit 会保持当前操作选定的路由，不会自动切换到其他路由。详见[搜索配置](docs/configuration.md#web-search)。
 
-### 生成图片
+### 图像生成与输入限制
 
-需要符合条件的 Responses-capable 会话，并可能产生服务商费用。Pi 工具会向当前服务商发送独立的 Images API 请求（`/images/generations` 或 `/images/edits`；Codex 使用 `/codex/images/...`），不会把生图 tool 加入普通对话请求。选择服务商支持的生图模型后启用：
+图像生成设置位于全局 `defaults.imageGeneration` 下：
 
-```json
-{
-  "schemaVersion": 2,
-  "defaults": {
-    "imageGeneration": {
-      "enabled": true,
-      "defaultModel": "gpt-image-2.5",
-      "allowedModels": ["gpt-image-2.5"]
-    }
-  }
-}
-```
+- `enabled` 控制工具是否启用。
+- `defaultModel` 选择未指定模型时使用的生图模型。
+- `allowedModels` 列出工具可以使用的生图模型，默认模型必须包含在其中。
 
-让 Pi 通过 `openai_generate_image` 生成图片，或编辑明确提供的本地参考图。选中的生图模型会写入独立请求；当前对话模型仍只负责路由和认证。工具的可选 `model` 必须精确匹配 `allowedModels`，也可以使用 `batchSize`（1-10）并发生成多个独立变体。批量调用会保存 canonical artifacts，不能同时指定单文件 `outputPath`；生图设置全局生效。详见[生图配置](docs/configuration.md#images)。
+图像生成通过独立的 Images API 请求执行，当前对话模型继续负责路由和认证。PNG、JPEG 和 WebP 响应会按实际格式校验和保存。详见[生图配置](docs/configuration.md#images)。
 
-### 启用工具调用自动审查
+Toolkit 在为压缩或 replay 重建输入时，也会遵守所选模型的 `inputLimits.images` 元数据。它会执行缩放和数量限制，不会修改持久化会话或原始 provider payload。
 
-为模型开放自动模式，并选择审查模型：
+### 使用 Auto Mode 审查工具调用
 
-```json
-{
-  "schemaVersion": 2,
-  "models": {
-    "my-gateway/gpt-5.6-luna": {
-      "autoMode": {
-        "available": true,
-        "reviewerModel": "my-gateway/gpt-5.6-luna"
-      }
-    }
-  }
-}
-```
+在 `defaults` 或精确模型下配置 `autoMode`。将 `available` 设为 `true` 后，使用 `/auto on` 或 `--auto` 开启门禁，使用 `/auto off` 关闭。
 
-使用 `/auto on` 或 `--auto` 开启，`/auto off` 关闭。默认审查 `bash`、`write`、`edit` 和额外配置的工具；`gate: "all"` 审查所有调用。审查超时不会自动放行。详见[自动模式配置](docs/configuration.md#auto-mode)。
+主要设置包括 `reviewerModel`、`gate`、`extraTools` 和 `timeoutMs`。默认的副作用门禁会审查 `bash`、`write`、`edit` 以及额外配置的工具。将 `gate` 设为 `"all"` 可审查所有工具。详见[自动模式配置](docs/configuration.md#auto-mode)。
 
-## 常用配置
+### 诊断与迁移
 
-`defaults` 设置通用值，`models["provider/model-id"]` 按精确模型覆盖。Toolkit 只读取全局配置文件。
+使用以下命令检查和验证 Toolkit 配置：
 
 | 命令 | 用途 |
 | --- | --- |
@@ -215,25 +191,17 @@ Toolkit 不会在路由之间自动回退。后端要求见[搜索配置](docs/c
 | `/toolkit-config validate` | 检查配置错误。 |
 | `/toolkit-config migration-preview` | 预览旧格式到 v2 的迁移，不写入文件。 |
 
-这些命令需要 Pi 交互界面。完整说明见[配置参考](docs/configuration.md)、[编辑器 schema](config.schema.json)和[实现细节](docs/internals.md)。
+在全局 `diagnostics` 下设置诊断选项。完整的[配置参考](docs/configuration.md)包含验证、迁移、诊断和全部支持字段。
 
 ## 开发
 
-在仓库根目录安装依赖后运行：
+在仓库根目录安装依赖并运行检查：
 
 ```bash
+npm install
 npm run typecheck
-```
-
-```bash
 bun test
-```
-
-```bash
-npm run test:pi
-```
-
-```bash
+bun test ./test/pi-smoke.test.ts
 npm pack --dry-run
 ```
 

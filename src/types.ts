@@ -13,7 +13,11 @@ export const REDACTED_VALUE = "[REDACTED]";
  * APIs the extension knows how to build a `/responses/compact` URL for.
  * `compaction.responsesApis` in config.json may only narrow this set.
  */
-export const RESPONSES_COMPACT_CAPABLE_APIS = ["openai-responses", "openai-codex-responses"] as const;
+export const RESPONSES_COMPACT_CAPABLE_APIS = [
+	"openai-responses",
+	"openai-codex-responses",
+	"azure-openai-responses",
+] as const;
 /**
  * Bare model ID used by the independent Astra effort compatibility layer.
  * Remote Context eligibility is API/provider based with an exact gateway opt-in;
@@ -602,7 +606,7 @@ export const DEFAULT_WEB_SEARCH_CONFIG: WebSearchConfig = {
 };
 
 /** Single source of truth for the hosted image model used when nothing is configured. */
-export const DEFAULT_IMAGE_GENERATION_MODEL = "gpt-image-2.5";
+export const DEFAULT_IMAGE_GENERATION_MODEL = "grok-imagine-image-2.0";
 export const DEFAULT_IMAGE_GENERATION_MODELS: readonly string[] = [DEFAULT_IMAGE_GENERATION_MODEL];
 
 export const DEFAULT_IMAGE_GENERATION_CONFIG: ImageGenerationConfig = {

@@ -151,6 +151,19 @@ test("non-codex responses requests never carry codex headers", () => {
 	expect(headers.get("authorization")).toBe("Bearer sk-key");
 });
 
+test("Azure Responses requests use api-key instead of an inherited bearer header", () => {
+	const headers = buildResponsesRequestHeaders(
+		runtimeFor("azure-openai-responses", "azure-key", undefined, {
+			headers: { authorization: "Bearer inherited", "x-test": "kept" },
+		}),
+		{ accept: "application/json" },
+	);
+
+	expect(headers.get("api-key")).toBe("azure-key");
+	expect(headers.get("authorization")).toBeNull();
+	expect(headers.get("x-test")).toBe("kept");
+});
+
 test("native requests honor an explicit null version override", () => {
 	const runtime = runtimeFor("openai-codex-responses", codexJwt("acct_1"), "sess-42", {
 		currentModel: { headers: { Version: "0.154.0" } },

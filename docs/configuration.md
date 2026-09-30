@@ -18,8 +18,8 @@ Create the file and parent directory if absent. This example states the shipped 
     "webSearch": { "route": "unmanaged" },
     "imageGeneration": {
       "enabled": false,
-      "defaultModel": "gpt-image-2.5",
-      "allowedModels": ["gpt-image-2.5"]
+      "defaultModel": "grok-imagine-image-2.0",
+      "allowedModels": ["grok-imagine-image-2.0"]
     },
     "autoMode": { "available": false }
   },
@@ -60,7 +60,7 @@ Place `context` under `defaults` or an exact `models` entry.
 | `remoteCompaction.model` | `null` | Exact producer reference; `null` uses the active model. In `remote-compaction`, it selects the synthetic checkpoint producer on the same effective base URL. In active `remote-windows`, manual `/compact` temporarily selects it for notes checkpoint duty on the same backend/account. |
 | `remoteCompaction.inputSource` | `"legacy"` | `"legacy"` preserves session/raw-branch input; `"pi-context-hook"` opts into Pi's ordered context projection. Checkpoint provenance must match. |
 | `remoteCompaction.allowContinuityBreak` | `false` | Allow restarting from Pi context after a foreign compaction entry. It does not make malformed opaque checkpoints replayable. |
-| `remoteCompaction.apis` | `["openai-responses", "openai-codex-responses"]` | May narrow this set; `[]` permits no remote-compaction API. Unsupported entries are errors. |
+| `remoteCompaction.apis` | `["openai-responses", "openai-codex-responses", "azure-openai-responses"]` | May narrow this set; `[]` permits no remote-compaction API. Azure uses Pi's resolved `AZURE_OPENAI_*` environment values for the `/openai/v1` Responses path, deployment mapping, and `api-version`; unsupported entries are errors. |
 | `nativeFallback.enabled` | `true` | Enable the existing native-method fallback tier. |
 | `nativeFallback.model` | `null` | Optional summary-model reference on the remote-ineligible path. After a remote attempt fails, the existing producer-first fallback order is retained. |
 | `nativeFallback.thinkingLevel` | `"off"` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; actual model support still applies. |
@@ -81,7 +81,80 @@ The SDK native compact call reports its intentional cancellation; the visible ha
 
 Only `models["provider/model-id"].compatibility.transport` is configurable: `"standard"` is the internal baseline and `"codex-gateway"` is an exact opt-in. There is no global `defaults.compatibility` and no built-in gateway model list.
 
-This selects an existing Toolkit protocol profile, independently of context mode. It does not change Pi's provider, API, endpoint, or model. The same decoded document supplies compatibility for search, image generation, and a separately named compaction producer. A successful config resolution is not a backend capability test.
+This selects an existing Toolkit protocol profile, independently of context mode. It does not change Pi's provider, API, endpoint, or model. The same decoded document supplies compatibility for search, image generation, and a separately named compaction producer. A successful config resolution is not a backend capability test. When Pi selects a `pi-virtual` model, Toolkit uses Pi's runtime resolver (when available) to obtain the physical provider/model for capability, authentication, and endpoint checks; if that route cannot be verified, the feature fails closed instead of treating the virtual entry as an OpenAI model.
+
+---
+
+### Provider-specific Responses endpoints
+
+Toolkit consumes provider registration, endpoint, model, credential, and provider-scoped environment values from Pi. Keep those details in Pi's model and authentication stores; Toolkit configuration selects the feature policy and exact model overrides. Pi's complete `auth.env` object is preserved through Toolkit authentication and request setup, including compaction, replay, fallback, and hosted-tool boundaries.
+
+#### Azure OpenAI Responses
+
+Pi's `azure-openai-responses` API uses Azure's Responses endpoint. Toolkit uses Pi's resolved provider authentication and environment values for the base URL, deployment mapping, and `api-version`. Azure Responses requests use the `api-key` header and do not forward an inherited bearer `Authorization` header.
+
+Set the API key and either a resource name or a full base URL before starting Pi. `AZURE_OPENAI_API_VERSION` defaults to `v1`, and `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` maps the model ID selected in Pi to an Azure deployment name.
+
+PowerShell:
+
+```powershell
+$env:AZURE_OPENAI_API_KEY = "replace-with-your-azure-key"
+$env:AZURE_OPENAI_RESOURCE_NAME = "replace-with-your-resource"
+$env:AZURE_OPENAI_API_VERSION = "2025-01-01"
+$env:AZURE_OPENAI_DEPLOYMENT_NAME_MAP = "model-id=replace-with-deployment"
+```
+
+POSIX shell:
+
+```bash
+export AZURE_OPENAI_API_KEY="replace-with-your-azure-key"
+export AZURE_OPENAI_RESOURCE_NAME="replace-with-your-resource"
+export AZURE_OPENAI_API_VERSION="2025-01-01"
+export AZURE_OPENAI_DEPLOYMENT_NAME_MAP="model-id=replace-with-deployment"
+```
+
+Use `AZURE_OPENAI_BASE_URL` instead of `AZURE_OPENAI_RESOURCE_NAME` when the full resource URL is already known, for example `https://your-resource.openai.azure.com`. Toolkit normalizes the resource root to `/openai/v1` and appends `api-version` to both the Responses and compact URLs.
+
+Provider-scoped values can also be stored in Pi's `~/.pi/agent/auth.json`:
+
+```json
+{
+  "azure-openai-responses": {
+    "type": "api_key",
+    "key": "$AZURE_OPENAI_API_KEY",
+    "env": {
+      "AZURE_OPENAI_RESOURCE_NAME": "replace-with-your-resource",
+      "AZURE_OPENAI_API_VERSION": "2025-01-01",
+      "AZURE_OPENAI_DEPLOYMENT_NAME_MAP": "model-id=replace-with-deployment"
+    }
+  }
+}
+```
+
+Pi resolves the credential and complete `env` object for each request; provider-scoped values take priority over the process environment. Keep `auth.json` private. The selected Pi model ID may differ from the Azure deployment name when the mapping is configured.
+
+Enable the Azure Responses API in the Toolkit policy and start Pi with the registered model ID:
+
+```json
+{
+  "schemaVersion": 2,
+  "defaults": {
+    "context": {
+      "mode": "remote-compaction",
+      "remoteCompaction": {
+        "apis": ["azure-openai-responses"]
+      }
+    },
+    "webSearch": { "route": "hosted" }
+  }
+}
+```
+
+```bash
+pi --model azure-openai-responses/<model-id>
+```
+
+The exact model must still be registered in Pi's model catalog and authenticated through Pi. Keep provider registration and credentials in Pi's own configuration.
 
 ---
 
@@ -96,15 +169,48 @@ This selects an existing Toolkit protocol profile, independently of context mode
 | `hosted` | Use native Responses search with source annotations; suppress conflicting local and standalone tools. |
 | `standalone-alpha` | Experimental, explicit opt-in. Expose sequential `web_run` and call the provider-relative `/alpha/search` endpoint once per execution. |
 
-There is no v2 search master switch. `local` and `unmanaged` differ in payload cleanup and ownership. Missing auth, an unavailable route, a tool conflict, or invalid selected policy does not trigger another route. Standalone supports `search_query`, `image_query`, `open`, `click`, `find`, `screenshot`, `finance`, `weather`, `sports`, and `time`, with `response_length`. It sends a bounded command envelope rather than the full transcript; follow-up references depend on the provider's session/reference handling. The gateway must expose the endpoint and its standalone-search capability.
+There is no v2 search master switch. `local` and `unmanaged` differ in payload cleanup and ownership. Missing auth, an unavailable route, a tool conflict, or invalid selected policy does not trigger another route. Hosted Responses search also accepts Pi's Azure Responses API; standalone-alpha remains restricted to the verified OpenAI/Codex `/alpha/search` routes. Standalone supports `search_query`, `image_query`, `open`, `click`, `find`, `screenshot`, `finance`, `weather`, `sports`, and `time`, with `response_length`. It sends a bounded command envelope rather than the full transcript; follow-up references depend on the provider's session/reference handling. The gateway must expose the endpoint and its standalone-search capability.
 
 ---
 
 ### Images
 
-Image settings are global-only under `defaults.imageGeneration`. `enabled` defaults to `false`. `defaultModel` defaults to `"gpt-image-2.5"`; `allowedModels` defaults to `["gpt-image-2.5"]`.
+Image settings are global-only under `defaults.imageGeneration`. `enabled` defaults to `false`. `defaultModel` defaults to `"grok-imagine-image-2.0"`; `allowedModels` defaults to `["grok-imagine-image-2.0"]`.
 
-These are bare output-model IDs, not active-session model keys. Each normalized ID must contain 1-256 characters. The allowed list must remain nonempty after normalization and contain the explicit default. A caller's one-call `model` must be a member; policy and membership are checked before auth, local-reference preparation/upload, and paid dispatch. The active session remains the routing/auth model, while the selected image model is sent in a separate Images API request. Generation uses `/images/generations`; edits use `/images/edits` (Codex uses the corresponding `/codex/images/...` paths). The wrapper never injects a Responses `image_generation` tool. `batchSize` is a tool argument from 1-10; each item is an independent `n: 1` request, partial success preserves saved artifacts, and batch calls cannot use a single-file `outputPath`. Config does not grant permission to upload arbitrary local files or imply that a provider supports a particular image model.
+These are bare output-model IDs, not active-session model keys. Each normalized ID must contain 1-256 characters. The allowed list must remain nonempty after normalization and contain the explicit default. A caller's one-call `model` must be a member; policy and membership are checked before auth, local-reference preparation/upload, and paid dispatch. The active session remains the routing/auth model, while the selected image model is sent in a separate Images API request. Generation uses `/images/generations`; edits use `/images/edits` (Codex uses the corresponding `/codex/images/...` paths). The wrapper never injects a Responses `image_generation` tool. Responses are accepted only when they contain one validated PNG, JPEG, or WebP `data[].b64_json` image; the canonical artifact uses the detected format extension. A literal `quality: "auto"` is omitted from the wire request for compatibility gateways that reject it. `batchSize` is a tool argument from 1-10; each item is an independent `n: 1` request, partial success preserves saved artifacts, and batch calls cannot use a single-file `outputPath`. Config does not grant permission to upload arbitrary local files or imply that a provider supports a particular image model.
+
+Image input limits are declared in Pi's model metadata, not in Toolkit policy. For example:
+
+```json
+{
+  "providers": {
+    "my-gateway": {
+      "baseUrl": "https://your-gateway.example/v1",
+      "api": "openai-responses",
+      "apiKey": "$MY_GATEWAY_KEY",
+      "models": [{
+        "id": "vision-model",
+        "name": "Vision Model",
+        "input": ["text", "image"],
+        "inputLimits": {
+          "images": {
+            "resize": {
+              "maxWidth": 1568,
+              "maxHeight": 1568,
+              "maxBytes": 524288,
+              "jpegQuality": 80
+            },
+            "maxPerMessage": 4,
+            "maxPerRequest": 8
+          }
+        }
+      }]
+    }
+  }
+}
+```
+
+At the compaction and replay boundary, Toolkit applies the declared resize profile before dispatch, counts images per message and request, and fails closed when a limit cannot be satisfied. It creates new input values without mutating the persisted session or original provider payload.
 
 ---
 

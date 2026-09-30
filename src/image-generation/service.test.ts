@@ -67,7 +67,7 @@ function baseDeps(overrides: Partial<ImageGenerationServiceDependencies> = {}): 
 		requestImage: async () => ({
 			ok: true,
 			status: 200,
-			image: { bytes: validPng(), imageCallId: "ig_test", responseId: "resp_test", width: 1, height: 1 },
+			image: { bytes: validPng(), mimeType: "image/png", imageCallId: "ig_test", responseId: "resp_test", width: 1, height: 1 },
 		}),
 		saveCanonical: async ({ imageCallId }) => `/agent/generated-images/session-test/${imageCallId}.png`,
 		copyExplicit: async () => undefined,
@@ -93,6 +93,7 @@ describe("image generation service", () => {
 					status: 200,
 					image: {
 						bytes: generatedBytes,
+						mimeType: "image/png",
 						imageCallId: "ig_test",
 						responseId: "resp_test",
 						revisedPrompt: "revised",
@@ -110,14 +111,14 @@ describe("image generation service", () => {
 			ctx: context(),
 		});
 
-		expect(requestBody).toEqual(expect.objectContaining({ action: "edit", model: "gpt-image-2.5", n: 1 }));
+		expect(requestBody).toEqual(expect.objectContaining({ action: "edit", model: "grok-imagine-image-2.0", n: 1 }));
 		expect(requestBody).not.toHaveProperty("tools");
 		expect(requestBody).not.toHaveProperty("tool_choice");
 		expect(result.details).toEqual(
 			expect.objectContaining({
 				artifactPath: "/agent/generated-images/session-test/ig_test.png",
 				routingModel: "newapi/gpt-5.5",
-				imageModel: "gpt-image-2.5",
+				imageModel: "grok-imagine-image-2.0",
 				edited: true,
 				referenceCount: 1,
 				warning: "copy failed with [REDACTED]",
@@ -134,21 +135,21 @@ describe("image generation service", () => {
 		const deps = baseDeps({
 			loadConfig: () => ({
 				...config(),
-				config: { ...config().config, imageGeneration: { ...config().config.imageGeneration, models: ["grok-imagine-image-2.0", "gpt-image-2"] } },
+				config: { ...config().config, imageGeneration: { ...config().config.imageGeneration, models: ["grok-imagine-image-2.0", "test-image-model"] } },
 			}),
 			requestImage: async (args) => {
 				requestBody = args.body as unknown as Record<string, unknown>;
-				return { ok: true, status: 200, image: { bytes: validPng(), imageCallId: "ig_model", width: 1, height: 1 } };
+				return { ok: true, status: 200, image: { bytes: validPng(), mimeType: "image/png", imageCallId: "ig_model", width: 1, height: 1 } };
 			},
 		});
 		const result = await createImageGenerationExecutor(deps)({
-			params: { prompt: "draw a cat", model: " gpt-image-2 " },
+			params: { prompt: "draw a cat", model: " test-image-model " },
 			toolCallId: "call",
 			ctx: context(),
 		});
-		expect(requestBody?.model).toBe("gpt-image-2");
+		expect(requestBody?.model).toBe("test-image-model");
 		expect(requestBody?.action).toBe("generate");
-		expect(result.details).toEqual(expect.objectContaining({ imageModel: "gpt-image-2" }));
+		expect(result.details).toEqual(expect.objectContaining({ imageModel: "test-image-model" }));
 	});
 
 	test("runs independent batch requests concurrently and preserves successful artifacts", async () => {
@@ -166,7 +167,7 @@ describe("image generation service", () => {
 				return {
 					ok: true,
 					status: 200,
-					image: { bytes: validPng(), imageCallId: `ig_${body.model}_${started}`, width: 1, height: 1 },
+					image: { bytes: validPng(), mimeType: "image/png", imageCallId: `ig_${body.model}_${started}`, width: 1, height: 1 },
 				};
 			},
 			saveCanonical: async ({ imageCallId }) => {
@@ -185,7 +186,7 @@ describe("image generation service", () => {
 		expect(isImageGenerationBatchDetails(result.details)).toBe(true);
 		if (!isImageGenerationBatchDetails(result.details)) return;
 		expect(result.details).toMatchObject({ batch: true, requestedCount: 3, succeededCount: 3, failedCount: 0 });
-		expect(result.text).toContain("Generated 3/3 PNG images.");
+		expect(result.text).toContain("Generated 3/3 images.");
 	});
 
 	test("returns partial batch success and bounded failure details without retrying", async () => {
@@ -194,7 +195,7 @@ describe("image generation service", () => {
 			requestImage: async () => {
 				const index = calls++;
 				if (index === 1) return { ok: false, reason: "rate-limit", status: 429, errorMessage: "quota exhausted" };
-				return { ok: true, status: 200, image: { bytes: validPng(), imageCallId: `ig_${index}`, width: 1, height: 1 } };
+				return { ok: true, status: 200, image: { bytes: validPng(), mimeType: "image/png", imageCallId: `ig_${index}`, width: 1, height: 1 } };
 			},
 		});
 		const result = await createImageGenerationExecutor(deps)({
@@ -212,12 +213,32 @@ describe("image generation service", () => {
 		expect(result.text).toContain("Image 2 failed: quota exhausted");
 	});
 
+	test("throws the first bounded failure when every batch item fails", async () => {
+		let calls = 0;
+		await expect(createImageGenerationExecutor(baseDeps({
+			requestImage: async () => {
+				calls += 1;
+				return {
+					ok: false,
+					reason: "request-rejected",
+					status: 400,
+					errorMessage: "provider rejected image request\nBearer sk-secret-value",
+				};
+			},
+		}))({
+			params: { prompt: "make variants", batchSize: 3 },
+			toolCallId: "batch-call",
+			ctx: context(),
+		})).rejects.toThrow("provider rejected image request Bearer [REDACTED]");
+		expect(calls).toBe(3);
+	});
+
 	test("fails before dispatch when model is not configured or the request is cancelled", async () => {
 		let dispatched = false;
 		const deps = baseDeps({
 			loadConfig: () => ({
 				...config(),
-				config: { ...config().config, imageGeneration: { ...config().config.imageGeneration, models: ["gpt-image-2"] } },
+				config: { ...config().config, imageGeneration: { ...config().config.imageGeneration, models: ["test-image-model"] } },
 			}),
 			requestImage: async () => { dispatched = true; throw new Error("should not dispatch"); },
 		});
@@ -243,7 +264,7 @@ describe("image generation service", () => {
 		let reads = 0;
 		const deps = baseDeps({
 			loadConfig: () => { reads += 1; return v2Fixture(raw); },
-			requestImage: async ({ body }) => ({ ok: true, status: 200, image: { bytes: validPng(), imageCallId: body.model, width: 1, height: 1 } }),
+			requestImage: async ({ body }) => ({ ok: true, status: 200, image: { bytes: validPng(), mimeType: "image/png", imageCallId: body.model, width: 1, height: 1 } }),
 		});
 		const originalResolve = deps.resolveRuntime;
 		deps.resolveRuntime = async (...args) => {

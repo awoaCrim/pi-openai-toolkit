@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
 	buildImageGenerationRequest,
+	decodeGeneratedImage,
 	decodeGeneratedPng,
 	detectReferenceImageMimeType,
 	normalizeGenerateImageParams,
 	parseImagesApiResponse,
+	readImageMetadata,
 	readPngDimensions,
 	selectImageGenerationModel,
 } from "./protocol";
@@ -104,25 +106,25 @@ describe("image generation protocol", () => {
 	});
 
 	test("selects the configured default or an explicitly configured image model", () => {
-		expect(selectImageGenerationModel({})).toBe("gpt-image-2.5");
-		expect(selectImageGenerationModel({ configuredModels: ["grok-imagine-image-2.0", "gpt-image-2"] })).toBe(
+		expect(selectImageGenerationModel({})).toBe("grok-imagine-image-2.0");
+		expect(selectImageGenerationModel({ configuredModels: ["grok-imagine-image-2.0", "test-image-model"] })).toBe(
 			"grok-imagine-image-2.0",
 		);
 		expect(
 			selectImageGenerationModel({
-				requestedModel: " gpt-image-2 ",
-				configuredModels: ["grok-imagine-image-2.0", "gpt-image-2"],
+				requestedModel: " test-image-model ",
+				configuredModels: ["grok-imagine-image-2.0", "test-image-model"],
 			}),
-		).toBe("gpt-image-2");
-		expect(selectImageGenerationModel({ configuredModels: [" ", "gpt-image-2", "gpt-image-2"] })).toBe("gpt-image-2");
+		).toBe("test-image-model");
+		expect(selectImageGenerationModel({ configuredModels: [" ", "test-image-model", "test-image-model"] })).toBe("test-image-model");
 	});
 
 	test("rejects an unconfigured image model before it can be selected", () => {
 		expect(() =>
-			selectImageGenerationModel({ requestedModel: "grok-imagine-image-2.0", configuredModels: ["gpt-image-2"] }),
+			selectImageGenerationModel({ requestedModel: "grok-imagine-image-2.0", configuredModels: ["test-image-model"] }),
 		).toThrow(ImageGenerationError);
 		expect(() =>
-			selectImageGenerationModel({ requestedModel: "openai/gpt-image-2", configuredModels: ["gpt-image-2"] }),
+			selectImageGenerationModel({ requestedModel: "openai/test-image-model", configuredModels: ["test-image-model"] }),
 		).toThrow(ImageGenerationError);
 	});
 
@@ -153,8 +155,8 @@ describe("image generation protocol", () => {
 
 	test("keeps the selected image model independent from the active routing model", () => {
 		const params = normalizeGenerateImageParams({ prompt: "draw a cat" });
-		const body = buildImageGenerationRequest({ imageModel: "gpt-image-2", params, references: [] });
-		expect(body.model).toBe("gpt-image-2");
+		const body = buildImageGenerationRequest({ imageModel: "test-image-model", params, references: [] });
+		expect(body.model).toBe("test-image-model");
 		expect(() => buildImageGenerationRequest({ imageModel: " ", params, references: [] })).toThrow(
 			"A configured image generation model is required.",
 		);
@@ -184,8 +186,35 @@ describe("image generation protocol", () => {
 		);
 	});
 
-	test("rejects malformed base64 and non-PNG responses", () => {
+	test("parses provider JPEG/WebP base64 responses and preserves their actual MIME type", () => {
+		const jpeg = validJpeg();
+		const jpegResult = parseImagesApiResponse({
+			data: [{ b64_json: jpeg.toString("base64"), mime_type: "image/jpeg" }],
+		});
+		expect(jpegResult).toMatchObject({ ok: true });
+		if (jpegResult.ok) {
+			expect(jpegResult.image.mimeType).toBe("image/jpeg");
+			expect({ width: jpegResult.image.width, height: jpegResult.image.height }).toEqual({ width: 1, height: 1 });
+		}
+
+		const webp = validWebp();
+		const webpResult = parseImagesApiResponse({
+			data: [{ b64_json: webp.toString("base64"), mime_type: "image/webp" }],
+		});
+		expect(webpResult).toMatchObject({ ok: true });
+		if (webpResult.ok) expect(webpResult.image.mimeType).toBe("image/webp");
+		expect(readImageMetadata(jpeg)).toEqual({ mimeType: "image/jpeg", width: 1, height: 1 });
+		expect(readImageMetadata(webp)).toEqual({ mimeType: "image/webp", width: 1, height: 1 });
+	});
+
+	test("rejects malformed base64, MIME mismatches, and unsupported responses", () => {
 		expect(parseImagesApiResponse({ data: [{ b64_json: "not-base64" }] })).toEqual(
+			expect.objectContaining({ ok: false, reason: "malformed-response" }),
+		);
+		expect(
+			parseImagesApiResponse({ data: [{ b64_json: validJpeg().toString("base64"), mime_type: "image/png" }] }),
+		).toEqual(expect.objectContaining({ ok: false, reason: "malformed-response" }));
+		expect(decodeGeneratedImage(Buffer.from("not an image").toString("base64"))).toEqual(
 			expect.objectContaining({ ok: false, reason: "malformed-response" }),
 		);
 		expect(decodeGeneratedPng(Buffer.from("not a png").toString("base64"))).toEqual(
@@ -193,11 +222,13 @@ describe("image generation protocol", () => {
 		);
 	});
 
-	test("recognizes complete PNG, JPEG and WebP references", () => {
+	test("recognizes complete PNG, JPEG and WebP references and rejects truncated formats", () => {
 		expect(detectReferenceImageMimeType(validPng())).toBe("image/png");
 		expect(detectReferenceImageMimeType(validJpeg())).toBe("image/jpeg");
 		expect(detectReferenceImageMimeType(validWebp())).toBe("image/webp");
 		expect(detectReferenceImageMimeType(validPng().subarray(0, 24))).toBeUndefined();
+		expect(detectReferenceImageMimeType(Buffer.from([0xff, 0xd8, 0xff, 0xd9]))).toBeUndefined();
+		expect(detectReferenceImageMimeType(validWebp().subarray(0, 20))).toBeUndefined();
 		expect(readPngDimensions(validPng())).toEqual({ width: 1, height: 1 });
 	});
 

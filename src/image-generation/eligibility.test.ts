@@ -46,4 +46,11 @@ describe("image generation eligibility", () => {
 		expect(isImageGenerationEnabledForModel({ ...responsesModel, api: undefined }, { enabled: true })).toBe(false);
 		expect(isImageGenerationEnabledForModel(undefined, { enabled: true })).toBe(false);
 	});
+
+	test("keeps virtual models discoverable but checks the resolved physical API when provided", () => {
+		const virtual = { provider: "router", api: "pi-virtual", id: "auto" };
+		expect(isImageGenerationEnabledForModel(virtual, { enabled: true })).toBe(true);
+		expect(isImageGenerationEnabledForModel(virtual, { enabled: true }, { ...responsesModel })).toBe(true);
+		expect(isImageGenerationEnabledForModel(virtual, { enabled: true }, { ...responsesModel, api: "anthropic-messages" })).toBe(false);
+	});
 });

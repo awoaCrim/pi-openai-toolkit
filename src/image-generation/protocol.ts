@@ -1,6 +1,6 @@
 import { DEFAULT_IMAGE_GENERATION_MODELS } from "../types";
 import {
-	IMAGE_GENERATION_MIME_TYPE,
+	IMAGE_GENERATION_MIME_TYPES,
 	IMAGE_GENERATION_QUALITIES,
 	IMAGE_GENERATION_SIZES,
 	MAX_GENERATED_IMAGE_BYTES,
@@ -15,6 +15,7 @@ import {
 	ImageGenerationError,
 	sanitizeImageDiagnostic,
 	type GenerateImageParams,
+	type ImageGenerationMimeType,
 	type NormalizedGenerateImageParams,
 	type ParsedGeneratedImage,
 	type PreparedReferenceImage,
@@ -269,35 +270,7 @@ function hasPngEndChunk(buffer: Buffer): boolean {
 }
 
 export function detectReferenceImageMimeType(bytes: Uint8Array): ReferenceImageMimeType | undefined {
-	const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-	if (readPngDimensions(buffer) && hasPngEndChunk(buffer)) return "image/png";
-	if (
-		buffer.length >= 4 &&
-		buffer[0] === 0xff &&
-		buffer[1] === 0xd8 &&
-		buffer[2] === 0xff &&
-		buffer.lastIndexOf(Buffer.from([0xff, 0xd9])) >= 3
-	) {
-		return "image/jpeg";
-	}
-	if (
-		buffer.length >= 20 &&
-		buffer.toString("ascii", 0, 4) === "RIFF" &&
-		buffer.toString("ascii", 8, 12) === "WEBP"
-	) {
-		const declaredSize = buffer.readUInt32LE(4) + 8;
-		const chunkType = buffer.toString("ascii", 12, 16);
-		const chunkSize = buffer.readUInt32LE(16);
-		const paddedChunkSize = chunkSize + (chunkSize % 2);
-		if (
-			declaredSize === buffer.length &&
-			(chunkType === "VP8 " || chunkType === "VP8L" || chunkType === "VP8X") &&
-			20 + paddedChunkSize <= buffer.length
-		) {
-			return "image/webp";
-		}
-	}
-	return undefined;
+	return readImageMetadata(bytes)?.mimeType;
 }
 
 export function isValidPng(bytes: Uint8Array): boolean {
@@ -319,14 +292,145 @@ export function readPngDimensions(bytes: Uint8Array): { width: number; height: n
 	return { width, height };
 }
 
+function boundedDimensions(width: number, height: number): { width: number; height: number } | undefined {
+	if (
+		!Number.isInteger(width) ||
+		!Number.isInteger(height) ||
+		width <= 0 ||
+		height <= 0 ||
+		width > MAX_IMAGE_DIMENSION ||
+		height > MAX_IMAGE_DIMENSION
+	) {
+		return undefined;
+	}
+	return { width, height };
+}
+
+const JPEG_DIMENSION_MARKERS = new Set([
+	0xc0,
+	0xc1,
+	0xc2,
+	0xc3,
+	0xc5,
+	0xc6,
+	0xc7,
+	0xc9,
+	0xca,
+	0xcb,
+	0xcd,
+	0xce,
+	0xcf,
+]);
+
+function readJpegDimensions(bytes: Uint8Array): { width: number; height: number } | undefined {
+	const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	if (buffer.length < 4 || buffer[0] !== 0xff || buffer[1] !== 0xd8) return undefined;
+	let offset = 2;
+	while (offset < buffer.length) {
+		if (buffer[offset] !== 0xff) {
+			offset += 1;
+			continue;
+		}
+		while (offset < buffer.length && buffer[offset] === 0xff) offset += 1;
+		if (offset >= buffer.length) return undefined;
+		const marker = buffer[offset++];
+		if (marker === 0xd9 || marker === 0xda) return undefined;
+		if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+		if (offset + 2 > buffer.length) return undefined;
+		const segmentLength = buffer.readUInt16BE(offset);
+		if (segmentLength < 2 || offset + segmentLength > buffer.length) return undefined;
+		if (JPEG_DIMENSION_MARKERS.has(marker) && segmentLength >= 7) {
+			const height = buffer.readUInt16BE(offset + 3);
+			const width = buffer.readUInt16BE(offset + 5);
+			return boundedDimensions(width, height);
+		}
+		offset += segmentLength;
+	}
+	return undefined;
+}
+
+function hasJpegEndMarker(bytes: Uint8Array): boolean {
+	const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	return buffer.length >= 2 && buffer[buffer.length - 2] === 0xff && buffer[buffer.length - 1] === 0xd9;
+}
+
+function readWebpDimensions(bytes: Uint8Array): { width: number; height: number } | undefined {
+	const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	if (
+		buffer.length < 20 ||
+		buffer.toString("ascii", 0, 4) !== "RIFF" ||
+		buffer.toString("ascii", 8, 12) !== "WEBP"
+	) {
+		return undefined;
+	}
+	const declaredSize = buffer.readUInt32LE(4) + 8;
+	if (declaredSize !== buffer.length) return undefined;
+	let offset = 12;
+	while (offset + 8 <= buffer.length) {
+		const chunkType = buffer.toString("ascii", offset, offset + 4);
+		const chunkSize = buffer.readUInt32LE(offset + 4);
+		const dataStart = offset + 8;
+		const dataEnd = dataStart + chunkSize;
+		if (dataEnd > buffer.length) return undefined;
+		if (chunkType === "VP8X" && chunkSize >= 10) {
+			const width = 1 + buffer.readUIntLE(dataStart + 4, 3);
+			const height = 1 + buffer.readUIntLE(dataStart + 7, 3);
+			return boundedDimensions(width, height);
+		}
+		if (chunkType === "VP8 " && chunkSize >= 10) {
+			if (
+				buffer[dataStart + 3] === 0x9d &&
+				buffer[dataStart + 4] === 0x01 &&
+				buffer[dataStart + 5] === 0x2a
+			) {
+				const width = buffer.readUInt16LE(dataStart + 6) & 0x3fff;
+				const height = buffer.readUInt16LE(dataStart + 8) & 0x3fff;
+				return boundedDimensions(width, height);
+			}
+		}
+		if (chunkType === "VP8L" && chunkSize >= 5 && buffer[dataStart] === 0x2f) {
+			const width = 1 + ((buffer[dataStart + 1] | (buffer[dataStart + 2] << 8)) & 0x3fff);
+			const height = 1 + ((buffer[dataStart + 2] >> 6) | (buffer[dataStart + 3] << 2) | (buffer[dataStart + 4] << 10));
+			return boundedDimensions(width, height);
+		}
+		offset = dataEnd + (chunkSize % 2);
+	}
+	return undefined;
+}
+
 function extractBase64(value: string): string {
 	const trimmed = value.trim();
 	const dataUrl = DATA_URL_PATTERN.exec(trimmed);
 	return (dataUrl?.[1] ?? trimmed).trim();
 }
 
-export function decodeGeneratedPng(value: string):
-	| { ok: true; bytes: Buffer; width: number; height: number }
+function normalizeImageMimeType(value: unknown): ImageGenerationMimeType | undefined {
+	if (typeof value !== "string") return undefined;
+	const normalized = value.trim().toLowerCase();
+	if (normalized === "image/jpg") return "image/jpeg";
+	return (IMAGE_GENERATION_MIME_TYPES as readonly string[]).includes(normalized)
+		? normalized as ImageGenerationMimeType
+		: undefined;
+}
+
+export function readImageMetadata(bytes: Uint8Array):
+	| { mimeType: ImageGenerationMimeType; width: number; height: number }
+	| undefined {
+	if (readPngDimensions(bytes) && hasPngEndChunk(Buffer.from(bytes))) {
+		const dimensions = readPngDimensions(bytes)!;
+		return { mimeType: "image/png", ...dimensions };
+	}
+	if (hasJpegEndMarker(bytes)) {
+		const dimensions = readJpegDimensions(bytes);
+		if (dimensions) return { mimeType: "image/jpeg", ...dimensions };
+	}
+	const dimensions = readWebpDimensions(bytes);
+	if (dimensions) return { mimeType: "image/webp", ...dimensions };
+	return undefined;
+}
+
+export function decodeGeneratedImage(value: string, hintedMimeType?: unknown):
+	| { ok: true; bytes: Buffer; mimeType: ImageGenerationMimeType; width: number; height: number }
 	| { ok: false; reason: "malformed-response" | "oversized-response"; errorMessage: string } {
 	const base64 = extractBase64(value);
 	const maxBase64Chars = Math.ceil(MAX_GENERATED_IMAGE_BYTES / 3) * 4;
@@ -358,16 +462,40 @@ export function decodeGeneratedPng(value: string):
 			errorMessage: "Image generation returned invalid or oversized image data.",
 		};
 	}
-	const dimensions = readPngDimensions(bytes);
-	if (!dimensions) {
+	const metadata = readImageMetadata(bytes);
+	if (!metadata) {
 		bytes.fill(0);
 		return {
 			ok: false,
 			reason: "malformed-response",
-			errorMessage: "Image generation returned data that is not a valid PNG image.",
+			errorMessage: "Image generation returned data that is not a supported PNG, JPEG, or WebP image.",
 		};
 	}
-	return { ok: true, bytes, ...dimensions };
+	if (typeof hintedMimeType === "string" && hintedMimeType.trim()) {
+		const hinted = normalizeImageMimeType(hintedMimeType);
+		if (!hinted || hinted !== metadata.mimeType) {
+			bytes.fill(0);
+			return {
+				ok: false,
+				reason: "malformed-response",
+				errorMessage: "Image generation returned an image with inconsistent MIME metadata.",
+			};
+		}
+	}
+	return { ok: true, bytes, ...metadata };
+}
+
+export function decodeGeneratedPng(value: string):
+	| { ok: true; bytes: Buffer; width: number; height: number }
+	| { ok: false; reason: "malformed-response" | "oversized-response"; errorMessage: string } {
+	const decoded = decodeGeneratedImage(value, "image/png");
+	if (!decoded.ok) return decoded;
+	return {
+		ok: true,
+		bytes: decoded.bytes,
+		width: decoded.width,
+		height: decoded.height,
+	};
 }
 
 export function extractProviderErrorMessage(value: unknown, fallback: string): string {
@@ -419,13 +547,22 @@ export function parseImagesApiResponse(value: unknown): ParsedImageResponseResul
 			errorMessage: "Image generation response did not contain base64 image data.",
 		};
 	}
-	const decoded = decodeGeneratedPng(item.b64_json);
+	const mimeHint = item.mime_type ?? item.mimeType;
+	if (mimeHint !== undefined && typeof mimeHint !== "string") {
+		return {
+			ok: false,
+			reason: "malformed-response",
+			errorMessage: "Image generation returned invalid MIME metadata.",
+		};
+	}
+	const decoded = decodeGeneratedImage(item.b64_json, mimeHint);
 	if (!decoded.ok) return decoded;
 
 	return {
 		ok: true,
 		image: {
 			bytes: decoded.bytes,
+			mimeType: decoded.mimeType,
 			imageCallId:
 				normalizedOptionalString(item.id, MAX_IMAGE_IDENTIFIER_CHARS) ?? "image_generation_0",
 			responseId: normalizedOptionalString(value.id, MAX_IMAGE_IDENTIFIER_CHARS),
@@ -438,5 +575,5 @@ export function parseImagesApiResponse(value: unknown): ParsedImageResponseResul
 
 export const _protocolTest = {
 	PNG_SIGNATURE,
-	IMAGE_GENERATION_MIME_TYPE,
+	IMAGE_GENERATION_MIME_TYPES,
 };

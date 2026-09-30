@@ -7,7 +7,7 @@ import {
 	prepareExplicitOutputPath,
 	saveCanonicalImage,
 } from "./artifacts";
-import { validPng } from "./test-helpers";
+import { validJpeg, validPng } from "./test-helpers";
 
 let dirs: string[] = [];
 
@@ -118,7 +118,7 @@ describe("image artifacts", () => {
 		).rejects.toThrow("interactive approval");
 	});
 
-	test("rejects non-PNG and existing destinations before dispatch", async () => {
+	test("accepts supported image extensions and rejects unsupported destinations before dispatch", async () => {
 		const agentDir = await tempDir("pi-image-agent-");
 		const project = await tempDir("pi-image-project-");
 		const existing = join(project, "existing.png");
@@ -129,12 +129,29 @@ describe("image artifacts", () => {
 			isProjectTrusted: () => true,
 			ui: { confirm: async () => true } as never,
 		};
+		const jpegPlan = await prepareExplicitOutputPath({ rawPath: "image.jpg", agentDir, ctx });
+		expect(jpegPlan?.extension).toBe(".jpg");
 		await expect(
-			prepareExplicitOutputPath({ rawPath: "bad.jpg", agentDir, ctx }),
-		).rejects.toThrow(".png");
+			prepareExplicitOutputPath({ rawPath: "bad.gif", agentDir, ctx }),
+		).rejects.toThrow(".png, .jpg");
 		await expect(
 			prepareExplicitOutputPath({ rawPath: existing, agentDir, ctx }),
 		).rejects.toThrow("already exists");
 		expect(dirname(existing)).toBe(project);
+	});
+
+	test("keeps canonical output when an explicit extension does not match the response MIME", async () => {
+		const agentDir = await tempDir("pi-image-agent-");
+		const project = await tempDir("pi-image-project-");
+		const ctx = {
+			cwd: project,
+			hasUI: true,
+			isProjectTrusted: () => true,
+			ui: { confirm: async () => true } as never,
+		};
+		const plan = await prepareExplicitOutputPath({ rawPath: "image.png", agentDir, ctx });
+		await expect(
+			copyImageToExplicitPath({ bytes: validJpeg(), plan: plan!, mimeType: "image/jpeg" }),
+		).rejects.toThrow("does not match generated image/jpeg");
 	});
 });

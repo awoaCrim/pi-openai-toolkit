@@ -139,6 +139,36 @@ test("resolves an allowlisted Astra gateway model without native Codex account d
 	expect(noAllowlist).toMatchObject({ ok: false, reason: "unsupported-model" });
 });
 
+test("resolves a virtual selection to its physical gateway model before context auth", async () => {
+	const virtual = model({ provider: "router", api: "pi-virtual", id: "auto", baseUrl: "" });
+	const physical = model({ provider: "my-gateway", api: "openai-responses", id: "gpt-6.1-sol", baseUrl: "https://newapi.example/v1" });
+	const result = await resolveCodexContextProvider({
+		model: virtual,
+		modelRegistry: {
+			getApiKeyAndHeaders: async (current: TestModel) => ({
+				ok: true,
+				apiKey: current.id === physical.id ? "gateway-key" : undefined,
+				baseUrl: physical.baseUrl,
+			}),
+			find: (_provider: string, id: string) => id === physical.id ? physical : undefined,
+			runtime: {
+				resolveModel: async () => ({ model: physical, thinkingLevel: "off" }),
+			},
+		},
+		sessionManager: {
+			getSessionId: () => "virtual-session",
+			buildSessionProjection: () => ({ messages: [] }),
+		},
+	} as never, virtual, ["router/auto"]);
+
+	expect(result.ok).toBe(true);
+	if (result.ok) {
+		expect(result.provider.kind).toBe("codex-gateway");
+		expect(result.provider.provider).toBe(physical.provider);
+		expect(result.provider.model).toBe(physical.id);
+	}
+});
+
 test("rejects gateway context when the Pi session has no stable identity", async () => {
 	const gatewayModel = model({ provider: "my-gateway", api: "openai-responses", id: "gpt-5.6-luna", baseUrl: "https://newapi.example/v1" });
 	const result = await resolveCodexContextProvider({

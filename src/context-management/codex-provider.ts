@@ -9,7 +9,7 @@ import {
 	filterCodexGatewayHeaders,
 } from "../responses-headers";
 export { CODEX_AFFINITY_SCOPE } from "../responses-headers";
-import { normalizeBaseUrl } from "../runtime";
+import { normalizeBaseUrl, resolveEffectiveModel, VIRTUAL_MODEL_API } from "../runtime";
 import { isExactModelAllowed } from "../model-scope";
 import {
 	isNonEmptyString,
@@ -172,17 +172,27 @@ export async function resolveCodexContextProvider(
 	modelOverride: ExtensionContext["model"] = ctx.model,
 	gatewayModels: readonly string[] = [],
 ): Promise<CodexContextProviderResolution> {
-	const model = modelOverride;
-	const descriptor = {
-		provider: model?.provider,
-		api: model?.api,
-		model: model?.id,
-		baseUrl: normalizeBaseUrl(model?.baseUrl),
+	const selectedModel = modelOverride;
+	const selectedDescriptor = {
+		provider: selectedModel?.provider,
+		api: selectedModel?.api,
+		model: selectedModel?.id,
+		baseUrl: normalizeBaseUrl(selectedModel?.baseUrl),
 	};
-	if (!model) return { ok: false, reason: "unsupported-model" };
+	const effective = await resolveEffectiveModel(ctx, selectedModel);
+	if (!effective.ok) return { ok: false, reason: "unsupported-model", ...selectedDescriptor };
+	const model = effective.model;
+	const descriptor = {
+		provider: model.provider,
+		api: model.api,
+		model: model.id,
+		baseUrl: normalizeBaseUrl(model.baseUrl),
+	};
 
 	const isNative = isNativeCodexModel(model);
-	const isGateway = isCodexGatewayModel(model, gatewayModels);
+	const isLogicalVirtualGateway = selectedModel?.api === VIRTUAL_MODEL_API && isExactModelAllowed(selectedModel, gatewayModels);
+	const isGateway = isCodexGatewayModel(model, gatewayModels) ||
+		(isLogicalVirtualGateway && model.api === GATEWAY_API);
 	if (!isNative && !isGateway) {
 		return { ok: false, reason: "unsupported-model", ...descriptor };
 	}

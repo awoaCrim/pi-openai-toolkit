@@ -4,7 +4,7 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createImageGenerationResultRenderer } from "./render";
-import { imageDetails, validPng } from "./test-helpers";
+import { imageDetails, validJpeg, validPng } from "./test-helpers";
 
 let dirs: string[] = [];
 
@@ -63,6 +63,28 @@ describe("disk-backed image result rendering", () => {
 
 		expect(second).toBe(first);
 		expect(reads).toBe(1);
+	});
+
+	test("previews a validated JPEG with its actual MIME type", async () => {
+		const agentDir = await tempDir("pi-render-agent-");
+		const artifact = join(agentDir, "generated-images", "session", "ig.jpg");
+		await mkdir(join(agentDir, "generated-images", "session"), { recursive: true });
+		await writeFile(artifact, validJpeg());
+		const renderer = createImageGenerationResultRenderer({
+			getAgentDir: () => agentDir,
+			getCapabilities: () => ({ images: "kitty", trueColor: true, hyperlinks: false }),
+			readFileSync,
+			realpathSync,
+			statSync,
+		});
+		const details = { ...imageDetails(artifact), mimeType: "image/jpeg" as const, byteCount: validJpeg().length };
+		const component = renderer(
+			{ content: [{ type: "text" as const, text: `Artifact: ${artifact}` }], details },
+			{ expanded: false, isPartial: false },
+			theme,
+			context(),
+		);
+		expect((component as any).mimeType).toBe("image/jpeg");
 	});
 
 	test("falls back to text when images are hidden or the artifact is missing", async () => {

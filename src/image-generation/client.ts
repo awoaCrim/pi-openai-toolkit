@@ -60,13 +60,15 @@ function dataUrl(reference: PreparedReferenceImage): string {
 }
 
 function jsonRequestBody(runtime: ResponsesRuntime, body: ImageGenerationRequestBody): Record<string, unknown> {
-	const common = {
+	const common: Record<string, unknown> = {
 		model: body.model,
 		prompt: body.prompt,
 		n: body.n,
 		size: body.size,
-		quality: body.quality,
 	};
+	// `auto` is the Images API default, but some compatible gateways (including
+	// Grok image routes) reject the literal value instead of treating it as default.
+	if (body.quality !== "auto") common.quality = body.quality;
 	if (body.action === "edit") {
 		return {
 			...common,
@@ -84,7 +86,7 @@ function multipartRequestBody(body: ImageGenerationRequestBody): FormData {
 	form.append("prompt", body.prompt);
 	form.append("n", String(body.n));
 	form.append("size", body.size);
-	form.append("quality", body.quality);
+	if (body.quality !== "auto") form.append("quality", body.quality);
 	form.append("output_format", "png");
 	form.append("response_format", "b64_json");
 	for (const [index, reference] of body.references.entries()) {
