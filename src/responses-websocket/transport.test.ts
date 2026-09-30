@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
-	createAssistantMessageEventStream,
+	getApiProvider,
 	normalizeContext,
 	type Api,
 	type Model,
-} from "@earendil-works/pi-ai";
-import type { ApiProvider } from "@earendil-works/pi-ai/compat";
+} from "@earendil-works/pi-ai/compat";
+import type { FetchFunction } from "@earendil-works/pi-ai";
 import {
 	buildResponsesWebSocketUrl,
 	createResponsesWebSocketProvider,
@@ -13,7 +13,6 @@ import {
 } from "./transport";
 
 type FakeSocketEvent = { data?: unknown; code?: number; reason?: string; message?: string; error?: unknown };
-
 type FakeSocketInstance = {
 	url: string;
 	headers?: Record<string, string>;
@@ -44,66 +43,33 @@ function context() {
 	});
 }
 
-function fallbackProvider(calls: { stream: number }): ApiProvider {
-	return {
-		api: "openai-responses",
-		stream: () => {
-			calls.stream += 1;
-			const stream = createAssistantMessageEventStream();
-			stream.push({
-				type: "start",
-				partial: {
-					role: "assistant",
-					content: [],
-					api: "openai-responses",
-					provider: "generic-provider",
-					model: "gpt-test",
-					usage: {
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					stopReason: "pending",
-					timestamp: 1,
-				},
-			});
-			stream.push({
-				type: "done",
-				reason: "stop",
-				message: {
-					role: "assistant",
-					content: [{ type: "text", text: "fallback" }],
-					api: "openai-responses",
-					provider: "generic-provider",
-					model: "gpt-test",
-					usage: {
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					stopReason: "stop",
-					timestamp: 1,
-				},
-			});
-			stream.end();
-			return stream;
-		},
-		streamSimple: () => {
-			throw new Error("not used");
-		},
+function textResponse(text: string): Response {
+	const output = {
+		type: "message",
+		id: "msg_1",
+		role: "assistant",
+		status: "completed",
+		content: [{ type: "output_text", text, annotations: [] }],
 	};
+	const events = [
+		{ type: "response.created", response: { id: "resp_1", status: "in_progress", output: [] } },
+		{ type: "response.output_item.added", output_index: 0, item: output },
+		{ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: text },
+		{ type: "response.output_item.done", output_index: 0, item: output },
+		{ type: "response.completed", response: {
+			id: "resp_1", status: "completed", output: [output],
+			usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+		} },
+	];
+	return new Response(events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""), {
+		status: 200,
+		headers: { "content-type": "text/event-stream" },
+	});
 }
 
 function installFakeWebSocket(options: { fail?: boolean } = {}): { instances: FakeSocketInstance[] } {
 	const instances: FakeSocketInstance[] = [];
 	class FakeWebSocket {
-		static instances = instances;
 		private readonly listeners = new Map<string, Array<(event: FakeSocketEvent) => void>>();
 		private readonly record: FakeSocketInstance;
 		readyState = 0;
@@ -136,17 +102,22 @@ function installFakeWebSocket(options: { fail?: boolean } = {}): { instances: Fa
 			this.record.sent.push(data);
 			const request = JSON.parse(data) as { type?: string };
 			if (request.type !== "response.create") throw new Error("unexpected websocket frame");
+			const output = {
+				type: "message",
+				id: "msg_1",
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text: "hello", annotations: [] }],
+			};
 			const events = [
-				{ type: "response.created", response: { id: "resp_1" } },
-				{ type: "response.output_item.added", output_index: 0, item: { type: "message", id: "msg_1", content: [] } },
-				{ type: "response.output_text.delta", output_index: 0, delta: "hello" },
-				{ type: "response.output_item.done", output_index: 0, item: {
-					type: "message",
-					id: "msg_1",
-					status: "completed",
-					content: [{ type: "output_text", text: "hello" }],
+				{ type: "response.created", response: { id: "resp_1", status: "in_progress", output: [] } },
+				{ type: "response.output_item.added", output_index: 0, item: output },
+				{ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "hello" },
+				{ type: "response.output_item.done", output_index: 0, item: output },
+				{ type: "response.completed", response: {
+					id: "resp_1", status: "completed", output: [output],
+					usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
 				} },
-				{ type: "response.completed", response: { id: "resp_1", status: "completed" } },
 			];
 			for (const event of events) queueMicrotask(() => this.emit("message", { data: JSON.stringify(event) }));
 		}
@@ -162,6 +133,12 @@ function installFakeWebSocket(options: { fail?: boolean } = {}): { instances: Fa
 	}
 	globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
 	return { instances };
+}
+
+function originalResponsesProvider() {
+	const provider = getApiProvider("openai-responses");
+	if (!provider) throw new Error("Pi openai-responses provider is not registered");
+	return provider;
 }
 
 afterEach(() => {
@@ -185,15 +162,19 @@ describe("Responses WebSocket transport", () => {
 		);
 	});
 
-	test("sends a standard response.create frame and parses Responses events", async () => {
+	test("sends a standard response.create frame and lets Pi parse the bridged SSE events", async () => {
 		const { instances } = installFakeWebSocket();
-		const calls = { stream: 0 };
-		const provider = createResponsesWebSocketProvider(fallbackProvider(calls), true);
-		const stream = provider.stream(model(), context(), { transport: "websocket", apiKey: "test-key" });
+		let fallbackCalls = 0;
+		const fallback: FetchFunction = async () => {
+			fallbackCalls++;
+			return textResponse("fallback");
+		};
+		const provider = createResponsesWebSocketProvider(originalResponsesProvider(), true);
+		const stream = provider.stream(model(), context(), { transport: "websocket", apiKey: "test-key", fetch: fallback });
 		const events = [];
 		for await (const event of stream) events.push(event);
 
-		expect(calls.stream).toBe(0);
+		expect(fallbackCalls).toBe(0);
 		expect(instances).toHaveLength(1);
 		expect(instances[0]!.url).toBe("wss://example.test/v1/responses?model=gpt-test");
 		expect(instances[0]!.headers?.authorization).toBe("Bearer test-key");
@@ -204,35 +185,61 @@ describe("Responses WebSocket transport", () => {
 		expect(events.at(-1)?.type).toBe("done");
 	});
 
-	test("auto falls back to the original SSE adapter before WS emits start", async () => {
-		installFakeWebSocket({ fail: true });
-		const calls = { stream: 0 };
-		const provider = createResponsesWebSocketProvider(fallbackProvider(calls), true);
-		const stream = provider.stream(model(), context(), { transport: "auto", apiKey: "test-key" });
-		const events = [];
-		for await (const event of stream) events.push(event);
-
-		expect(calls.stream).toBe(1);
-		expect(events.at(-1)?.type).toBe("done");
-	});
-
-	test("a disabled provider delegates even when Pi requests WebSocket", async () => {
-		const calls = { stream: 0 };
-		const provider = createResponsesWebSocketProvider(fallbackProvider(calls));
-		const stream = provider.stream(model(), context(), { transport: "websocket", apiKey: "test-key" });
+	test("preserves authorization supplied through Pi headers", async () => {
+		const { instances } = installFakeWebSocket();
+		const fallback: FetchFunction = async () => textResponse("fallback");
+		const provider = createResponsesWebSocketProvider(originalResponsesProvider(), true);
+		const stream = provider.stream(model(), context(), {
+			transport: "websocket",
+			headers: { authorization: "Bearer header-key" },
+			fetch: fallback,
+		});
 		for await (const _event of stream) {
 			// drain
 		}
+		expect(instances[0]!.headers?.authorization).toBe("Bearer header-key");
+	});
+
+	test("auto falls back to the original HTTP/SSE fetch before WS emits a response", async () => {
+		installFakeWebSocket({ fail: true });
+		let fallbackCalls = 0;
+		const fallback: FetchFunction = async () => {
+			fallbackCalls++;
+			return textResponse("fallback");
+		};
+		const provider = createResponsesWebSocketProvider(originalResponsesProvider(), true);
+		const stream = provider.stream(model(), context(), { transport: "auto", apiKey: "test-key", fetch: fallback });
+		const events = [];
+		for await (const event of stream) events.push(event);
+
+		expect(fallbackCalls).toBe(1);
+		expect(events.some((event) => event.type === "text_delta" && event.delta === "fallback")).toBe(true);
+		expect(events.at(-1)?.type).toBe("done");
+	});
+
+	test("a disabled provider delegates without touching WebSocket", async () => {
+		const calls = { stream: 0 };
+		const original = {
+			api: "openai-responses" as const,
+			stream() {
+				calls.stream++;
+				throw new Error("delegated");
+			},
+			streamSimple() {
+				throw new Error("delegated");
+			},
+		};
+		const provider = createResponsesWebSocketProvider(original, false);
+		expect(() => provider.stream(model(), context(), { transport: "websocket", apiKey: "test-key" })).toThrow("delegated");
 		expect(calls.stream).toBe(1);
 	});
 
 	test("explicit SSE bypasses the WebSocket wrapper", async () => {
-		const calls = { stream: 0 };
-		const provider = createResponsesWebSocketProvider(fallbackProvider(calls), true);
-		const stream = provider.stream(model(), context(), { transport: "sse", apiKey: "test-key" });
-		for await (const _event of stream) {
-			// drain
-		}
-		expect(calls.stream).toBe(1);
+		const fallback: FetchFunction = async () => textResponse("sse");
+		const provider = createResponsesWebSocketProvider(originalResponsesProvider(), true);
+		const stream = provider.stream(model(), context(), { transport: "sse", apiKey: "test-key", fetch: fallback });
+		const events = [];
+		for await (const event of stream) events.push(event);
+		expect(events.some((event) => event.type === "text_delta" && event.delta === "sse")).toBe(true);
 	});
 });

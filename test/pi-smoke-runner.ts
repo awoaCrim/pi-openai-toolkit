@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createSmokeEnvironment } from "./pi-smoke-environment";
 
@@ -11,6 +11,12 @@ const target = targetByName[targetName];
 if (!target) throw new Error(`Unknown Pi smoke target: ${targetName}`);
 const env = await createSmokeEnvironment();
 try {
+	const configDir = join(env.agentDir, "extensions/pi-openai-toolkit");
+	await mkdir(configDir, { recursive: true });
+	await writeFile(join(configDir, "config.json"), JSON.stringify({
+		schemaVersion: 2,
+		defaults: { responsesWebSocket: { enabled: true } },
+	}));
 	const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } =
 		await import("@earendil-works/pi-coding-agent");
 	const { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore, InMemoryModelsStore } =

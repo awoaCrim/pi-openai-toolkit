@@ -4,6 +4,7 @@ import { loadToolkitConfig, resolveToolkitConfig } from "../config";
 import { createResponsesWebSocketProvider } from "./transport";
 
 const SOURCE_ID = "pi-openai-toolkit:openai-responses-websocket";
+let baseProvider: ReturnType<typeof getApiProvider>;
 
 /**
  * Add the transport branch at the API-adapter boundary instead of registering
@@ -21,9 +22,9 @@ export function installResponsesWebSocketTransport(
 	if (!resolved.policy.responsesWebSocket.enabled || resolved.invalidFeatures.includes("responsesWebSocket")) {
 		return false;
 	}
-	const original = getApiProvider("openai-responses");
-	if (!original) return false;
-	registerApiProvider(createResponsesWebSocketProvider(original, true), SOURCE_ID);
+	baseProvider ??= getApiProvider("openai-responses");
+	if (!baseProvider) return false;
+	registerApiProvider(createResponsesWebSocketProvider(baseProvider, true), SOURCE_ID);
 	return true;
 }
 
