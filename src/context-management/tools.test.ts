@@ -127,6 +127,18 @@ test("new_context and notes guidance separate pre-rollover checkpointing from po
 	expect(notesGuidance).toContain("unless a later rollover is actually needed");
 });
 
+test("context-management tools declare direct exposure", () => {
+	const manager = new CodexContextWindowManager(async () => undefined);
+	const tools = createContextManagementTools(activePi, manager, () => true);
+
+	expect([
+		tools.newContext,
+		tools.getContextRemaining,
+		tools.history,
+		tools.notes,
+	].map((tool) => tool.exposure)).toEqual(["direct", "direct", "direct", "direct"]);
+});
+
 test("new_context cannot bypass the checkpoint gate with an obsolete force flag", async () => {
 	const branch = [
 		{

@@ -119,6 +119,7 @@ export function createContextManagementTools(
 		label: "new_context",
 		description: "Start a new remote Codex context window without generating a conversation summary. Requires a persisted successful notes checkpoint in the current window.",
 		parameters: NEW_CONTEXT_PARAMETERS,
+		exposure: "direct",
 		promptSnippet: "Start a new remote Codex context window without summarizing history.",
 		promptGuidelines: [
 			"Before this new_context call, checkpoint active work in notes; only a persisted successful notes append/write in the current window unlocks this rollover, and no conversation summary carries over.",
@@ -169,6 +170,7 @@ export function createContextManagementTools(
 		label: "get_context_remaining",
 		description: "Get the remaining tokens in the current remote Codex context window.",
 		parameters: EMPTY_PARAMETERS,
+		exposure: "direct",
 		async execute(_id, _params, _signal, _update, ctx) {
 			await assertActive(ctx);
 			const remaining = manager.remaining(ctx);
@@ -183,6 +185,7 @@ export function createContextManagementTools(
 		label: "history",
 		description: "Search or read prior remote Codex context-window history. Pass IDs unchanged.",
 		parameters: HISTORY_PARAMETERS,
+		exposure: "direct",
 		promptSnippet: "Search or read prior remote Codex context-window history.",
 		promptGuidelines: [
 			"When the user asks about decisions, code, or details from earlier in the conversation that are no longer in the current context window, use history first instead of relying on fragments that survived compaction.",
@@ -201,6 +204,7 @@ export function createContextManagementTools(
 		label: "notes",
 		description: "Read and checkpoint remote Codex notes across context windows.",
 		parameters: NOTES_PARAMETERS,
+		exposure: "direct",
 		promptSnippet: "Read and checkpoint remote Codex notes across context windows.",
 		promptGuidelines: [
 			"Before calling new_context, checkpoint the current turn's active work (unfinished tasks, decisions, open questions, references) into notes with append_to_file or write_file so it survives the window change; wait for that result to be persisted before calling new_context.",
