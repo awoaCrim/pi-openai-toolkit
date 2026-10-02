@@ -14,8 +14,9 @@ const sameModel = scenario === "same-model" || scenario === "unset-model";
 const incomplete = ["notes-failed", "no-rollover", "cancel-notes"].includes(scenario);
 const cancelledAfter = scenario === "cancel-after-schedule";
 const userSelection = scenario === "user-select";
-const noContinuation = incomplete || cancelledAfter || userSelection;
-const refused = scenario === "approval-refused" || scenario === "excluded-notes";
+const excludedNotes = scenario === "excluded-notes";
+const noContinuation = incomplete || cancelledAfter || userSelection || excludedNotes;
+const refused = scenario === "approval-refused";
 const targetKey = `${provider}/${sameModel ? "original" : "checkpoint"}`;
 const packageDir = resolve(import.meta.dir, "..");
 
@@ -159,8 +160,14 @@ try {
 			const switched = markers().length === 2;
 			const inputText = JSON.stringify(body.input);
 			requests.push({ model: body.model, reasoning: body.reasoning, input: inputText, switched });
-			assert.equal(body.model, seed || switched ? "original" : targetKey.split("/")[1], JSON.stringify({ scenario, phase: sm.getBranch().filter((entry) => entry.type === "custom" && entry.customType === MANUAL_COMPACT_ENTRY_TYPE), requests: requests.map(({ model, switched }) => ({ model, switched })), selected: session.model?.id }));
+			assert.equal(body.model, excludedNotes ? "checkpoint" : seed || switched ? "original" : targetKey.split("/")[1], JSON.stringify({ scenario, phase: sm.getBranch().filter((entry) => entry.type === "custom" && entry.customType === MANUAL_COMPACT_ENTRY_TYPE), requests: requests.map(({ model, switched }) => ({ model, switched })), selected: session.model?.id }));
 			assert(JSON.stringify(body).includes("MANAGED-SYSTEM-HEAD"));
+			if (excludedNotes) {
+				assert(!switched);
+				assert(!inputText.includes("ACTIVE-TASK-ONLY-IN-SOURCE"));
+				seed = false;
+				return streamResponse([{ type: "compaction", encrypted_content: "opaque-excluded-notes" }], "excluded-notes-compact");
+			}
 			const tools = JSON.stringify(body.tools);
 			assert(tools.includes("new_context") && tools.includes("notes") && tools.includes("history"), tools);
 			if (seed) { seed = false; return text("Ready for manual compact", "seed"); }
@@ -190,17 +197,18 @@ try {
 		await session.bindExtensions({ mode: "print", onError: (error) => { errors.push(error.error); } });
 		if (scenario !== "excluded-notes") await session.prompt("ACTIVE-TASK-ONLY-IN-SOURCE: preserve this work and its next steps.");
 		if (scenario === "approval-refused") await session.prompt("/auto on");
-		await assert.rejects(session.compact("Preserve the exact acceptance criteria"), /cancelled/);
+		if (excludedNotes) await session.compact("Preserve the exact acceptance criteria");
+		else await assert.rejects(session.compact("Preserve the exact acceptance criteria"), /cancelled/);
 		const start = Date.now();
-		while (!refused && Date.now() - start < 9000 && (settled < (noContinuation ? 2 : 3) || !session.isIdle)) await new Promise((done) => setTimeout(done, 10));
+		while (!refused && !excludedNotes && Date.now() - start < 9000 && (settled < (noContinuation ? 2 : 3) || !session.isIdle)) await new Promise((done) => setTimeout(done, 10));
 		if (failure) throw failure;
 		assert.deepEqual(errors, []);
 		assert(session.isIdle, `did not settle: ${JSON.stringify({ requests, settled })}`);
 		assert.equal(session.model?.id, "original");
 		assert.equal(session.thinkingLevel, userSelection ? "medium" : "high");
 		assert.equal(probeExecutions, 0);
-		if (!refused) assert(actionableTurns >= 2);
-		assert.equal(noteWrites, refused ? 0 : 1);
+		if (!refused && !excludedNotes) assert(actionableTurns >= 2);
+		assert.equal(noteWrites, refused || excludedNotes ? 0 : 1);
 		assert.equal(noteReads, noContinuation || refused ? 0 : 1);
 		assert.equal(markers().length, scenario === "excluded-notes" ? 0 : incomplete || userSelection || refused ? 1 : 2);
 		assert.equal(resumedCalls, noContinuation || refused ? 0 : scenario === "queues" ? 3 : 2);
@@ -209,8 +217,13 @@ try {
 		}
 		const branch = sm.getBranch();
 		const records = branch.filter((entry) => entry.type === "custom" && entry.customType === MANUAL_COMPACT_ENTRY_TYPE);
-		if (scenario === "excluded-notes") {
-			assert.equal(records.length, 0); assert.equal(requests.length, 0);
+		if (excludedNotes) {
+			assert.equal(records.length, 0);
+			assert.equal(requests.length, 1);
+			assert.equal(requests[0]?.model, "checkpoint");
+			const compactions = branch.filter((entry) => entry.type === "compaction");
+			assert.equal(compactions.length, 1);
+			assert(JSON.stringify(compactions[0]).includes("opaque-excluded-notes"));
 		} else {
 		assert(records.length > 0, "no durable handoff record");
 		assert.equal((records.at(-1) as { data: { phase: string } }).data.phase, userSelection ? "superseded" : incomplete || refused ? "failed" : "completed");
@@ -232,7 +245,7 @@ try {
 			assert(requests.at(-1)!.input.includes("QUEUED-USER-REQUEST-3"));
 		}
 		const disk = await readFile(sm.getSessionFile()!, "utf8");
-		if (scenario !== "excluded-notes") assert(disk.includes(MANUAL_COMPACT_ENTRY_TYPE));
+		if (!excludedNotes) assert(disk.includes(MANUAL_COMPACT_ENTRY_TYPE));
 		assert(!disk.includes("synthetic-managed-key"));
 		env.assertNoNetwork();
 		process.stdout.write("OK\n");

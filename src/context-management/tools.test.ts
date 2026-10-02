@@ -262,12 +262,26 @@ test("another definition under a context tool name stays a permanent conflict", 
 	expect(harness.active()).toEqual(["read"]);
 });
 
-test("tools the runtime has not published yet remain pending", () => {
+test("a readable empty registry is an intentional host exclusion", () => {
 	const harness = controllerHarness(() => []);
+
+	expect(harness.controller.sync(true)).toEqual({ synced: false, registrationState: "excluded" });
+	expect(harness.controller.registrationState).toBe("excluded");
+	expect(harness.active()).toEqual(["read"]);
+});
+
+test("a partial published registry remains unverified until all tools appear", () => {
+	let published = false;
+	const harness = controllerHarness((tools) => published ? tools : tools.slice(0, 2));
 
 	expect(harness.controller.sync(true)).toEqual({ synced: false, registrationState: "unverified" });
 	expect(harness.controller.registrationState).toBe("unverified");
 	expect(harness.active()).toEqual(["read"]);
+
+	published = true;
+	expect(harness.controller.sync(true)).toEqual({ synced: true, registrationState: "verified" });
+	expect(harness.controller.registrationState).toBe("verified");
+	expect(harness.active()).toEqual(["read", "new_context", "get_context_remaining", "history", "notes"]);
 });
 
 test("a same-name definition with extra prompt guidance stays a conflict", () => {

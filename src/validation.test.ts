@@ -74,6 +74,7 @@ type HookHarnessOptions = {
 	config?: Partial<CompactionConfig>;
 	nativeFallbackResult?: Record<string, unknown>;
 	disableCompactionProjection?: boolean;
+	contextToolsPublished?: boolean;
 };
 
 const defaultModel: TestModel = {
@@ -374,7 +375,7 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 		registerTool: (tool: Record<string, unknown>) => {
 			registeredTools.push(tool);
 		},
-		getAllTools: () => registeredTools,
+		getAllTools: () => options.contextToolsPublished === false ? [] : registeredTools,
 		getActiveTools: () => [...activeTools],
 		setActiveTools: (names: string[]) => {
 			activeTools = [...names];
@@ -532,6 +533,145 @@ test("remote compaction serializes the ordered projection instead of raw prepara
 	expect(JSON.stringify(request.input)).not.toContain("FILTER-ME-STATE");
 	expect(JSON.stringify(request.input)).not.toContain("FILTER-ME-EXIT");
 	expect(JSON.stringify(request.input)).toContain("KEEP-ME-WAKE");
+});
+
+test("unavailable Context Management uses the configured remote compactor", async () => {
+	const consumer = {
+		...defaultModel,
+		provider: "gateway",
+		id: "gpt-5.6-sol",
+		baseUrl: "https://gateway.example/v1",
+	};
+	const compactor = { ...consumer, id: "gpt-5.6-luna" };
+	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
+		contextToolsPublished: false,
+		config: {
+			contextManagement: "remote",
+			gatewayContextModels: ["gateway/gpt-5.6-sol"],
+			remoteCompactModel: "gateway/gpt-5.6-luna",
+			nativeFallback: { enabled: true, model: "google/gemini-2.5-flash", thinkingLevel: "off" },
+		},
+	});
+	const user = createUserEntry("context-fallback-user", "Use the configured remote compactor.");
+	const result = (await sessionBeforeCompact({
+		reason: "threshold",
+		signal: new AbortController().signal,
+		customInstructions: undefined,
+		preparation: {
+			firstKeptEntryId: user.id,
+			tokensBefore: 512,
+			previousSummary: undefined,
+			messagesToSummarize: [toReplayMessage(user)],
+			turnPrefixMessages: [],
+		},
+	} as never, createContext({
+		model: consumer,
+		registryModels: [compactor],
+		sessionContextMessages: [toReplayMessage(user)],
+	}))) as { compaction: { details: Record<string, unknown> } };
+
+	expect(compactCalls).toHaveLength(1);
+	expect(fallbackCalls).toHaveLength(0);
+	expect((compactCalls[0]?.runtime as { model: string; currentModel: TestModel }).model).toBe(compactor.id);
+	expect((compactCalls[0]?.runtime as { currentModel: TestModel }).currentModel).toBe(compactor);
+	expect(result.compaction.details).toEqual(expect.objectContaining({
+		provider: consumer.provider,
+		model: consumer.id,
+		compactionModel: expect.objectContaining({ provider: compactor.provider, model: compactor.id }),
+	}));
+});
+
+test("unavailable Context Management uses only the explicit native fallback after Remote V2 fails", async () => {
+	const consumer = {
+		...defaultModel,
+		provider: "gateway",
+		id: "gpt-5.6-sol",
+		baseUrl: "https://gateway.example/v1",
+	};
+	const compactor = { ...consumer, id: "gpt-5.6-luna" };
+	const fallbackResult = {
+		summary: "## Goal\nFinish without the context tools.",
+		firstKeptEntryId: "context-fallback-native",
+		tokensBefore: 512,
+		details: { readFiles: [], modifiedFiles: [] },
+	};
+	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
+		contextToolsPublished: false,
+		config: {
+			contextManagement: "remote",
+			gatewayContextModels: ["gateway/gpt-5.6-sol"],
+			remoteCompactModel: "gateway/gpt-5.6-luna",
+			nativeFallback: { enabled: true, model: "google/gemini-2.5-flash", thinkingLevel: "off" },
+		},
+		compactResult: { ok: false, reason: "non-2xx", status: 502 },
+		nativeFallbackResult: {
+			ok: true,
+			result: fallbackResult,
+			model: { provider: "google", id: "gemini-2.5-flash" },
+		},
+	});
+	const user = createUserEntry("context-fallback-native", "Use only the explicit native fallback.");
+	const result = (await sessionBeforeCompact({
+		reason: "threshold",
+		signal: new AbortController().signal,
+		customInstructions: undefined,
+		preparation: {
+			firstKeptEntryId: user.id,
+			tokensBefore: 512,
+			previousSummary: undefined,
+			messagesToSummarize: [toReplayMessage(user)],
+			turnPrefixMessages: [],
+		},
+	} as never, createContext({
+		model: consumer,
+		registryModels: [compactor],
+		sessionContextMessages: [toReplayMessage(user)],
+	}))) as { compaction: Record<string, unknown> };
+
+	expect(compactCalls).toHaveLength(1);
+	expect(fallbackCalls).toHaveLength(1);
+	expect(fallbackCalls[0]).toMatchObject({ modelSpec: "google/gemini-2.5-flash" });
+	expect(result.compaction).toEqual(fallbackResult);
+});
+
+test("unavailable Context Management never falls through to the active-model compaction path", async () => {
+	const consumer = {
+		...defaultModel,
+		provider: "gateway",
+		id: "gpt-5.6-sol",
+		baseUrl: "https://gateway.example/v1",
+	};
+	const user = createUserEntry("context-fallback-cancel", "Do not use the active model implicitly.");
+	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
+		contextToolsPublished: false,
+		config: {
+			contextManagement: "remote",
+			gatewayContextModels: ["gateway/gpt-5.6-sol"],
+			nativeFallback: { enabled: true, model: "google/gemini-2.5-flash", thinkingLevel: "off" },
+		},
+		nativeFallbackResult: { ok: false, reason: "model-not-found", modelSpec: "google/gemini-2.5-flash" },
+	});
+
+	const result = await sessionBeforeCompact({
+		reason: "threshold",
+		signal: new AbortController().signal,
+		customInstructions: undefined,
+		preparation: {
+			firstKeptEntryId: user.id,
+			tokensBefore: 512,
+			previousSummary: undefined,
+			messagesToSummarize: [toReplayMessage(user)],
+			turnPrefixMessages: [],
+		},
+	} as never, createContext({
+		model: consumer,
+		sessionContextMessages: [toReplayMessage(user)],
+	}));
+
+	expect(result).toEqual({ cancel: true });
+	expect(compactCalls).toHaveLength(0);
+	expect(fallbackCalls).toHaveLength(1);
+	expect(fallbackCalls[0]).toMatchObject({ modelSpec: "google/gemini-2.5-flash" });
 });
 
 test("remote compaction cancels instead of using incomplete preparation when session context is unavailable", async () => {
