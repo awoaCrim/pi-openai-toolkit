@@ -1,6 +1,6 @@
-import { convertToLlm, type AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, Message, Model, ModelThinkingLevel, ProviderHeaders } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { convertToLlm, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isExactModelAllowed } from "./model-scope";
 import {
 	CODEX_AFFINITY_SCOPE,

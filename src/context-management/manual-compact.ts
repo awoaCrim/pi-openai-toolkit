@@ -5,6 +5,7 @@ import { resolveToolkitConfig, type ResolvedToolkitConfig } from "../config";
 import { isAutoModeEligible } from "../auto-mode/policy";
 import { protectAutoModeSelection } from "../auto-mode/model-selection-guard";
 import { parseModelSpec } from "../runtime";
+import { THINKING_LEVELS } from "../types";
 import { resolveCodexContextProvider } from "./codex-provider";
 import { findLatestNotesCheckpointSinceBoundary, findLatestWindowBoundaryEntry, type CodexContextWindowManager } from "./window-manager";
 import { isNonEmptyString, isRecord, type CodexContextProvider, type ContextWindowIdentity } from "./types";
@@ -14,7 +15,6 @@ export const MANUAL_COMPACT_ENTRY_TYPE = "pi-openai-toolkit:manual-compact";
 const PHASES = ["requested", "switching", "checkpointing", "rollover-scheduled", "restoring", "restore-needed", "completed", "failed", "cancelled", "superseded"] as const;
 type Phase = typeof PHASES[number];
 const TERMINAL = new Set<Phase>(["completed", "failed", "cancelled", "superseded"]);
-const THINKING = new Set<string>(["off", "minimal", "low", "medium", "high", "xhigh"]);
 const REQUIRED_TOOLS = ["notes", "history", "new_context", "get_context_remaining"];
 
 /** Non-LLM recovery state. No auth, model object, transcript or note text belongs here. */
@@ -36,7 +36,7 @@ export function decodeManualCompactRecord(value: unknown): ManualCompactRecord |
 		|| ![value.operationId, value.sessionId, value.sourceWindowId, value.anchorId].every(isNonEmptyString)
 		|| typeof value.originalModel !== "string" || !parseModelSpec(value.originalModel)
 		|| typeof value.targetModel !== "string" || !parseModelSpec(value.targetModel)
-		|| typeof value.originalThinking !== "string" || !THINKING.has(value.originalThinking)
+		|| typeof value.originalThinking !== "string" || !(THINKING_LEVELS as readonly string[]).includes(value.originalThinking)
 		|| !PHASES.includes(value.phase as Phase)
 		|| (value.targetWindowId !== undefined && !isNonEmptyString(value.targetWindowId))) return undefined;
 	return value as ManualCompactRecord;
