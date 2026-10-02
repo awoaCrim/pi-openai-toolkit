@@ -1,4 +1,7 @@
 import { v2Fixture } from "../config/test-helpers";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import { join } from "node:path";
 import { expect, test } from "bun:test";
 import type { CompactionResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
@@ -475,10 +478,11 @@ test("a non-covered gateway model never writes a window boundary or warns on ses
 test("covered gateway traffic aborts when its session transport is unavailable", async () => {
 	const handlers = new Map<string, (event: never, ctx: never) => unknown>();
 	let aborted = false;
+	const registeredTools: Array<{ name: string; description: string; parameters: unknown; promptGuidelines?: string[] }> = [];
 	const pi = {
 		on: (name: string, handler: (event: never, ctx: never) => unknown) => handlers.set(name, handler),
-		registerTool: () => undefined,
-		getAllTools: () => [],
+		registerTool: (tool: { name: string; description: string; parameters: unknown; promptGuidelines?: string[] }) => registeredTools.push(tool),
+		getAllTools: () => registeredTools,
 		getActiveTools: () => [],
 		setActiveTools: () => undefined,
 	} as unknown as ExtensionAPI;
@@ -515,6 +519,89 @@ test("covered gateway traffic aborts when its session transport is unavailable",
 	await handlers.get("before_provider_request")?.({ payload: { model: gatewayModel.id, input: [] } } as never, ctx);
 	await handlers.get("before_provider_headers")?.({ headers: {} } as never, ctx);
 	expect(aborted).toBe(true);
+});
+
+test("host-excluded gateway context continues ordinary provider hooks and records a downgrade", async () => {
+	const handlers = new Map<string, (event: never, ctx: never) => unknown>();
+	let aborted = false;
+	const artifactRoot = fs.mkdtempSync(join(os.tmpdir(), "pi-context-excluded-"));
+	const registeredTools: Array<{ name: string; description: string; parameters: unknown; promptGuidelines?: string[] }> = [];
+	const pi = {
+		on: (name: string, handler: (event: never, ctx: never) => unknown) => handlers.set(name, handler),
+		registerTool: (tool: { name: string; description: string; parameters: unknown; promptGuidelines?: string[] }) => registeredTools.push(tool),
+		// A readable empty registry is the Pi host-filtering signal.
+		getAllTools: () => [],
+		getActiveTools: () => ["read"],
+		setActiveTools: () => undefined,
+		sendMessage: () => true,
+	} as unknown as ExtensionAPI;
+	const gatewayModel = {
+		provider: "my-gateway",
+		api: "openai-responses",
+		id: "gpt-5.6-luna",
+		baseUrl: "https://newapi.example/v1",
+		contextWindow: 272_000,
+	};
+	const ctx = makeContext([], gatewayModel) as never as {
+		cwd: string;
+		hasUI: boolean;
+		model: typeof gatewayModel;
+		abort: () => void;
+		sessionManager: {
+			getBranch: () => never[];
+			getSessionId: () => string;
+			getSessionFile: () => string;
+			getSessionDir: () => string;
+		};
+	};
+	ctx.cwd = "/tmp/pi-openai-toolkit-context-excluded";
+	ctx.hasUI = false;
+	ctx.abort = () => { aborted = true; };
+	ctx.sessionManager = {
+		getBranch: () => [],
+		getSessionId: () => "session-excluded",
+		getSessionFile: () => "/tmp/pi-openai-toolkit-context-excluded/session.json",
+		getSessionDir: () => "/tmp/pi-openai-toolkit-context-excluded",
+	};
+
+	try {
+		extension(pi, {
+			loadConfig: () => ({
+				config: {
+					...DEFAULT_TOOLKIT_CONFIG,
+					compaction: {
+						...DEFAULT_COMPACTION_CONFIG,
+						contextManagement: "remote",
+						gatewayContextModels: ["my-gateway/gpt-5.6-luna"],
+						debug: true,
+						artifactRoot,
+					},
+				},
+				warnings: [],
+			}),
+		} as never);
+
+		await handlers.get("session_start")?.({} as never, ctx as never);
+		const lifecycleDir = join(artifactRoot, "sessions", "session-excluded", "lifecycle");
+		const lifecycleFiles = fs.readdirSync(lifecycleDir).filter((file) => file.endsWith(".json"));
+		expect(lifecycleFiles).toHaveLength(1);
+		const lifecycle = JSON.parse(fs.readFileSync(join(lifecycleDir, lifecycleFiles[0]!), "utf8")) as {
+			data: { activation?: { reason?: string } };
+		};
+		expect(lifecycle.data.activation?.reason).toBe("context-tools-excluded");
+
+		const contextResult = await handlers.get("context_with_system")?.({ messages: [] } as never, ctx as never);
+		expect(contextResult).toBeUndefined();
+
+		const payload = { model: gatewayModel.id, input: [] };
+		expect(await handlers.get("before_provider_request")?.({ payload } as never, ctx as never)).toBeUndefined();
+		const headers = { authorization: "caller-token", "x-keep": "yes" };
+		await handlers.get("before_provider_headers")?.({ headers } as never, ctx as never);
+		expect(headers).toEqual({ authorization: "caller-token", "x-keep": "yes" });
+		expect(aborted).toBe(false);
+	} finally {
+		fs.rmSync(artifactRoot, { recursive: true, force: true });
+	}
 });
 
 test("switching into a covered model mid-session initializes the window lifecycle", async () => {

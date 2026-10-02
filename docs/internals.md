@@ -45,6 +45,16 @@ Coverage is never inferred from model names. A native session uses provider `ope
 
 ---
 
+### Tool-selection boundary and unavailable Context Management
+
+The four Toolkit context tools are `new_context`, `get_context_remaining`, `history`, and `notes`. The canonical names live in [src/context-management/tool-contract.ts](../src/context-management/tool-contract.ts). A launcher that creates a Pi session for an exact `compaction.gatewayContextModels` model should union those names into an explicit `tools` allowlist before `createAgentSession`, unless the caller selected `noTools`/`--no-tools`; an explicit `excludeTools` entry remains authoritative and is never re-added. This package does not contain the `pi-subagent` or child-session launcher source, so the helper and contract here do not claim to modify that external layer.
+
+After registration, Pi's published registry is authoritative. Toolkit distinguishes `verified` (all four owned definitions), `excluded` (a readable registry contains none of them), `unverified` (a transient read or partial publication), and `conflict` (registration/API/ownership failure). Only `excluded` is a live-turn downgrade: `context_with_system` strips internal window markers, provider payload/header hooks return no-op results, and the lifecycle artifact records `context-tools-excluded`. Conflicts, unreadable/partial registries, malformed window state and missing gateway identity remain fail-closed for live provider requests.
+
+If a covered Remote Context session reaches `session_before_compact` without an active context runtime, the first compaction path is the configured `compaction.remoteCompactModel` through Remote V2. The active session model remains the checkpoint consumer; the configured remote model is only the compactor. If that model is missing/unusable, only an explicitly configured/enabled `nativeFallback.model` may run. Otherwise the hook cancels rather than silently invoking the active model or Pi's default compaction. This compaction fallback does not weaken the live-provider safety rules above.
+
+---
+
 ### Rollover lifecycle
 
 The `new_context` happy path, end to end:

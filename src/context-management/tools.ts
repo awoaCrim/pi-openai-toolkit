@@ -223,7 +223,7 @@ export function createContextManagementTools(
 	return { newContext, getContextRemaining, history, notes };
 }
 
-export type ContextToolRegistrationState = "verified" | "conflict" | "unverified";
+export type ContextToolRegistrationState = "verified" | "excluded" | "conflict" | "unverified";
 
 export type ContextToolSyncResult = {
 	synced: boolean;
@@ -300,6 +300,7 @@ export class ContextManagementToolController {
 		const byName = new Map(available.map((tool) => [tool.name, tool]));
 		let missing = false;
 		let conflict = false;
+		let published = 0;
 		for (const name of this.registeredNames) {
 			const actual = byName.get(name);
 			const expected = this.definitions.get(name);
@@ -307,9 +308,13 @@ export class ContextManagementToolController {
 				missing = true;
 				continue;
 			}
+			published += 1;
 			if (!isOurTool(actual, expected)) conflict = true;
 		}
 		if (conflict) return "conflict";
+		// A readable registry with no Toolkit-owned definitions is the positive
+		// host-filtering signal used by --no-tools/restricted child sessions.
+		if (published === 0) return "excluded";
 		if (missing) return "unverified";
 		this.verifiedOnce = true;
 		return "verified";

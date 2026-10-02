@@ -126,6 +126,7 @@ type RemoteContextActive = (
 	config: CompactionConfig,
 	model?: ExtensionContext["model"],
 ) => Promise<boolean>;
+type ContextToolRegistrationStateReader = () => ContextToolRegistrationState;
 
 type ContextToolSyncOutcome = {
 	eligible: boolean;
@@ -209,6 +210,27 @@ function isCodexContextModel(
 ): boolean {
 	return config.contextManagement === "remote"
 		&& (isNativeCodexModel(model) || isCodexGatewayModel(model, config.gatewayContextModels));
+}
+
+function isExcludedGatewayContext(
+	model: ExtensionContext["model"] | undefined,
+	config: CompactionConfig,
+	registrationState: ContextToolRegistrationState,
+): boolean {
+	return registrationState === "excluded" && isCodexGatewayModel(model, config.gatewayContextModels);
+}
+
+function contextManagementFailureReason(registrationState: ContextToolRegistrationState): string {
+	switch (registrationState) {
+		case "excluded":
+			return "context-tools-excluded";
+		case "conflict":
+			return "tool-name-conflict";
+		case "unverified":
+			return "tool-registration-pending";
+		case "verified":
+			return "context-management-unavailable";
+	}
 }
 
 function notifyRemoteContextFailure(ctx: ExtensionContext, reason: string): void {
@@ -567,11 +589,140 @@ async function runResponsesNativeCompact(
 	return { outcome: "success", compaction };
 }
 
+type ContextUnavailableCompactionResult =
+	| { compaction: CompactionResult<unknown> }
+	| { cancel: true };
+
+async function runUnavailableContextCompaction(
+	event: SessionBeforeCompactEvent,
+	ctx: ExtensionContext,
+	dependencies: CompactionDependencies,
+	resolved: ResolvedToolkitConfig,
+	config: CompactionConfig,
+	registrationState: ContextToolRegistrationState,
+): Promise<ContextUnavailableCompactionResult> {
+	const contextReason = contextManagementFailureReason(registrationState);
+	const remoteModelSpec = config.remoteCompactModel?.trim();
+	let remoteFailure: string | undefined;
+
+	if (remoteModelSpec) {
+		const resolution = await resolveRemoteCompactionExecution(
+			ctx,
+			{
+				enabled: config.enabled,
+				responsesApis: config.responsesApis,
+				codexGatewayModels: compactGatewayModels(resolved),
+			},
+			remoteModelSpec,
+		);
+		if (resolution.ok) {
+			const outcome = await runResponsesNativeCompact(
+				event,
+				ctx,
+				config,
+				resolution.execution,
+				dependencies.remoteCompact,
+				dependencies.projectCompactionContext,
+			);
+			if (outcome.outcome === "success") {
+				writeDebugArtifact(
+					"compaction-event",
+					{
+						event: "session_before_compact.context-fallback-success",
+						contextReason,
+						registrationState,
+						compactor: remoteModelSpec,
+					},
+					config,
+					ctx,
+				);
+				return { compaction: outcome.compaction };
+			}
+			if (outcome.outcome === "aborted" || outcome.outcome === "unprojected-input") {
+				return { cancel: true };
+			}
+			remoteFailure = "remote-v2-failed";
+		} else {
+			remoteFailure = resolution.reason;
+			writeDebugArtifact(
+				"compaction-event",
+				{
+					event: "session_before_compact.context-fallback-unavailable",
+					contextReason,
+					registrationState,
+					reason: resolution.reason,
+					modelSpec: remoteModelSpec,
+					errorMessage: resolution.errorMessage,
+				},
+				config,
+				ctx,
+			);
+		}
+	} else {
+		remoteFailure = "missing-remote-compaction-model";
+	}
+
+	const nativeModelSpec = config.nativeFallback.model?.trim();
+	if (config.nativeFallback.enabled && nativeModelSpec) {
+		const fallback = await dependencies.nativeFallback({
+			ctx,
+			event,
+			config,
+			modelSpec: nativeModelSpec,
+		});
+		if (fallback.ok) {
+			writeDebugArtifact(
+				"compaction-event",
+				{
+					event: "session_before_compact.context-fallback-native-success",
+					contextReason,
+					registrationState,
+					remoteFailure,
+					fallbackModel: nativeModelSpec,
+				},
+				config,
+				ctx,
+			);
+			return { compaction: fallback.result };
+		}
+		writeDebugArtifact(
+			"compaction-event",
+			{
+				event: "session_before_compact.context-fallback-native-failure",
+				contextReason,
+				registrationState,
+				remoteFailure,
+				fallbackReason: fallback.reason,
+				fallbackModel: nativeModelSpec,
+				errorMessage: fallback.errorMessage,
+			},
+			config,
+			ctx,
+		);
+	} else {
+		writeDebugArtifact(
+			"compaction-event",
+			{
+				event: "session_before_compact.context-fallback-cancelled",
+				contextReason,
+				registrationState,
+				remoteFailure,
+				reason: config.nativeFallback.enabled ? "missing-native-fallback-model" : "native-fallback-disabled",
+			},
+			config,
+			ctx,
+		);
+	}
+
+	return { cancel: true };
+}
+
 async function handleSessionBeforeCompact(
 	event: SessionBeforeCompactEvent,
 	ctx: ExtensionContext,
 	dependencies: CompactionDependencies,
 	remoteContextActive: RemoteContextActive,
+	getContextToolRegistrationState: ContextToolRegistrationStateReader,
 ) {
 	const resolved = contextOperation(dependencies.loadConfig, ctx);
 	if (resolved.invalidFeatures.some((feature) => ["context", "compatibility", "diagnostics"].includes(feature))) return { cancel: true };
@@ -602,7 +753,8 @@ async function handleSessionBeforeCompact(
 	}
 
 	// Remote Context management owns this eligible Codex session. It persists a
-	// no-summary boundary and deliberately never calls remote_compaction_v2.
+	// no-summary boundary while active; an unavailable runtime uses the configured
+	// Remote V2 compactor instead of silently returning to Pi's active-model path.
 	const contextModel = await resolveContextCapabilityModel(ctx);
 	if (isCodexContextModel(contextModel, config)) {
 		if (await remoteContextActive(ctx, config, contextModel)) {
@@ -618,14 +770,20 @@ async function handleSessionBeforeCompact(
 				return { cancel: true };
 			}
 		}
-		// A configured native Codex Remote session must never re-enter this
-		// extension's Remote V2 compaction chain, and Pi's native compaction is
-		// deliberately disabled for Remote-managed models: cancelling here keeps
-		// the boundary the only rollover mechanism. The inactive reason is
-		// surfaced so the user can fix activation instead of losing context to a
-		// silent native summary.
-		notifyRemoteContextFailure(ctx, "native-codex-context-unavailable");
-		return { cancel: true };
+
+		const registrationState = getContextToolRegistrationState();
+		const failureReason = contextManagementFailureReason(registrationState);
+		if (failureReason !== "context-tools-excluded") {
+			notifyRemoteContextFailure(ctx, failureReason);
+		}
+		return runUnavailableContextCompaction(
+			event,
+			ctx,
+			dependencies,
+			resolved,
+			config,
+			registrationState,
+		);
 	}
 
 	// Resolve producer protocol policy from this operation's document, not a later disk read.
@@ -865,6 +1023,7 @@ async function handleContextInternal(
 	loadConfig: typeof loadToolkitConfig,
 	contextWindows: CodexContextWindowManager,
 	remoteContextActive: RemoteContextActive,
+	getContextToolRegistrationState: ContextToolRegistrationStateReader,
 ) {
 	const resolved = contextOperation(loadConfig, ctx);
 	requireContextPolicy(resolved, ctx);
@@ -913,13 +1072,21 @@ async function handleContextInternal(
 		}
 
 		// An eligible Codex Remote session is never allowed to fall through to the
-		// older compaction-replay path. Gateway traffic must also fail closed when
-		// its transport capability is unavailable; otherwise Pi could send an
-		// ordinary unscoped request and lose CPA OAuth/session affinity.
+		// older compaction-replay path. An explicit host exclusion is the one
+		// intentional downgrade: strip internal markers and let the ordinary request
+		// proceed without Remote Context affinity.
 		if (isCodexContextModel(contextModel, config)) {
+			const registrationState = getContextToolRegistrationState();
+			if (isExcludedGatewayContext(contextModel, config, registrationState)) {
+				const visibleMessages = contextWindows.project(event.messages, "off");
+				return visibleMessages.length === event.messages.length && visibleMessages.every((message, index) => message === event.messages[index])
+					? undefined
+					: { messages: visibleMessages };
+			}
 			if (isCodexGatewayModel(contextModel, config.gatewayContextModels)) {
-				notifyRemoteContextFailure(ctx, "codex-context-unavailable");
-				reportPiContextHookFailure(ctx, "codex-context-unavailable");
+				const reason = contextManagementFailureReason(registrationState);
+				notifyRemoteContextFailure(ctx, reason);
+				reportPiContextHookFailure(ctx, reason);
 				ctx.abort();
 				return undefined;
 			}
@@ -972,9 +1139,10 @@ async function handleContext(
 	loadConfig: typeof loadToolkitConfig,
 	contextWindows: CodexContextWindowManager,
 	remoteContextActive: RemoteContextActive,
+	getContextToolRegistrationState: ContextToolRegistrationStateReader,
 ) {
 	try {
-		return await handleContextInternal(event, ctx, pi, loadConfig, contextWindows, remoteContextActive);
+		return await handleContextInternal(event, ctx, pi, loadConfig, contextWindows, remoteContextActive, getContextToolRegistrationState);
 	} catch (error) {
 		reportPiContextHookFailure(ctx, error instanceof Error ? error.message : String(error));
 		throw error;
@@ -987,6 +1155,7 @@ async function handleBeforeProviderRequest(
 	loadConfig: typeof loadToolkitConfig,
 	contextWindows: CodexContextWindowManager,
 	remoteContextActive: RemoteContextActive,
+	getContextToolRegistrationState: ContextToolRegistrationStateReader,
 ) {
 	const resolved = contextOperation(loadConfig, ctx);
 	requireContextPolicy(resolved, ctx);
@@ -1018,12 +1187,17 @@ async function handleBeforeProviderRequest(
 		}
 	}
 	if (isCodexContextModel(contextModel, config)) {
+		const registrationState = getContextToolRegistrationState();
+		// A readable empty registry is an intentional host exclusion. Do not
+		// rewrite gateway identity or abort an ordinary child-session request.
+		if (isExcludedGatewayContext(contextModel, config, registrationState)) return undefined;
 		// Keep Codex Remote mutually exclusive with the legacy replay pipeline
 		// when authentication or tool ownership is unavailable. Gateway traffic
 		// cannot continue as an ordinary Responses request because that would
 		// silently lose the required CPA session/account selection.
 		if (isCodexGatewayModel(contextModel, config.gatewayContextModels)) {
-			notifyRemoteContextFailure(ctx, "codex-context-unavailable");
+			const reason = contextManagementFailureReason(registrationState);
+			notifyRemoteContextFailure(ctx, reason);
 			ctx.abort();
 		}
 		return undefined;
@@ -1278,7 +1452,9 @@ export default function registerCompactionExtension(
 		// Only models the built-in Remote Context coverage targets may activate or
 		// warn; everything else silently runs Pi's normal compaction path.
 		if (config.contextManagement === "remote" && isCodexContextModel(contextModel, config) && !active) {
-			if (syncOutcome.registrationState === "conflict") {
+			if (syncOutcome.registrationState === "excluded") {
+				activationReason = "context-tools-excluded";
+			} else if (syncOutcome.registrationState === "conflict") {
 				activationReason = "tool-name-conflict";
 				notifyRemoteContextFailure(ctx, activationReason);
 			} else if (syncOutcome.registrationState === "unverified" || !syncOutcome.toolsSynced) {
@@ -1325,11 +1501,12 @@ export default function registerCompactionExtension(
 		}
 	});
 
+	const getContextToolRegistrationState: ContextToolRegistrationStateReader = () => tools.registrationState;
 	pi.on("context_with_system", (event, ctx) => {
 		manualCompact.guardRequest(ctx);
-		return handleContext(event, ctx, pi, dependencies.loadConfig, contextWindows, remoteContextActive);
+		return handleContext(event, ctx, pi, dependencies.loadConfig, contextWindows, remoteContextActive, getContextToolRegistrationState);
 	});
-	pi.on("session_before_compact", (event, ctx) => handleSessionBeforeCompact(event, ctx, dependencies, remoteContextActive));
+	pi.on("session_before_compact", (event, ctx) => handleSessionBeforeCompact(event, ctx, dependencies, remoteContextActive, getContextToolRegistrationState));
 	pi.on("session_compact", (event, _ctx) => contextWindows.recordCompaction(event.compactionEntry.details));
 	pi.on("session_compact_failed", async (event, ctx) => {
 		if (event.reason === "manual" && !manualCompact.isMaintenance) await manualCompact.compactFailed(ctx);
@@ -1373,7 +1550,7 @@ export default function registerCompactionExtension(
 	});
 	pi.on("before_provider_request", (event, ctx) => {
 		manualCompact.guardRequest(ctx);
-		return handleBeforeProviderRequest(event, ctx, dependencies.loadConfig, contextWindows, remoteContextActive);
+		return handleBeforeProviderRequest(event, ctx, dependencies.loadConfig, contextWindows, remoteContextActive, getContextToolRegistrationState);
 	});
 	pi.on("before_provider_headers", async (event, ctx) => {
 		const resolved = contextOperation(dependencies.loadConfig, ctx);
@@ -1383,8 +1560,11 @@ export default function registerCompactionExtension(
 		if (!isCodexContextModel(contextModel, config)) return;
 		const active = await remoteContextActive(ctx, config, contextModel);
 		if (!active) {
+			const registrationState = getContextToolRegistrationState();
+			if (isExcludedGatewayContext(contextModel, config, registrationState)) return;
 			if (isCodexGatewayModel(contextModel, config.gatewayContextModels)) {
-				notifyRemoteContextFailure(ctx, "codex-context-unavailable");
+				const reason = contextManagementFailureReason(registrationState);
+				notifyRemoteContextFailure(ctx, reason);
 				ctx.abort();
 			}
 			return;
