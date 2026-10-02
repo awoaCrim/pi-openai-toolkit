@@ -9,7 +9,7 @@ Remote context windows, Responses compaction, web search, image generation, and 
 
 ## Install and start
 
-Requires Node.js **22.19.0+** and Pi **0.87.0+**. Current development dependencies pin Pi **0.99.1**; backend features also depend on the selected model, API, and account access.
+Requires Node.js **22.19.0+** and Pi **0.87.0+**. Current development dependencies pin Pi **1.0.0**; backend features also depend on the selected model, API, and account access.
 
 ```bash
 pi install npm:pi-openai-toolkit

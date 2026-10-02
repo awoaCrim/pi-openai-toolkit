@@ -5,6 +5,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { resolveToolkitConfig } from "../config";
 import { v2Fixture } from "../config/test-helpers";
+import { THINKING_LEVELS } from "../types";
 import { listenForProtectedSelection } from "../auto-mode/model-selection-guard";
 import { ManagedManualCompact, MANUAL_COMPACT_ENTRY_TYPE, decodeManualCompactRecord, sameContextScope } from "./manual-compact";
 import { CodexContextWindowManager } from "./window-manager";
@@ -218,6 +219,12 @@ test("reload of checkpoint duty does not retry notes or inference", async () => 
 	expect(h.records().at(-1)?.phase).toBe("failed");
 });
 
+test("reload restores a persisted max thinking level", async () => {
+	const h = harness(); h.pi.setThinkingLevel("max"); await h.begin(); await h.reload();
+	expect(h.records()[0]?.originalThinking).toBe("max");
+	expect(h.thinking).toBe("max");
+});
+
 test("a failed fire-and-forget kickoff is not delivery evidence", async () => {
 	const h = harness({ deliveryTimeout: 5 }); h.setDelivery(false); await h.begin();
 	await new Promise((resolve) => setTimeout(resolve, 20));
@@ -229,10 +236,14 @@ test("maintenance ownership is explicit and its cleanup is idempotent", () => {
 	done(); done(); expect(h.manual.isMaintenance).toBe(false);
 });
 
-test("durable decoder validates identities and backend/account comparison fails closed", async () => {
+test("durable decoder validates identities and canonical thinking levels", async () => {
 	const h = harness(); await h.request(); const record = h.records()[0];
 	expect(decodeManualCompactRecord(record)).toEqual(record);
-	for (const change of [{ version: 2 }, { phase: "unknown" }, { targetModel: "bad" }, { originalThinking: "maximum" }, { anchorId: "" }]) {
+	for (const thinking of THINKING_LEVELS) {
+		expect(decodeManualCompactRecord({ ...record, originalThinking: thinking })?.originalThinking).toBe(thinking);
+	}
+	expect(decodeManualCompactRecord({ ...record, originalThinking: "maximum" })).toBeUndefined();
+	for (const change of [{ version: 2 }, { phase: "unknown" }, { targetModel: "bad" }, { anchorId: "" }]) {
 		expect(decodeManualCompactRecord({ ...record, ...change })).toBeUndefined();
 	}
 	const native = { kind: "native-codex", provider: "openai-codex", route: "openai-codex", api: "openai-codex-responses", model: "original", baseUrl: "https://codex.invalid", token: "first", accountId: "account", headers: {} } as const;
