@@ -539,6 +539,66 @@ test("remote compaction serializes the ordered projection instead of raw prepara
 	expect(JSON.stringify(request.input)).toContain("KEEP-ME-WAKE");
 });
 
+for (const reason of ["manual", "threshold", "overflow"]) {
+	for (const failure of ["invalid-model-spec", "model-not-found", "auth-failed", "compact-failed", "empty-summary"]) {
+		test(`${reason}: explicit summary ${failure} cancels instead of falling through to the active model`, async () => {
+			const notifications: Array<{ message: string; level: string }> = [];
+			const consumer = { ...defaultModel, api: "openai-completions", id: "deepseek-v4-flash-0731" };
+			const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
+				config: { nativeFallback: { enabled: true, model: "openai/gpt-6-luna", thinkingLevel: "off" } },
+				nativeFallbackResult: { ok: false, reason: failure, modelSpec: "openai/gpt-6-luna", errorMessage: "original failure detail" },
+			});
+			const user = createUserEntry("keep", "Preserve my task context.");
+			const branchEntries = [user];
+			const before = structuredClone(branchEntries);
+			const ctx = createContext({ model: consumer, branchEntries, notifications });
+			const event = { reason, signal: new AbortController().signal, branchEntries,
+				preparation: { firstKeptEntryId: "keep", tokensBefore: 272907, messagesToSummarize: [], turnPrefixMessages: [] } };
+			expect(await sessionBeforeCompact(event, ctx)).toEqual({ cancel: true });
+			expect(compactCalls).toHaveLength(0);
+			expect(fallbackCalls).toHaveLength(1);
+			expect(fallbackCalls[0].modelSpec).toBe("openai/gpt-6-luna");
+			expect(fallbackCalls[0].event).toBe(event);
+			expect(notifications).toHaveLength(1);
+			expect(notifications[0].message).toContain(failure);
+			expect(notifications[0].message).toContain("original failure detail");
+			expect(notifications[0].message).toContain("context preserved");
+			expect(notifications[0].message).not.toContain("using pi's default");
+			expect(branchEntries).toEqual(before);
+			expect(ctx.model).toBe(consumer);
+		});
+	}
+}
+
+for (const failure of ["disabled", "no-model-configured", "same-as-current-model", "aborted"]) {
+	test(`native ${failure} preserves intentional default/abort routing`, async () => {
+		const notifications: Array<{ message: string; level: string }> = [];
+		const { sessionBeforeCompact, compactCalls } = await loadHookHarness({ nativeFallbackResult: { ok: false, reason: failure } });
+		const result = await sessionBeforeCompact({ reason: "threshold", signal: new AbortController().signal,
+			preparation: { firstKeptEntryId: "keep", tokensBefore: 100, messagesToSummarize: [], turnPrefixMessages: [] } },
+			createContext({ model: { ...defaultModel, api: "openai-completions" }, notifications }));
+		if (failure === "aborted") expect(result).toEqual({ cancel: true });
+		else expect(result).toBeUndefined();
+		expect(compactCalls).toHaveLength(0);
+		expect(notifications).toEqual([]);
+	});
+}
+
+test("failed remote producer's native summary cancels rather than changing to the consumer", async () => {
+	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
+		config: { remoteCompactModel: "openai/gpt-6-luna" },
+		compactResult: { ok: false, reason: "non-2xx", status: 502 },
+		nativeFallbackResult: { ok: false, reason: "compact-failed", modelSpec: "openai/gpt-6-luna", errorMessage: "summary rejected" },
+	});
+	const user = createUserEntry("keep", "Keep this context.");
+	expect(await sessionBeforeCompact({ reason: "threshold", signal: new AbortController().signal,
+		preparation: { firstKeptEntryId: "keep", tokensBefore: 100, messagesToSummarize: [], turnPrefixMessages: [] } },
+		createContext({ registryModels: [{ ...defaultModel, id: "gpt-6-luna" }], branchEntries: [user] }))).toEqual({ cancel: true });
+	expect(compactCalls).toHaveLength(1);
+	expect(fallbackCalls).toHaveLength(1);
+	expect(fallbackCalls[0].modelSpec).toBe("openai/gpt-6-luna");
+});
+
 test("suppresses the expected active-consumer unsupported-api warning and keeps native fallback selection", async () => {
 	const notifications: Array<{ message: string; level: string }> = [];
 	const consumer: TestModel = {

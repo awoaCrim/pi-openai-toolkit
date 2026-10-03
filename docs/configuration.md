@@ -63,7 +63,7 @@ Place `context` under `defaults` or an exact `models` entry.
 | `remoteCompaction.allowContinuityBreak` | `false` | Allow restarting from Pi context after a foreign compaction entry. It does not make malformed opaque checkpoints replayable. |
 | `remoteCompaction.apis` | `["openai-responses", "openai-codex-responses", "azure-openai-responses"]` | May narrow this set; `[]` permits no remote-compaction API. Azure uses Pi's resolved `AZURE_OPENAI_*` environment values for the `/openai/v1` Responses path, deployment mapping, and `api-version`; unsupported entries are errors. |
 | `nativeFallback.enabled` | `true` | Enable the existing native-method fallback tier. |
-| `nativeFallback.model` | `null` | Optional summary-model reference on the remote-ineligible path. After a remote attempt fails, the existing producer-first fallback order is retained. |
+| `nativeFallback.model` | `null` | Summary-model reference on the remote-ineligible path. Character-count estimates do not bypass it; resolution, auth or summary failure cancels compaction without retrying the active model. After a remote attempt fails, the existing producer-first selection is retained. Disabled/unset/same-model selections keep Pi's default path. |
 | `nativeFallback.thinkingLevel` | `"off"` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; actual model support still applies. |
 | `remoteWindows.leaveManagedMode` | `"warn"` | Legacy compatibility field. Both values preserve the same behavior: non-window models receive only the current local window, and no bulk close-out compaction is started for retired Remote Context history. |
 | `remoteWindows.reminderThresholdPercent` | `5` | Integer 0-100. `0` disables both the once-per-window reminder and exhausted-window fallback. |

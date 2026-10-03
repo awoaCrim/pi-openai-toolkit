@@ -926,8 +926,6 @@ async function handleSessionBeforeCompact(
 			reason: fallback.reason,
 			modelSpec: fallback.modelSpec,
 			errorMessage: fallback.errorMessage,
-			...(fallback.estimatedTokens === undefined ? {} : { estimatedTokens: fallback.estimatedTokens }),
-			...(fallback.contextWindow === undefined ? {} : { contextWindow: fallback.contextWindow }),
 		},
 		config,
 		ctx,
@@ -938,19 +936,14 @@ async function handleSessionBeforeCompact(
 		fallback.reason === "disabled" ||
 		fallback.reason === "no-model-configured" ||
 		fallback.reason === "same-as-current-model";
-	if (fallback.reason === "model-window-too-small") {
-		// The configured summary model is narrower than the request Pi would send for it.
-		// Skipping is the success path here: pi's current model gets one chance instead of
-		// the provider terminating the oversized summary.
+	if (!intentionalSkip) {
+		// An explicit summary model is authoritative: the active model may be
+		// unable to summarize at all. Preserve context on failure, never reroute.
 		notifyWarning(
 			ctx,
-			`compaction summary model "${fallback.modelSpec}" cannot fit ~${fallback.estimatedTokens} tokens in its ${fallback.contextWindow} window; compacting with the current model instead`,
+			`compaction model "${fallback.modelSpec ?? fallbackModelSpec}" failed (${fallback.reason}${fallback.errorMessage ? `: ${fallback.errorMessage}` : ""}); compaction cancelled, context preserved; not switching to the current model`,
 		);
-	} else if (!intentionalSkip) {
-		notifyWarning(
-			ctx,
-			`compaction model "${fallback.modelSpec}" unusable (${fallback.reason}${fallback.errorMessage ? `: ${fallback.errorMessage}` : ""}); using pi's default compaction`,
-		);
+		return { cancel: true };
 	}
 
 	// Branch 3: pi's default native compaction with the current model.

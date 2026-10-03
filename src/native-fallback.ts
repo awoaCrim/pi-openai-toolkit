@@ -1,8 +1,5 @@
 import {
 	compact,
-	convertToLlm,
-	DEFAULT_COMPACTION_SETTINGS,
-	serializeConversation,
 	type CompactionResult,
 	type ExtensionContext,
 	type SessionBeforeCompactEvent,
@@ -23,9 +20,7 @@ export type NativeFallbackFailureReason =
 	| "auth-failed"
 	| "aborted"
 	| "empty-summary"
-	| "compact-failed"
-	/** The configured summary model cannot fit the request it would have to send. */
-	| "model-window-too-small";
+	| "compact-failed";
 
 export type NativeFallbackResult =
 	| {
@@ -38,8 +33,6 @@ export type NativeFallbackResult =
 			reason: NativeFallbackFailureReason;
 			modelSpec?: string;
 			errorMessage?: string;
-			estimatedTokens?: number;
-			contextWindow?: number;
 	  };
 
 /** pi's exported native compact(); injectable for tests. */
@@ -58,116 +51,6 @@ function isAbortError(error: unknown): boolean {
 
 function toErrorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
-}
-
-/** Summarization instructions plus the framing around the serialized transcript. */
-const SUMMARIZATION_TEMPLATE_TOKENS = 1024;
-const HISTORY_OUTPUT_RESERVE_RATIO = 0.8;
-const TURN_PREFIX_OUTPUT_RESERVE_RATIO = 0.5;
-
-export type SummarizationRequestSize = {
-	inputTokens: number;
-	outputTokens: number;
-	totalTokens: number;
-};
-
-function estimateTextTokens(text: string | undefined): number {
-	return text ? Math.ceil(String(text).length / 4) : 0;
-}
-
-function estimateSerializedConversationTokens(
-	messages: SessionBeforeCompactEvent["preparation"]["messagesToSummarize"],
-): number {
-	const serialized = serializeConversation(convertToLlm(messages));
-	return estimateTextTokens(serialized);
-}
-
-function getEffectiveReserveTokens(preparation: SessionBeforeCompactEvent["preparation"]): number {
-	const reserveTokens = preparation.settings?.reserveTokens;
-	return typeof reserveTokens === "number" && Number.isFinite(reserveTokens) && reserveTokens >= 0
-		? reserveTokens
-		: DEFAULT_COMPACTION_SETTINGS.reserveTokens;
-}
-
-function getOutputReserveTokens(
-	reserveTokens: number,
-	model: { maxTokens?: number },
-	ratio: number,
-): number {
-	const outputTokens = Math.floor(ratio * reserveTokens);
-	return typeof model.maxTokens === "number" && model.maxTokens > 0
-		? Math.min(outputTokens, model.maxTokens)
-		: outputTokens;
-}
-
-function estimateSummaryRequest(
-	messages: SessionBeforeCompactEvent["preparation"]["messagesToSummarize"],
-	outputTokens: number,
-	previousSummary?: string,
-	customInstructions?: string,
-): SummarizationRequestSize {
-	const inputTokens =
-		SUMMARIZATION_TEMPLATE_TOKENS
-		+ estimateSerializedConversationTokens(messages)
-		+ estimateTextTokens(previousSummary)
-		+ estimateTextTokens(customInstructions);
-	return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens };
-}
-
-/**
- * Size of the individual request(s) Pi's `compact()` is about to send.
- *
- * Pi first converts messages with `convertToLlm()` and then applies
- * `serializeConversation()`, which truncates tool results before they enter the
- * summarization prompt. Split-turn compaction sends history and turn-prefix
- * summaries as separate requests, so this returns the largest individual request
- * rather than adding their inputs together. The fixed allowance remains
- * deliberately conservative for Pi's system prompt, tags, and instructions.
- *
- * A session driven by a wide-window model (400k) can produce a preparation that a
- * narrower summary model (272k) cannot accept. Callers must not attempt that request;
- * a missing `contextWindow` skips the check instead of guessing.
- */
-export function estimateSummarizationRequest(
-	preparation: SessionBeforeCompactEvent["preparation"],
-	model: { contextWindow?: number; maxTokens?: number },
-	customInstructions?: string,
-): SummarizationRequestSize {
-	const reserveTokens = getEffectiveReserveTokens(preparation);
-	const historyMessages = preparation.messagesToSummarize ?? [];
-	const turnPrefixMessages = preparation.turnPrefixMessages ?? [];
-	const historyOutputTokens = getOutputReserveTokens(reserveTokens, model, HISTORY_OUTPUT_RESERVE_RATIO);
-	const historyRequest = estimateSummaryRequest(
-		historyMessages,
-		historyOutputTokens,
-		preparation.previousSummary,
-		customInstructions,
-	);
-
-	if (!preparation.isSplitTurn || turnPrefixMessages.length === 0) {
-		return historyRequest;
-	}
-
-	const requests = [
-		...(historyMessages.length > 0 ? [historyRequest] : []),
-		estimateSummaryRequest(
-			turnPrefixMessages,
-			getOutputReserveTokens(reserveTokens, model, TURN_PREFIX_OUTPUT_RESERVE_RATIO),
-		),
-	];
-	return requests.reduce((largest, request) =>
-		request.totalTokens > largest.totalTokens ? request : largest,
-	);
-}
-
-/** Whether the summary model can accept this request at all; unknown windows always pass. */
-export function fitsSummarizationRequest(
-	size: SummarizationRequestSize,
-	model: { contextWindow?: number },
-): boolean {
-	const contextWindow = model.contextWindow;
-	if (typeof contextWindow !== "number" || contextWindow <= 0) return true;
-	return size.totalTokens <= contextWindow;
 }
 
 /**
@@ -218,20 +101,9 @@ export async function runNativeFallbackCompaction(args: {
 		return { ok: false, reason: "same-as-current-model", modelSpec: spec };
 	}
 
-	const size = estimateSummarizationRequest(
-		event.preparation,
-		model as { contextWindow?: number; maxTokens?: number },
-		event.customInstructions,
-	);
-	if (!fitsSummarizationRequest(size, model as { contextWindow?: number })) {
-		return {
-			ok: false,
-			reason: "model-window-too-small",
-			modelSpec: spec,
-			estimatedTokens: size.totalTokens,
-			contextWindow: (model as { contextWindow?: number }).contextWindow,
-		};
-	}
+	// Pi owns prompt construction, tool-result truncation and split-turn requests.
+	// A chars/4 estimate is not target-model token accounting and must not veto
+	// the user's summary model. Surface actual provider failures to the caller.
 
 	let auth: ResolvedAuth;
 	try {
