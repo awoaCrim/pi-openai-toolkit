@@ -6,12 +6,14 @@ import { expect, test } from "bun:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { CompactionResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, CONTEXT_WINDOW_COMPACTION_SUMMARY, declaredToolNames } from "./messages";
 import { CodexContextWindowManager } from "./window-manager";
 import type { ContextWindowCompactionDetails } from "./types";
 import { createNativeCompactionDetails, DEFAULT_COMPACTION_CONFIG, DEFAULT_TOOLKIT_CONFIG, LEGACY_REMOTE_V2_INPUT_PROVENANCE } from "../types";
 import extension from "../extension-runtime";
+import { createNativeCompactionResult } from "../types";
+import { serializeMessagesToResponsesInput } from "../serializer";
 
 const model = {
 	provider: "openai-codex",
@@ -878,6 +880,170 @@ for (const leaveManagedMode of ["warn", "compact"] as const) {
 			expect(aborted).toBe(false);
 		});
 	}
+}
+
+for (const remote of [false, true]) {
+	for (const keepMarker of [false, true]) {
+		test(`newer opaque replay survives historical window (${remote ? "remote" : "local"}, marker retained=${keepMarker})`, async () => {
+			const handlers = new Map<string, (event: never, ctx: never) => unknown>();
+			const registered: Array<{ name: string }> = [];
+			let active = ["read"];
+			let aborted = false;
+			let providerCalls = 0;
+			const sent: Array<{ customType: string; content: string; display: boolean; details: unknown }> = [];
+			const pi = {
+				on: (name: string, handler: (event: never, ctx: never) => unknown) => handlers.set(name, handler),
+				registerTool: (tool: { name: string }) => registered.push(tool),
+				getAllTools: () => registered, getActiveTools: () => active,
+				setActiveTools: (names: string[]) => { active = names; },
+				sendMessage: (message: typeof sent[number]) => { sent.push(message); },
+			} as unknown as ExtensionAPI;
+			const windows = new CodexContextWindowManager(async () => undefined);
+			extension(pi, {
+				contextWindows: windows,
+				loadConfig: () => ({ config: { ...DEFAULT_TOOLKIT_CONFIG, compaction: { ...DEFAULT_COMPACTION_CONFIG, contextManagement: "remote", responsesApis: [] } }, warnings: [] }),
+				remoteCompact: async () => { providerCalls++; throw new Error("no generation expected"); },
+				nativeFallback: async () => { providerCalls++; throw new Error("no generation expected"); },
+			});
+			const sm = SessionManager.inMemory("/synthetic-project");
+			sm.appendMessage({ role: "user", content: "retired pre-window history", timestamp: 1 });
+			const marker = sm.appendCustomMessageEntry(CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, "window", true, {
+				protocol: 1, id: "marker", sessionId: sm.getSessionId(),
+				contextManagement: { protocol: 1, kind: "window", firstWindowId: "w1", currentWindowId: "w2", windowNumber: 1, trimPreviousWindow: true },
+			});
+			const kept = sm.appendMessage({ role: "user", content: "covered kept copy", timestamp: 2 });
+			const appendNotes = (id: string) => {
+				sm.appendMessage(fauxAssistantMessage([fauxToolCall("notes", { action: "read_file", path: "/checkpoint.md" }, { id })]));
+				sm.appendMessage({ role: "toolResult", toolCallId: id, toolName: "notes", isError: false,
+					content: [{ type: "text", text: "notes operation completed" }],
+					details: { codexHistoryNotes: { encrypted_output: `${id}-encrypted` } }, timestamp: 3 });
+			};
+			appendNotes("covered-notes");
+			const result = createNativeCompactionResult({ firstKeptEntryId: keepMarker ? marker : kept, tokensBefore: 100,
+				details: createNativeCompactionDetails({ provider: model.provider, api: model.api, model: model.id, baseUrl: model.baseUrl,
+					inputProvenance: LEGACY_REMOTE_V2_INPUT_PROVENANCE, compactedWindow: [{ type: "compaction", encrypted_content: "new-opaque" }] }),
+			});
+			sm.appendCompaction(result.summary, result.firstKeptEntryId, result.tokensBefore, result.details);
+			sm.appendMessage({ role: "user", content: "live tail", timestamp: 3 });
+			appendNotes("live-notes");
+			const consumer = remote ? model : { ...model, provider: "openai", api: "openai-responses" };
+			const ctx = { ...makeContext([], consumer), sessionManager: sm, abort: () => { aborted = true; } } as never;
+			await handlers.get("session_start")!({} as never, ctx);
+			const incoming = sm.buildSessionProjection().messages;
+			const projection = await handlers.get("context_with_system")!({ messages: incoming } as never, ctx) as { messages: AgentMessage[] } | undefined;
+			expect(windows.currentIdentity()?.currentWindowId).toBe("w2");
+			expect(windows.hasEffectiveWindow()).toBe(false);
+			const messages = projection?.messages ?? incoming;
+			expect(messages.some((message) => message.role === "compactionSummary")).toBe(true);
+			expect(JSON.stringify(messages)).not.toContain("covered kept copy");
+			const payload = { model: consumer.id, input: serializeMessagesToResponsesInput(consumer as never, messages) };
+			const replay = await handlers.get("before_provider_request")!({ payload } as never, ctx) as { input: unknown[]; client_metadata?: Record<string, string> };
+			expect(JSON.stringify(replay.input)).toContain("new-opaque");
+			expect(JSON.stringify(replay.input)).toContain("live tail");
+			expect(JSON.stringify(replay.input)).not.toContain("covered kept copy");
+			expect(JSON.stringify(replay.input)).not.toContain("retired pre-window history");
+			expect(JSON.stringify(replay.input)).not.toContain("covered-notes");
+			expect(JSON.stringify(replay.input)).toContain("live-notes");
+			if (remote) {
+				expect(replay.input).toContainEqual({ type: "function_call_output", call_id: "live-notes",
+					output: [{ type: "encrypted_content", encrypted_content: "live-notes-encrypted" }] });
+				expect(JSON.parse(replay.client_metadata!["x-codex-turn-metadata"]!).context_window_id).toBe("w2");
+				for (const reason of ["threshold", "overflow"]) {
+					expect(await handlers.get("session_before_compact")!({ reason, signal: new AbortController().signal,
+						branchEntries: sm.getBranch(), preparation: { firstKeptEntryId: kept, tokensBefore: 100, messagesToSummarize: [], turnPrefixMessages: [] } } as never, ctx)).toEqual({ cancel: true });
+				}
+			} else {
+				expect(JSON.stringify(replay.input)).not.toContain("live-notes-encrypted");
+				expect(JSON.stringify(replay.input)).toContain("notes operation completed");
+			}
+			expect(aborted).toBe(false);
+			expect(providerCalls).toBe(0);
+			expect(sent).toEqual([]); // Historical identity must not be reinitialized.
+
+			if (remote) {
+				expect(await windows.startNewWindow(pi, ctx, { triggerTurn: true, trimPreviousWindow: true })).toBe(true);
+				const queued = sent[0]!;
+				const targetWindow = windows.currentIdentity()!.currentWindowId;
+				const requestMessages = [...incoming, { role: "custom", ...queued, timestamp: 4 } as AgentMessage];
+				const preview = await handlers.get("context_with_system")!({ messages: requestMessages } as never, ctx) as { messages: AgentMessage[] };
+				expect(preview.messages.some((message) => message.role === "compactionSummary")).toBe(false);
+				expect(JSON.stringify(preview.messages)).not.toContain("live tail");
+				expect(windows.hasPendingRollover(ctx)).toBe(true);
+				expect(windows.prepareCompaction({ branchEntries: sm.getBranch(), preparation: {} } as never)).toEqual({ cancel: true });
+				const previewPayload = { model: consumer.id, input: serializeMessagesToResponsesInput(consumer as never, preview.messages) };
+				const previewRequest = await handlers.get("before_provider_request")!({ payload: previewPayload } as never, ctx) as typeof replay;
+				expect(JSON.stringify(previewRequest.input)).not.toContain("new-opaque");
+				expect(JSON.parse(previewRequest.client_metadata!["x-codex-turn-metadata"]!).context_window_id).toBe(targetWindow);
+
+				// A later request without the queued marker must not reuse that preview.
+				const withoutQueued = await handlers.get("context_with_system")!({ messages: incoming } as never, ctx) as { messages: AgentMessage[] };
+				expect(withoutQueued.messages.some((message) => message.role === "compactionSummary")).toBe(true);
+				expect(windows.currentIdentity()?.currentWindowId).toBe("w2");
+				expect(windows.hasPendingRollover(ctx)).toBe(true);
+				expect(await windows.startNewWindow(pi, ctx, { triggerTurn: true, trimPreviousWindow: true })).toBe(false);
+				expect(sent).toHaveLength(1);
+
+				sm.appendCustomMessageEntry(queued.customType, queued.content, queued.display, queued.details);
+				const persisted = await handlers.get("context_with_system")!({ messages: sm.buildSessionProjection().messages } as never, ctx) as { messages: AgentMessage[] };
+				expect(persisted.messages.some((message) => message.role === "compactionSummary")).toBe(false);
+				expect(windows.currentIdentity()?.currentWindowId).toBe(targetWindow);
+				expect(windows.hasPendingRollover(ctx)).toBe(false);
+				expect(aborted).toBe(false);
+			}
+		});
+	}
+}
+
+for (const failure of ["unsupported-api", "auth-resolution-failed", "latest-native-compaction-mismatch"] as const) {
+	test(`inherited opaque replay aborts instead of sending a sentinel (${failure})`, async () => {
+		const artifactRoot = fs.mkdtempSync(join(os.tmpdir(), "toolkit-inherited-replay-"));
+		try {
+			const handlers = new Map<string, (event: never, ctx: never) => unknown>();
+			const registered: Array<{ name: string }> = [];
+			let active = ["read"];
+			let aborted = false;
+			const notices: string[] = [];
+			const pi = {
+				on: (name: string, handler: (event: never, ctx: never) => unknown) => handlers.set(name, handler),
+				registerTool: (tool: { name: string }) => registered.push(tool),
+				getAllTools: () => registered, getActiveTools: () => active,
+				setActiveTools: (names: string[]) => { active = names; }, sendMessage: () => undefined,
+			} as unknown as ExtensionAPI;
+			extension(pi, { loadConfig: () => ({ config: { ...DEFAULT_TOOLKIT_CONFIG, compaction: {
+				...DEFAULT_COMPACTION_CONFIG, contextManagement: "remote", responsesApis: [], artifactRoot,
+			} }, warnings: [] }) });
+			const sm = SessionManager.inMemory("/synthetic-project");
+			sm.appendCustomMessageEntry(CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, "old window", true, {
+				protocol: 1, id: "old-window", sessionId: sm.getSessionId(),
+				contextManagement: { protocol: 1, kind: "window", firstWindowId: "w1", currentWindowId: "w1", windowNumber: 0 },
+			});
+			const kept = sm.appendMessage({ role: "user", content: "checkpoint-covered", timestamp: 1 });
+			const checkpoint = createNativeCompactionResult({ firstKeptEntryId: kept, tokensBefore: 100,
+				details: createNativeCompactionDetails({ provider: model.provider, api: model.api, model: model.id,
+					baseUrl: model.baseUrl, inputProvenance: LEGACY_REMOTE_V2_INPUT_PROVENANCE,
+					compactedWindow: [{ type: "compaction", encrypted_content: "must-not-leak" }] }),
+			});
+			sm.appendCompaction(checkpoint.summary, checkpoint.firstKeptEntryId, checkpoint.tokensBefore, checkpoint.details);
+			const branch = structuredClone(sm.getBranch());
+			const consumer = { ...model, provider: "local", api: failure === "unsupported-api" ? "anthropic-messages" : "openai-responses" };
+			const ctx = {
+				...makeContext([], consumer), sessionManager: sm, hasUI: true,
+				ui: { notify: (message: string) => notices.push(message) }, abort: () => { aborted = true; },
+				modelRegistry: { getApiKeyAndHeaders: async () => failure === "auth-resolution-failed"
+					? { ok: false, error: "fixture credentials unavailable" }
+					: { ok: true, apiKey: "test", headers: {}, baseUrl: "https://different.example/v1" } },
+			} as never;
+			expect(await handlers.get("context_with_system")!({ messages: sm.buildSessionProjection().messages } as never, ctx)).toBeUndefined();
+			expect(aborted).toBe(true);
+			aborted = false;
+			expect(await handlers.get("before_provider_request")!({ payload: { model: consumer.id, input: [] } } as never, ctx)).toBeUndefined();
+			expect(aborted).toBe(true);
+			expect(notices.some((notice) => notice.includes(failure))).toBe(true);
+			expect(sm.getBranch()).toEqual(branch);
+		} finally {
+			fs.rmSync(artifactRoot, { recursive: true, force: true });
+		}
+	});
 }
 
 test("v2 context lifecycle reads one snapshot across awaited activation and sees edits next operation", async () => {

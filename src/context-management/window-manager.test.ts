@@ -36,7 +36,7 @@ function persistSentMarker(branch: Array<Record<string, unknown>>, message: Reco
 	branch.push({
 		type: "custom_message",
 		id: `entry-m${index}`,
-		parentId: index === 0 ? null : `entry-m${index - 1}`,
+		parentId: index === 0 ? null : branch[index - 1]!.id,
 		timestamp: `2026-09-07T00:00:0${index}.000Z`,
 		customType: CODEX_CONTEXT_WINDOW_MESSAGE_TYPE,
 		content: message.content,
@@ -292,43 +292,20 @@ test("creates a no-summary compaction boundary only for the scheduled rollover",
 	// Cancellation before persistence leaves the same proposal retryable.
 	expect(manager.hasPendingTrim()).toBe(true);
 	expect(manager.prepareCompaction(event)).toEqual(result);
-	if (!("compaction" in result)) throw new Error("Expected a trim proposal");
-	manager.recordCompaction(result.compaction.details);
-	// Once persistence is acknowledged, further no-op compactions cancel.
-	expect(manager.prepareCompaction(event)).toEqual({ cancel: true });
+	if (!result || !("compaction" in result)) throw new Error("Expected a trim proposal");
+	const entries = [marker, { type: "compaction", id: "cleanup", parentId: marker.id, timestamp: "now", ...result.compaction }] as never;
+	manager.restore(entries, "session-1");
+	expect(manager.prepareCompaction({ ...event, branchEntries: entries })).toEqual({ cancel: true });
 });
 
-test("ignores unrelated compaction callbacks without disturbing initialized or pending windows", async () => {
+test("maintenance eligibility does not arm until the scheduled marker is persisted", async () => {
 	const manager = new CodexContextWindowManager(async () => undefined);
 	const sent: Array<Record<string, unknown>> = [];
 	const branch: Array<Record<string, unknown>> = [];
 	const ctx = fakeContext(() => branch);
 	manager.ensureInitialized(fakePi(sent), ctx, true);
-	const initial = manager.currentIdentity();
-	const invalidDetails = [undefined, {}, { protocol: 1, strategy: "other", windowId: initial?.currentWindowId }];
-	const event = { branchEntries: [], preparation: { firstKeptEntryId: "keep", tokensBefore: 50 } } as never;
-	const matchingDetails = manager.createCompaction(event).details;
-	// Even valid details must not invalidate an initialization with no pending trim.
-	for (const details of [...invalidDetails, matchingDetails]) {
-		manager.recordCompaction(details);
-		manager.synchronize(ctx);
-		expect(manager.currentIdentity()).toEqual(initial);
-		expect(manager.hasPendingTrim()).toBe(false);
-	}
-
 	persistSentMarker(branch, sent[0]!);
 	await manager.startNewWindow(fakePi(sent), ctx, { triggerTurn: true, trimPreviousWindow: true });
-	const pending = manager.currentIdentity();
-	for (const details of [...invalidDetails, matchingDetails]) {
-		manager.recordCompaction(details);
-		expect(manager.currentIdentity()).toEqual(pending);
-		expect(manager.hasPendingTrim()).toBe(true);
-		expect(manager.hasPendingRollover(ctx)).toBe(true);
-	}
-
-	// A matching acknowledgment invalidates derived state, but rebuilding must
-	// preserve the outstanding rollover guard until its marker is persisted.
-	manager.recordCompaction(manager.createCompaction(event).details);
 	expect(manager.hasPendingTrim()).toBe(false);
 	manager.synchronize(ctx);
 	expect(manager.hasPendingRollover(ctx)).toBe(true);
@@ -631,7 +608,7 @@ test("rollover arms a once-only trim that is consumed by the persisted boundary"
 	manager.restore(branch as never, "session-1");
 	expect(manager.hasPendingTrim()).toBe(false);
 	expect(await manager.startNewWindow(fakePi(sent), ctx, { triggerTurn: true, trimPreviousWindow: true })).toBe(true);
-	expect(manager.hasPendingTrim()).toBe(true);
+	expect(manager.hasPendingTrim()).toBe(false);
 	// The accepted marker is not persisted yet, so the trim cannot be consumed.
 	const pendingEvent = { reason: "threshold", branchEntries: branch, preparation: { firstKeptEntryId: "keep", tokensBefore: 50 } } as never;
 	expect(manager.prepareCompaction(pendingEvent)).toEqual({ cancel: true });
@@ -643,7 +620,7 @@ test("rollover arms a once-only trim that is consumed by the persisted boundary"
 	expect(proposal).toMatchObject({ compaction: { summary: CONTEXT_WINDOW_COMPACTION_SUMMARY } });
 	expect(manager.hasPendingTrim()).toBe(true);
 	if (!("compaction" in proposal)) throw new Error("Expected a trim proposal");
-	branch.push({ type: "compaction", id: "committed-trim", ...proposal.compaction });
+	branch.push({ type: "compaction", id: "committed-trim", parentId: branch.at(-1)?.id, timestamp: "now", ...proposal.compaction });
 	manager.synchronize(ctx);
 	expect(manager.hasPendingTrim()).toBe(false);
 	expect(manager.prepareCompaction(persistedEvent)).toEqual({ cancel: true });

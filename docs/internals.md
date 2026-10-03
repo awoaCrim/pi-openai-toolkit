@@ -73,11 +73,12 @@ sequenceDiagram
   Model->>Toolkit: new_context
   Toolkit->>Toolkit: verify successful notes write in this window
   Toolkit-->>Model: checkpoint receipt with the successful note path
-  Toolkit-->>Pi: window marker appended, previous window trim scheduled
+  Toolkit-->>Pi: new window marker persisted
   Note over Model: Context switch is complete; read the receipt once, then resume the active task
   Model->>Backend: next request with the new x-codex-window-id
   Pi->>Toolkit: session_before_compact
-  Toolkit-->>Pi: no-summary boundary consuming the scheduled trim
+  Toolkit->>Toolkit: resolve boundary against Pi's effective context
+  Toolkit-->>Pi: safe no-summary boundary, or cancel obsolete cleanup
 ```
 
 State invariants the lifecycle code must keep honest:
@@ -90,12 +91,12 @@ State invariants the lifecycle code must keep honest:
 - When even that rebuild would lose declared tools, the trim is refused and the full message list is sent: a window that still carries the previous turns is usable, a window with no tools silently degrades into a chat the model can only narrate. Each refusal is reported once per window and lost-tool set through `takeProjectionDiagnostics()`, which writes a `context.projection.tool_loadout_shrink` compaction artifact and warns in the UI.
 - The manager also remembers the head it last anchored. When a boundary compaction retires the transcript entry that declared the tools, the branch itself no longer contains a system message, and the remembered head is re-anchored instead of sending a tool-less window. The cache is request-time only, refreshed by every projection, and cleared by `reset()`.
 - `new_context` has no force escape hatch: a persisted successful notes checkpoint in the current window is always required before rollover. The model must wait for the notes result to be persisted before retrying.
-- After a marker is accepted for sending, the manager keeps a session/window-anchored pending guard until that exact target marker is persisted or the session changes. A duplicate `new_context` during this persistence gap returns `started: false` and sends no second marker; projected/in-memory messages do not retire the guard.
+- After a marker is accepted for sending, the manager keeps a session/window-anchored pending guard until that exact target marker is persisted or the session changes. A duplicate `new_context` during this persistence gap returns `started: false` and sends no second marker; projected/in-memory messages do not retire the guard. The exact queued target can already trim the current Remote request and select its metadata, but this preview is recomputed per request and never authorizes maintenance compaction before persistence.
 - Budget checks are skipped until the current window has produced its own assistant usage. Acting on the previous window's usage anchor would burn the once-per-window reminder on a false alarm.
-- Preparing a boundary never consumes its scheduled trim. The manager reconciles the latest persisted compaction and branch state, so only a durable matching boundary consumes it. Missing/late callbacks, aborted preparation and navigation across branches sharing a marker remain retryable. Automatic threshold/overflow and toolkit-owned manual maintenance only trim a matching scheduled window; a user manual `/compact` follows the managed handoff below.
-- A window boundary is persisted as a `codex-context-window` custom message. `session_start` replays boundaries from the branch and rebuilds identity after forks.
-- Retiring windows remains a projection-level operation in the persisted branch, but a non-window consumer never receives that retired history. `context_with_system` trims to the latest persisted Remote Context boundary, preserves the current system/tool head, and removes the internal window marker before the local provider request. The legacy `leaveManagedMode` setting is retained only so old config files remain valid; it no longer warns or starts a bulk close-out from `model_select` or `agent_settled`.
-- If a non-window consumer reaches `session_before_compact` while a Remote Context boundary exists, the extension returns a no-summary compaction anchored at that boundary. No Remote V2/native compaction producer receives the Remote window, Pi retains the marker and current-window tail, and switching back to a supported model reuses the persisted window identity. A session with no Remote boundary keeps the ordinary compaction path.
+- Pi's canonical session projection is the source of effective history. Toolkit may further restrict that projection, but never reconstruct omitted or summarized messages from the raw branch. Boundary resolution uses projected source entries and the active branch's latest compaction; an older marker retained inside a newer compaction does not authorize dropping that compaction's summary.
+- Window identity and cleanup eligibility are separate. A persisted `codex-context-window` message restores identity after reload/fork, but its historical `trimPreviousWindow` flag is not an outstanding command. A newer native summary or opaque checkpoint supersedes old cleanup without erasing window identity. Missing or edited boundary evidence is never repaired by loading raw history.
+- Maintenance compaction and local-consumer detachment use the same effective-boundary rules. Only a safe current boundary can produce a no-summary compaction; obsolete cleanup must not move the retained start backwards or replace a newer summary/checkpoint. Preparation alone changes no durable state, and cancellation, retry and branch navigation are resolved from current evidence rather than callback acknowledgments. User manual `/compact` still follows the managed handoff below.
+- A non-window consumer receives only the effective current context, with the system/tool head preserved and internal window markers removed. When detachment is needed, no compaction producer receives retired Remote history. Once a later ordinary compaction owns effective context, the historical window does not suppress its summary or valid opaque replay. A genuinely new window can retire that checkpoint. Disabling opaque checkpoint generation through `responsesApis` does not disable required replay of an inherited checkpoint; an unsupported transport, authentication failure, or endpoint mismatch aborts the request instead of exposing its placeholder. The legacy `leaveManagedMode` setting remains compatible but does not start a bulk close-out from `model_select` or `agent_settled`.
 - The configured native-fallback summary model is still checked against the physical request size (`estimateSummarizationRequest`). The guard remains a provider-safety invariant; the Remote-window fix avoids the oversized request by excluding managed history before any compaction producer can be called, rather than removing the guard or chunking the request.
 
 ---
@@ -120,7 +121,7 @@ The underlying native compact promise still rejects its intentional cancellation
 
 ### Remote Compaction v2 wire contract
 
-v2 is what an uncovered session gets. Any model that Remote Context declines, such as a gateway without an exact transport opt-in, can still compact through v2 when its API appears in `context.remoteCompaction.apis`. The two strategies never compete for one session.
+v2 is what an uncovered session gets. Any model that Remote Context declines, such as a gateway without an exact transport opt-in, can still compact through v2 when its API appears in `context.remoteCompaction.apis`. Compaction generation follows the active strategy. Across mode changes, an already-persisted checkpoint remains authoritative until a safe newer window or compaction replaces it; a historical window identity alone must not suppress checkpoint replay.
 
 A `compaction_trigger` item appended to the live streaming request yields one output item of `type: "compaction"` with non-empty `encrypted_content`, stored in `CompactionEntry.details.compactedWindow`. On later requests the opaque checkpoint is replayed ahead of live turns, with no text summary. Replay fails closed: if the summary anchor cannot be located, the request is aborted with a notification and a content-free failure artifact. The sentinel-only payload is never sent.
 

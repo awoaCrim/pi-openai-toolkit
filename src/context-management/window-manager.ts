@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ProviderHeaders } from "@earendil-works/pi-ai";
 import {
-	buildSessionContext,
+	buildSessionProjection,
 	calculateContextTokens,
 	estimateTokens,
 	type CompactionResult,
@@ -43,6 +43,7 @@ import {
 	loadHistoryNotesThreadHint,
 } from "./history-notes";
 import { rewriteContextNamespaceTools } from "./namespace-tools";
+import { hasInvalidatedCompactionContext } from "../payload-rewrite";
 
 interface StartContextWindowOptions {
 	triggerTurn: boolean;
@@ -73,6 +74,8 @@ type WindowBoundaryEntry = Extract<SessionEntry, { type: "custom_message" }> & {
 type PendingRollover = {
 	sessionId?: string;
 	targetWindowId: string;
+	/** The current request already contains this marker; never persistence proof. */
+	projected?: boolean;
 };
 
 export class CodexContextWindowManager {
@@ -80,10 +83,9 @@ export class CodexContextWindowManager {
 	private sessionId: string | undefined;
 	private restoredMarkerId: string | undefined;
 	private restoredCompactionId: string | undefined;
-	private branchStateInvalidated = false;
+	private boundary: WindowBoundaryResolution = { kind: "none" };
 	private readonly budget = new ContextWindowBudget();
 	private pendingRollover: PendingRollover | undefined;
-	private trimPendingWindowId: string | undefined;
 	private readonly projectionDiagnostics = new Set<string>();
 	private lastKnownSystemHead: AgentMessage | undefined;
 	/**
@@ -108,9 +110,21 @@ export class CodexContextWindowManager {
 	currentIdentity(): ContextWindowIdentity | undefined {
 		return this.identity ? { ...this.identity } : undefined;
 	}
-	/** Whether a rollover trim awaits a matching persisted compaction. */
+	/** Derived eligibility, never a replayed marker command. */
 	hasPendingTrim(): boolean {
-		return this.trimPendingWindowId !== undefined;
+		return this.boundary.kind === "effective" && !this.boundary.cleaned &&
+			this.boundary.entry.details.contextManagement.trimPreviousWindow === true;
+	}
+
+	/** Historical identity does not own a newer native/opaque checkpoint. */
+	hasEffectiveWindow(): boolean {
+		if (!this.identity || this.boundary.kind === "ambiguous") return false;
+		return this.boundary.kind !== "superseded" ||
+			(this.pendingRollover?.projected === true && this.pendingRollover.targetWindowId === this.identity.currentWindowId);
+	}
+
+	hasSupersededWindow(): boolean {
+		return this.boundary.kind === "superseded";
 	}
 
 	private resetWindowState(): void {
@@ -118,9 +132,8 @@ export class CodexContextWindowManager {
 		this.sessionId = undefined;
 		this.restoredMarkerId = undefined;
 		this.restoredCompactionId = undefined;
-		this.branchStateInvalidated = false;
+		this.boundary = { kind: "none" };
 		this.budget.reset();
-		this.trimPendingWindowId = undefined;
 		this.projectedContextTokens = undefined;
 	}
 
@@ -132,7 +145,6 @@ export class CodexContextWindowManager {
 		for (const entry of entries) {
 			if (entry.type === "compaction") {
 				this.restoredCompactionId = entry.id;
-				this.recordCompaction(entry.details);
 				continue;
 			}
 			if (entry.type !== "custom_message" || entry.customType !== CODEX_CONTEXT_WINDOW_MESSAGE_TYPE) continue;
@@ -145,13 +157,10 @@ export class CodexContextWindowManager {
 			this.restoredMarkerId = entry.id;
 			if (details.kind === "window") {
 				this.identity = identityFromDetails(entry.details);
-				this.trimPendingWindowId = details.trimPreviousWindow ? details.currentWindowId : undefined;
 			}
 			this.budget.restore(details.kind, details.currentWindowId);
 		}
-		// recordCompaction may invalidate the cache while replaying entries; the
-		// completed replay already reconciled those acknowledgments with this branch.
-		this.branchStateInvalidated = false;
+		this.boundary = resolveWindowBoundary(entries, sessionId);
 		this.retireSatisfiedOrStalePending(entries, sessionId);
 	}
 
@@ -170,9 +179,11 @@ export class CodexContextWindowManager {
 		}
 		// Hook-provided compactions may have no success callback. The persisted
 		// branch also detects navigation before/after a commit with the same marker.
-		if (this.branchStateInvalidated || this.sessionId !== sessionId || this.restoredMarkerId !== latestMarkerId || this.restoredCompactionId !== latestCompactionId) {
+		if (this.sessionId !== sessionId || this.restoredMarkerId !== latestMarkerId || this.restoredCompactionId !== latestCompactionId) {
 			this.restore(entries, sessionId);
 		}
+		// Edits and sibling navigation may leave marker/compaction IDs unchanged.
+		this.boundary = resolveWindowBoundary(entries, sessionId);
 	}
 
 	/**
@@ -211,13 +222,22 @@ export class CodexContextWindowManager {
 	project(
 		messages: readonly AgentMessage[],
 		mode: "off" | "local" | "remote",
+		/** Delay encoding until verified retained copies have been removed. */
+		encodeEncryptedOutputs = true,
 	): AgentMessage[] {
+		// Recompute the request-only preview on every projection. Observing a
+		// queued marker must not authorize maintenance or retire the duplicate guard.
+		if (this.pendingRollover) this.pendingRollover.projected = false;
 		if (mode === "off") {
 			this.projectedContextTokens = undefined;
 			return messages.filter(
 				(message) => message.role !== "custom" || message.customType !== CODEX_CONTEXT_WINDOW_MESSAGE_TYPE,
 			);
 		}
+		if (this.boundary.kind === "ambiguous") {
+			throw new Error("Persisted Codex context-window boundary missing or edited in canonical projection");
+		}
+		if (this.boundary.kind === "superseded") this.identity = identityFromDetails(this.boundary.entry.details);
 		let boundaryIndex = -1;
 		for (let index = 0; index < messages.length; index += 1) {
 			const message = messages[index]!;
@@ -232,28 +252,24 @@ export class CodexContextWindowManager {
 				if (!matchesSession(message.details.sessionId, this.sessionId)) continue;
 			}
 			if (!isContextWindowBoundary(message)) continue;
+			const queuedRollover = mode === "remote" && this.pendingRollover?.targetWindowId === message.details.contextManagement.currentWindowId;
+			if (this.boundary.kind === "superseded" && !queuedRollover) continue;
 			// Local consumers follow the synchronized persisted identity, not a
 			// queued marker from the request view. They never own the Remote session.
 			if (mode === "local" && message.details.contextManagement.currentWindowId !== this.identity?.currentWindowId) continue;
 			boundaryIndex = index;
-			if (mode === "remote") this.identity = identityFromDetails(message.details);
-		}
-		if (boundaryIndex < 0) {
-			if (mode === "local" && this.identity) {
-				throw new Error("Persisted Codex context-window boundary missing from local projection");
-			}
 			if (mode === "remote") {
-				this.identity = undefined;
-				this.restoredMarkerId = undefined;
-				this.budget.reset();
-				this.trimPendingWindowId = undefined;
+				this.identity = identityFromDetails(message.details);
+				if (this.pendingRollover) this.pendingRollover.projected = queuedRollover;
 			}
-			this.projectedContextTokens = undefined;
+		}
+		if (boundaryIndex < 0 && this.boundary.kind === "effective") {
+			throw new Error("Persisted Codex context-window boundary missing from effective projection");
 		}
 		// Projection observes the request view, never durable session state. A
 		// queued rollover marker must not clear the duplicate guard here.
 		const trimmed = boundaryIndex < 0 ? [...messages] : this.trimToWindow(messages, boundaryIndex, mode === "local");
-		const projected = mode === "remote" ? projectEncryptedToolResults(trimmed) : trimmed.filter(
+		const projected = mode === "remote" ? (encodeEncryptedOutputs ? projectEncryptedToolResults(trimmed) : trimmed) : trimmed.filter(
 			(message) => message.role !== "custom" || message.customType !== CODEX_CONTEXT_WINDOW_MESSAGE_TYPE,
 		);
 		this.projectedContextTokens = mode === "remote" && this.identity
@@ -421,21 +437,12 @@ export class CodexContextWindowManager {
 	prepareCompaction(
 		event: SessionBeforeCompactEvent,
 	): { cancel: true } | { compaction: CompactionResult<ContextWindowCompactionDetails> } {
-		// Only the compaction that consumes a scheduled rollover may write a
-		// boundary. Every other path — threshold, manual /compact, overflow —
-		// stays cancelled: a boundary written without a pending trim does not
-		// shrink anything, becomes Pi's latest-compaction anchor, and blinds
-		// getContextUsage (null tokens) until the next assistant usage lands —
-		// which is exactly how the exhausted-window fallback can go silent.
-		const boundary = findLatestWindowBoundaryEntry(event.branchEntries, this.sessionId);
-		if (!boundary || boundary.details.contextManagement.currentWindowId !== this.trimPendingWindowId) {
+		const boundary = resolveWindowBoundary(event.branchEntries, this.sessionId);
+		if (boundary.kind !== "effective" || boundary.cleaned || !boundary.entry.details.contextManagement.trimPreviousWindow) {
 			return { cancel: true };
 		}
-		const compaction = this.createCompaction(event);
-		// Preparation is only a proposal: Pi may abort before appending it.
-		// synchronize() consumes the trim after observing a durable compaction;
-		// recordCompaction() also handles hosts that emit a success callback.
-		return { compaction };
+		// An unpersisted/cancelled proposal changes no eligibility.
+		return { compaction: this.createCompaction(event, boundary.entry) };
 	}
 
 	/**
@@ -445,10 +452,12 @@ export class CodexContextWindowManager {
 	 */
 	prepareDetachedCompaction(
 		event: SessionBeforeCompactEvent,
-	): { compaction: CompactionResult<ContextWindowCompactionDetails> } | undefined {
-		const boundary = findLatestWindowBoundaryEntry(event.branchEntries, this.sessionId);
-		if (!boundary) return undefined;
-		const compaction = this.createCompaction(event);
+	): { cancel: true } | { compaction: CompactionResult<ContextWindowCompactionDetails> } | undefined {
+		const boundary = resolveWindowBoundary(event.branchEntries, this.sessionId);
+		if (boundary.kind === "ambiguous") throw new Error("Persisted Codex context-window boundary missing or edited");
+		if (boundary.kind !== "effective") return undefined;
+		if (boundary.cleaned) return { cancel: true };
+		const compaction = this.createCompaction(event, boundary.entry);
 		// Pi's preparation/tokensBefore describes the durable branch, which includes
 		// Remote-managed history. Detached local accounting must use the same current
 		// window projection that the non-window provider sees instead.
@@ -461,30 +470,19 @@ export class CodexContextWindowManager {
 	}
 
 	private estimateLocalContextTokens(entries: readonly SessionEntry[]): number {
-		const messages = buildSessionContext(entries as never[]).messages as unknown as AgentMessage[];
+		const messages = buildSessionProjection([...entries]).messages;
 		return this.project(messages, "local").reduce((total, message) => total + estimateTokens(message as never), 0);
 	}
 
-	recordCompaction(details: unknown): void {
-		if (!isContextWindowCompactionDetails(details)) return;
-		if (this.trimPendingWindowId !== undefined && details.windowId === this.trimPendingWindowId) {
-			this.trimPendingWindowId = undefined;
-			// The callback supplies no branch identity. Force durable reconciliation
-			// even if navigation returns to the cached pre-commit branch before sync.
-			this.branchStateInvalidated = true;
-		}
-	}
-
-	createCompaction(event: SessionBeforeCompactEvent): CompactionResult<ContextWindowCompactionDetails> {
-		const boundary = findLatestWindowBoundaryEntry(event.branchEntries, this.sessionId);
+	private createCompaction(event: SessionBeforeCompactEvent, boundary: WindowBoundaryEntry): CompactionResult<ContextWindowCompactionDetails> {
 		return {
 			summary: CONTEXT_WINDOW_COMPACTION_SUMMARY,
-			firstKeptEntryId: boundary?.id ?? event.preparation.firstKeptEntryId,
+			firstKeptEntryId: boundary.id,
 			tokensBefore: event.preparation.tokensBefore,
 			details: {
 				protocol: CONTEXT_MANAGEMENT_PROTOCOL,
 				strategy: CONTEXT_WINDOW_COMPACTION_STRATEGY,
-				...(this.identity ? { windowId: this.identity.currentWindowId } : {}),
+				windowId: boundary.details.contextManagement.currentWindowId,
 			},
 		};
 	}
@@ -517,11 +515,39 @@ export class CodexContextWindowManager {
 		this.identity = identity;
 		this.sessionId = ctx.sessionManager.getSessionId();
 		this.restoredMarkerId = undefined;
-		this.trimPendingWindowId = options.trimPreviousWindow ? identity.currentWindowId : undefined;
 		// sendMessage() acceptance is not persistence. The pending rollover stays
 		// armed until synchronize() observes this target window in the persisted
 		// branch (or the session changes).
 	}
+}
+
+type WindowBoundaryResolution =
+	| { kind: "none" | "ambiguous" }
+	| { kind: "superseded"; entry: WindowBoundaryEntry }
+	| { kind: "effective"; entry: WindowBoundaryEntry; cleaned: boolean };
+
+/** Pi's projection owns context; raw chronology only establishes window ownership. */
+function resolveWindowBoundary(entries: readonly SessionEntry[], sessionId?: string): WindowBoundaryResolution {
+	const boundary = findLatestWindowBoundaryEntry(entries, sessionId);
+	if (!boundary) return { kind: "none" };
+	const projection = buildSessionProjection([...entries]);
+	const latest = projection.entries.find((entry) => entry.sourceEntry.type === "compaction")?.sourceEntry;
+	const boundaryIndex = entries.findIndex((entry) => entry.id === boundary.id);
+	const laterCompaction = latest?.type === "compaction" && entries.findIndex((entry) => entry.id === latest.id) > boundaryIndex
+		? latest : undefined;
+	if (laterCompaction && hasInvalidatedCompactionContext([...entries], laterCompaction.id)) return { kind: "ambiguous" };
+	const marker = projection.entries.find((entry) => entry.sourceEntry.id === boundary.id);
+	// A surviving edit can replace content without changing custom details.
+	const edited = entries.some((entry) => entry.type === "context_edit" && entry.targetId === boundary.id &&
+		projection.entries.some((projected) => projected.sourceEntry.id === entry.id));
+	if (edited) return { kind: "ambiguous" };
+	const cleaned = laterCompaction !== undefined &&
+		isContextWindowCompactionDetails(laterCompaction.details) &&
+		laterCompaction.details.windowId === boundary.details.contextManagement.currentWindowId &&
+		laterCompaction.firstKeptEntryId === boundary.id;
+	if (laterCompaction && !cleaned) return { kind: "superseded", entry: boundary };
+	if (!marker?.messages.some(isContextWindowBoundary)) return { kind: "ambiguous" };
+	return { kind: "effective", entry: boundary, cleaned };
 }
 
 function identityFromDetails(details: CodexContextManagementMessageDetails): ContextWindowIdentity {

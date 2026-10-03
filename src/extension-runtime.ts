@@ -957,6 +957,19 @@ async function handleSessionBeforeCompact(
 	return undefined;
 }
 
+function rejectInheritedCheckpointReplay(
+	ctx: ExtensionContext,
+	config: CompactionConfig,
+	compactionEntryId: string,
+	reason: string,
+): undefined {
+	writeReplayFailureArtifact({ reason, compactionEntryId }, config, ctx);
+	reportPiContextHookFailure(ctx, `replay-failed:${reason}`);
+	if (ctx.hasUI) ctx.ui.notify(`${COMPACTION_EXTENSION_ID}: inherited checkpoint replay failed (${reason}); request aborted`, "error");
+	ctx.abort();
+	return undefined;
+}
+
 async function handleContextInternal(
 	event: ContextWithSystemEvent,
 	ctx: ExtensionContext,
@@ -977,6 +990,7 @@ async function handleContextInternal(
 	}
 
 	let localMessages: AgentMessage[] | undefined;
+	let remoteReplayProjection = false;
 	if (config.contextManagement === "remote") {
 		const contextModel = await resolveContextCapabilityModel(ctx);
 		try {
@@ -994,7 +1008,11 @@ async function handleContextInternal(
 				// Measure the provider-visible current window, not Pi's durable transcript.
 				// The latter still contains retired remote windows and can be inflated by
 				// an upstream error even though this request only carries the live window.
-				const projected = contextWindows.project(event.messages, "remote");
+				let projected = contextWindows.project(event.messages, "remote", false);
+				// Projection may observe the exact queued rollover before Pi persists
+				// it. Decide replay ownership from this request, not the old branch.
+				const ownsWindow = contextWindows.hasEffectiveWindow() || !contextWindows.currentIdentity();
+				if (ownsWindow) projected = contextWindows.project(projected, "remote");
 				contextWindows.recordBudget(
 					pi,
 					ctx,
@@ -1002,9 +1020,13 @@ async function handleContextInternal(
 					config.contextReminderThresholdPercent,
 				);
 				reportProjectionDiagnostics(contextWindows, config, ctx);
-				return projected.length === event.messages.length && projected.every((message, index) => message === event.messages[index])
-					? undefined
-					: { messages: projected };
+				if (ownsWindow) {
+					return projected.length === event.messages.length && projected.every((message, index) => message === event.messages[index])
+						? undefined
+						: { messages: projected };
+				}
+				localMessages = projected;
+				remoteReplayProjection = true;
 			} catch (error) {
 				notifyRemoteContextFailure(ctx, "malformed-window-state");
 				reportPiContextHookFailure(ctx, "malformed-window-state");
@@ -1013,11 +1035,10 @@ async function handleContextInternal(
 			}
 		}
 
-		// An eligible Codex Remote session is never allowed to fall through to the
-		// older compaction-replay path. An explicit host exclusion is the one
-		// intentional downgrade: strip internal markers and let the ordinary request
-		// proceed without Remote Context affinity.
-		if (isCodexContextModel(contextModel, config)) {
+		// An unavailable covered runtime must not silently become an ordinary
+		// replay consumer. Explicit host exclusion remains the one intentional
+		// downgrade; active Remote can replay a newer inherited checkpoint.
+		if (!remoteActive && isCodexContextModel(contextModel, config)) {
 			const registrationState = getContextToolRegistrationState();
 			if (isExcludedGatewayContext(contextModel, config, registrationState)) {
 				const visibleMessages = contextWindows.project(event.messages, "off");
@@ -1038,39 +1059,58 @@ async function handleContextInternal(
 				: { messages: visibleMessages };
 		}
 
-		try {
-			const projected = contextWindows.project(event.messages, "local");
-			localMessages = projected;
-			if (contextWindows.currentIdentity()) {
-				// This boundary owns earlier history, including any older Remote V2
-				// checkpoint. A local request must not replay that history back in.
-				return projected.length === event.messages.length && projected.every((message, index) => message === event.messages[index])
-					? undefined
-					: { messages: projected };
+		if (!remoteActive) {
+			try {
+				const projected = contextWindows.project(event.messages, "local");
+				localMessages = projected;
+				if (contextWindows.hasEffectiveWindow()) {
+					// This boundary owns earlier history, including any older Remote V2
+					// checkpoint. A local request must not replay that history back in.
+					return projected.length === event.messages.length && projected.every((message, index) => message === event.messages[index])
+						? undefined
+						: { messages: projected };
+				}
+			} catch (error) {
+				notifyRemoteContextFailure(ctx, "malformed-window-state");
+				reportPiContextHookFailure(ctx, error instanceof Error ? error.message : String(error));
+				ctx.abort();
+				return undefined;
 			}
-		} catch (error) {
-			notifyRemoteContextFailure(ctx, "malformed-window-state");
-			reportPiContextHookFailure(ctx, error instanceof Error ? error.message : String(error));
-			ctx.abort();
-			return undefined;
 		}
 	}
 
-	// With no Remote boundary, the ordinary checkpoint replay path remains the
-	// owner. Inactive covered Codex consumers were handled separately above.
+	// Without an effective Remote boundary, the latest checkpoint owns replay.
+	// This also covers a newer checkpoint superseding a historical window.
 	const visibleMessages = localMessages ?? contextWindows.project(event.messages, "off");
-	const visibleResult = visibleMessages.length === event.messages.length && visibleMessages.every((message, index) => message === event.messages[index])
-		? undefined : { messages: visibleMessages };
+	const finishProjection = (messages: AgentMessage[]) => {
+		// Compare canonical retained copies before Remote encrypted-output encoding.
+		const projected = remoteReplayProjection ? contextWindows.project(messages, "remote") : messages;
+		return projected.length === event.messages.length && projected.every((message, index) => message === event.messages[index])
+			? undefined : { messages: projected };
+	};
 	const replayEvent = visibleMessages === event.messages ? event : { ...event, messages: visibleMessages };
+	const branchEntries = ctx.sessionManager.getBranch();
+	const inherited = config.contextManagement === "remote" && contextWindows.hasSupersededWindow()
+		? resolveLatestNativeCompactionEntry(branchEntries) : undefined;
+	const inheritedCheckpoint = inherited?.ok ? inherited.entry : undefined;
 	const resolution = await resolveNativeCompactionEnvironment(ctx, {
 		enabled: config.enabled,
-		responsesApis: config.responsesApis,
+		// Disabling checkpoint generation cannot turn an inherited opaque
+		// checkpoint into a usable text summary. Replay checks transport support.
+		responsesApis: inheritedCheckpoint ? undefined : config.responsesApis,
 		codexGatewayModels: compactGatewayModels(resolved),
 	});
-	if (!resolution.ok) return visibleResult;
-	const branchEntries = ctx.sessionManager.getBranch();
+	if (!resolution.ok) {
+		return inheritedCheckpoint
+			? rejectInheritedCheckpointReplay(ctx, config, inheritedCheckpoint.id, resolution.reason)
+			: finishProjection(visibleMessages);
+	}
 	const latest = resolveLatestNativeCompactionEntry(branchEntries, { baseUrl: resolution.runtime.baseUrl });
-	if (!latest.ok) return visibleResult;
+	if (!latest.ok) {
+		return inheritedCheckpoint
+			? rejectInheritedCheckpointReplay(ctx, config, inheritedCheckpoint.id, latest.reason)
+			: finishProjection(visibleMessages);
+	}
 	const result = removeNativeCompactionRetainedMessages({
 		messages: replayEvent.messages,
 		branchEntries,
@@ -1084,7 +1124,7 @@ async function handleContextInternal(
 		ctx.abort();
 		return undefined;
 	}
-	return result.messages === replayEvent.messages ? visibleResult : { messages: result.messages };
+	return finishProjection(result.messages);
 }
 
 /**
@@ -1137,16 +1177,20 @@ async function handleBeforeProviderRequest(
 			return undefined;
 		}
 	}
-	if (config.contextManagement === "remote" && await remoteContextActive(ctx, config, contextModel)) {
+	const remoteActive = config.contextManagement === "remote" && await remoteContextActive(ctx, config, contextModel);
+	let remotePayload: unknown;
+	if (remoteActive) {
 		try {
-			return contextWindows.rewritePayload(event.payload, ctx);
+			remotePayload = contextWindows.rewritePayload(event.payload, ctx);
+			if (contextWindows.hasEffectiveWindow() || !contextWindows.currentIdentity()) return remotePayload;
+			event = { ...event, payload: remotePayload };
 		} catch {
 			notifyRemoteContextFailure(ctx, "malformed-request-state");
 			ctx.abort();
 			return undefined;
 		}
 	}
-	if (isCodexContextModel(contextModel, config)) {
+	if (!remoteActive && isCodexContextModel(contextModel, config)) {
 		const registrationState = getContextToolRegistrationState();
 		// A readable empty registry is an intentional host exclusion. Do not
 		// rewrite gateway identity or abort an ordinary child-session request.
@@ -1165,18 +1209,23 @@ async function handleBeforeProviderRequest(
 
 	// Do not reintroduce a pre-window opaque checkpoint after local projection.
 	// Request affinity/encrypted-output rewriting is reserved for active Remote.
-	if (config.contextManagement === "remote" && contextWindows.currentIdentity()) return undefined;
+	if (config.contextManagement === "remote" && contextWindows.hasEffectiveWindow()) return undefined;
 
+	const branchEntries = ctx.sessionManager.getBranch();
+	const inherited = config.contextManagement === "remote" && contextWindows.hasSupersededWindow()
+		? resolveLatestNativeCompactionEntry(branchEntries) : undefined;
+	const inheritedCheckpoint = inherited?.ok ? inherited.entry : undefined;
 	const resolution = await resolveNativeCompactionEnvironment(
 		ctx,
 		{
 			enabled: config.enabled,
-			responsesApis: config.responsesApis,
+			responsesApis: inheritedCheckpoint ? undefined : config.responsesApis,
 			codexGatewayModels: compactGatewayModels(resolved),
 		},
 		event.payload,
 	);
 	if (resolution.ok === false) {
+		if (inheritedCheckpoint) return rejectInheritedCheckpointReplay(ctx, config, inheritedCheckpoint.id, resolution.reason);
 		writeDebugArtifact(
 			"provider-request",
 			{
@@ -1193,7 +1242,7 @@ async function handleBeforeProviderRequest(
 			config,
 			ctx,
 		);
-		return undefined;
+		return remotePayload;
 	}
 
 	const runtime = resolution.runtime;
@@ -1221,11 +1270,11 @@ async function handleBeforeProviderRequest(
 		},
 	);
 
-	const branchEntries = ctx.sessionManager.getBranch();
 	const latestNativeCompaction = resolveLatestNativeCompactionEntry(branchEntries, {
 		baseUrl: runtime.baseUrl,
 	});
 	if (!latestNativeCompaction.ok) {
+		if (inheritedCheckpoint) return rejectInheritedCheckpointReplay(ctx, config, inheritedCheckpoint.id, latestNativeCompaction.reason);
 		writeDebugArtifact(
 			"provider-request",
 			{
@@ -1243,7 +1292,7 @@ async function handleBeforeProviderRequest(
 			config,
 			ctx,
 		);
-		return undefined;
+		return remotePayload;
 	}
 
 	const latestNativeCompactionEntry = latestNativeCompaction.entry;
@@ -1471,7 +1520,7 @@ export default function registerCompactionExtension(
 		return handleContext(event, ctx, pi, dependencies.loadConfig, contextWindows, remoteContextActive, getContextToolRegistrationState);
 	});
 	pi.on("session_before_compact", (event, ctx) => handleSessionBeforeCompact(event, ctx, dependencies, remoteContextActive, getContextToolRegistrationState));
-	pi.on("session_compact", (event, _ctx) => contextWindows.recordCompaction(event.compactionEntry.details));
+	pi.on("session_compact", (_event, ctx) => contextWindows.synchronize(ctx));
 	pi.on("session_compact_failed", async (event, ctx) => {
 		if (event.reason === "manual" && !manualCompact.isMaintenance) await manualCompact.compactFailed(ctx);
 	});
