@@ -21,6 +21,17 @@ function hugeMessage(chars: number) {
 	};
 }
 
+function hugeToolResult(chars: number) {
+	return {
+		role: "toolResult",
+		toolCallId: "call-1",
+		toolName: "read",
+		isError: false,
+		content: [{ type: "text", text: "x".repeat(chars) }],
+		timestamp: 1,
+	};
+}
+
 function createCtx(args: {
 	currentModel?: FakeModel;
 	registryModels?: FakeModel[];
@@ -373,7 +384,7 @@ describe("summarization size guard", () => {
 
 		const size = estimateSummarizationRequest(preparation as never, { contextWindow: 272_000, maxTokens: 32_768 });
 
-		// 40k + 4k characters plus a 1k summary, measured with pi's chars/4 estimator.
+		// The serialized history, previous summary, and fixed framing are measured with Pi's chars/4 heuristic.
 		expect(size.inputTokens).toBeGreaterThanOrEqual(Math.ceil(45_000 / 4));
 		// pi caps the summary at min(floor(0.8 * reserveTokens), model.maxTokens).
 		expect(size.outputTokens).toBe(13_107);
@@ -385,6 +396,179 @@ describe("summarization size guard", () => {
 		expect(fitsSummarizationRequest(size, { contextWindow: 1_000 })).toBe(false);
 		// An unknown window is never guessed at.
 		expect(fitsSummarizationRequest(size, {})).toBe(true);
+	});
+
+	test("matches Pi's serialized tool-result prompt instead of raw tool content", async () => {
+		const { estimateSummarizationRequest, fitsSummarizationRequest, runNativeFallbackCompaction } = await loadNativeFallbackModule();
+		const preparation = {
+			...createEvent().preparation,
+			messagesToSummarize: [hugeToolResult(1_200_000)],
+		};
+		const size = estimateSummarizationRequest(preparation as never, { contextWindow: 272_000, maxTokens: 32_768 });
+
+		// Pi truncates the tool result to 2,000 characters before serializeConversation().
+		expect(size.inputTokens).toBeLessThan(2_000);
+		expect(size.outputTokens).toBe(13_107);
+		expect(fitsSummarizationRequest(size, { contextWindow: 272_000 })).toBe(true);
+
+		let authCalls = 0;
+		let compactCalls = 0;
+		const fallbackModel = {
+			provider: "uwoacrimson",
+			id: "gpt-5.6-luna",
+			contextWindow: 272_000,
+			maxTokens: 32_768,
+		};
+		const ctx = createCtx({
+			currentModel: { provider: "uwoacrimson", id: "deepseek-v4-flash-0731", contextWindow: 400_000 },
+			registryModels: [fallbackModel],
+		});
+		(ctx.modelRegistry as never as { getApiKeyAndHeaders: unknown }).getApiKeyAndHeaders = async () => {
+			authCalls += 1;
+			return { ok: true, apiKey: "sk-fallback", headers: {}, env: {} };
+		};
+		const result = await runNativeFallbackCompaction({
+			ctx,
+			event: { ...createEvent(), preparation } as never,
+			config: createConfig(withFallback({ model: "uwoacrimson/gpt-5.6-luna" })),
+			modelSpec: "uwoacrimson/gpt-5.6-luna",
+			compactFn: (async () => {
+				compactCalls += 1;
+				return { summary: "ok", firstKeptEntryId: "entry-keep", tokensBefore: 1, details: {} };
+			}) as never,
+		});
+
+		expect(result.ok).toBe(true);
+		expect(authCalls).toBe(1);
+		expect(compactCalls).toBe(1);
+	});
+
+	test("uses effective reserve and checks split-turn requests independently", async () => {
+		const { estimateSummarizationRequest } = await loadNativeFallbackModule();
+		const preparation = {
+			...createEvent().preparation,
+			isSplitTurn: true,
+			settings: { enabled: true, reserveTokens: 10_000, keepRecentTokens: 20_000 },
+			messagesToSummarize: [hugeMessage(400_000)],
+			turnPrefixMessages: [hugeMessage(400_000)],
+			previousSummary: "p".repeat(4_000),
+		};
+		const size = estimateSummarizationRequest(
+			preparation as never,
+			{ contextWindow: 120_000, maxTokens: 32_768 },
+			"c".repeat(4_000),
+		);
+
+		// History uses floor(0.8 * effective reserve), and the two serialized
+		// conversations are separate requests rather than one combined input.
+		expect(size.outputTokens).toBe(8_000);
+		expect(size.totalTokens).toBe(size.inputTokens + 8_000);
+		expect(size.totalTokens).toBeLessThan(120_000);
+
+		const prefixOnly = estimateSummarizationRequest(
+			{
+				...preparation,
+				messagesToSummarize: [],
+				previousSummary: undefined,
+			} as never,
+			{ contextWindow: 120_000, maxTokens: 32_768 },
+			"ignored for the turn-prefix request",
+		);
+		expect(prefixOnly.outputTokens).toBe(5_000);
+		expect(prefixOnly.inputTokens).toBeLessThan(size.inputTokens);
+	});
+
+	test("checks an oversized split-turn prefix even when the history request fits", async () => {
+		const { estimateSummarizationRequest, runNativeFallbackCompaction } = await loadNativeFallbackModule();
+		const preparation = {
+			...createEvent().preparation,
+			isSplitTurn: true,
+			settings: { enabled: true, reserveTokens: 10_000, keepRecentTokens: 20_000 },
+			messagesToSummarize: [hugeMessage(400)],
+			turnPrefixMessages: [hugeMessage(500_000)],
+			previousSummary: undefined,
+		};
+		const model = { provider: "uwoacrimson", id: "gpt-5.6-luna", contextWindow: 120_000, maxTokens: 32_768 };
+		const historySize = estimateSummarizationRequest(
+			{ ...preparation, isSplitTurn: false, turnPrefixMessages: [] } as never,
+			model,
+			"focus on auth work",
+		);
+		const prefixSize = estimateSummarizationRequest(
+			{ ...preparation, messagesToSummarize: [], previousSummary: undefined } as never,
+			model,
+		);
+		expect(historySize.totalTokens).toBeLessThan(model.contextWindow);
+		expect(prefixSize.totalTokens).toBeGreaterThan(model.contextWindow);
+
+		let authCalls = 0;
+		let compactCalls = 0;
+		const ctx = createCtx({
+			currentModel: { provider: "uwoacrimson", id: "deepseek-v4-flash-0731", contextWindow: 400_000 },
+			registryModels: [model],
+		});
+		(ctx.modelRegistry as never as { getApiKeyAndHeaders: unknown }).getApiKeyAndHeaders = async () => {
+			authCalls += 1;
+			return { ok: true, apiKey: "sk-fallback", headers: {}, env: {} };
+		};
+		const result = await runNativeFallbackCompaction({
+			ctx,
+			event: { ...createEvent(), preparation } as never,
+			config: createConfig(withFallback({ model: "uwoacrimson/gpt-5.6-luna" })),
+			modelSpec: "uwoacrimson/gpt-5.6-luna",
+			compactFn: (async () => {
+				compactCalls += 1;
+				return { summary: "must not run", firstKeptEntryId: "entry-keep", tokensBefore: 1, details: {} };
+			}) as never,
+		});
+
+		expect(result.ok).toBe(false);
+		if (result.ok) throw new Error("unreachable");
+		expect(result.reason).toBe("model-window-too-small");
+		expect(result.contextWindow).toBe(model.contextWindow);
+		expect(result.estimatedTokens).toBe(prefixSize.totalTokens);
+		expect(compactCalls).toBe(0);
+		expect(authCalls).toBe(0);
+	});
+
+	test("counts previous summary and custom instructions in the history request", async () => {
+		const { estimateSummarizationRequest } = await loadNativeFallbackModule();
+		const base = {
+			...createEvent().preparation,
+			messagesToSummarize: [hugeMessage(400)],
+			previousSummary: undefined,
+		};
+		const withPromptExtras = estimateSummarizationRequest(
+			{ ...base, previousSummary: "p".repeat(4_000) } as never,
+			{ maxTokens: 32_768 },
+			"c".repeat(4_000),
+		);
+		const withoutPromptExtras = estimateSummarizationRequest(base as never, { maxTokens: 32_768 });
+
+		expect(withPromptExtras.inputTokens - withoutPromptExtras.inputTokens).toBe(2_000);
+
+		const splitPrefix = estimateSummarizationRequest(
+			{
+				...base,
+				isSplitTurn: true,
+				messagesToSummarize: [],
+				turnPrefixMessages: [hugeMessage(400)],
+				previousSummary: "p".repeat(4_000),
+			} as never,
+			{ maxTokens: 32_768 },
+			"c".repeat(4_000),
+		);
+		const splitPrefixWithoutExtras = estimateSummarizationRequest(
+			{
+				...base,
+				isSplitTurn: true,
+				messagesToSummarize: [],
+				turnPrefixMessages: [hugeMessage(400)],
+				previousSummary: undefined,
+			} as never,
+			{ maxTokens: 32_768 },
+		);
+		expect(splitPrefix.inputTokens).toBe(splitPrefixWithoutExtras.inputTokens);
 	});
 
 	test("model-window-too-small is reported before the registry or the model is touched", async () => {

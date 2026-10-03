@@ -313,6 +313,7 @@ function createContext(args: {
 	registryModels?: TestModel[];
 	resolveAuth?: (model: TestModel) => Promise<Record<string, unknown>> | Record<string, unknown>;
 	onAbort?: () => void;
+	notifications?: Array<{ message: string; level: string }>;
 } = {}) {
 	const branchEntries = args.branchEntries ?? [];
 	const model = args.model ?? defaultModel;
@@ -323,7 +324,10 @@ function createContext(args: {
 	});
 	return {
 		cwd: "/tmp/pi-openai-toolkit-validation",
-		hasUI: false,
+		hasUI: Boolean(args.notifications),
+		ui: {
+			notify: (message: string, level: string) => args.notifications?.push({ message, level }),
+		},
 		abort: () => args.onAbort?.(),
 		getSystemPrompt: () => args.systemPrompt ?? "Current instructions v1",
 		model,
@@ -533,6 +537,114 @@ test("remote compaction serializes the ordered projection instead of raw prepara
 	expect(JSON.stringify(request.input)).not.toContain("FILTER-ME-STATE");
 	expect(JSON.stringify(request.input)).not.toContain("FILTER-ME-EXIT");
 	expect(JSON.stringify(request.input)).toContain("KEEP-ME-WAKE");
+});
+
+test("suppresses the expected active-consumer unsupported-api warning and keeps native fallback selection", async () => {
+	const notifications: Array<{ message: string; level: string }> = [];
+	const consumer: TestModel = {
+		...defaultModel,
+		provider: "anthropic",
+		api: "anthropic-messages",
+		id: "claude-fable-5",
+		baseUrl: "https://api.anthropic.com/v1",
+	};
+	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
+		config: {
+			remoteCompactModel: "openai/gpt-5.6-luna",
+			nativeFallback: { enabled: true, model: "google/gemini-2.5-flash", thinkingLevel: "off" },
+		},
+		nativeFallbackResult: { ok: false, reason: "no-model-configured" },
+	});
+	const result = await sessionBeforeCompact({
+		reason: "threshold",
+		signal: new AbortController().signal,
+		customInstructions: undefined,
+		branchEntries: [],
+		preparation: {
+			firstKeptEntryId: "unsupported-consumer-entry",
+			tokensBefore: 512,
+			previousSummary: undefined,
+			messagesToSummarize: [],
+			turnPrefixMessages: [],
+		},
+	} as never, createContext({ model: consumer, notifications }));
+
+	expect(result).toBeUndefined();
+	expect(compactCalls).toHaveLength(0);
+	expect(fallbackCalls).toHaveLength(1);
+	expect(fallbackCalls[0]?.modelSpec).toBe("google/gemini-2.5-flash");
+	expect(notifications).toEqual([]);
+});
+
+test("retains the actionable warning when an explicit producer override is reached but unavailable", async () => {
+	const notifications: Array<{ message: string; level: string }> = [];
+	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
+		config: {
+			remoteCompactModel: "openai/missing-producer",
+			nativeFallback: { enabled: true, model: "google/gemini-2.5-flash", thinkingLevel: "off" },
+		},
+		nativeFallbackResult: { ok: false, reason: "no-model-configured" },
+	});
+	const result = await sessionBeforeCompact({
+		reason: "threshold",
+		signal: new AbortController().signal,
+		customInstructions: undefined,
+		branchEntries: [],
+		preparation: {
+			firstKeptEntryId: "unavailable-producer-entry",
+			tokensBefore: 512,
+			previousSummary: undefined,
+			messagesToSummarize: [],
+			turnPrefixMessages: [],
+		},
+	} as never, createContext({ notifications }));
+
+	expect(result).toBeUndefined();
+	expect(compactCalls).toHaveLength(0);
+	expect(fallbackCalls).toHaveLength(1);
+	expect(fallbackCalls[0]?.modelSpec).toBe("google/gemini-2.5-flash");
+	expect(notifications.some(({ level, message }) =>
+		level === "warning" && message.includes('remote compaction model "openai/missing-producer" unusable'),
+	)).toBe(true);
+});
+
+test("retains the producer warning when a resolved producer uses an unsupported API", async () => {
+	const notifications: Array<{ message: string; level: string }> = [];
+	const producer: TestModel = {
+		...defaultModel,
+		provider: "anthropic",
+		api: "anthropic-messages",
+		id: "claude-fable-5",
+		baseUrl: "https://api.anthropic.com/v1",
+	};
+	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
+		config: {
+			remoteCompactModel: "anthropic/claude-fable-5",
+			nativeFallback: { enabled: true, model: "google/gemini-2.5-flash", thinkingLevel: "off" },
+		},
+		nativeFallbackResult: { ok: false, reason: "no-model-configured" },
+	});
+	const result = await sessionBeforeCompact({
+		reason: "threshold",
+		signal: new AbortController().signal,
+		customInstructions: undefined,
+		branchEntries: [],
+		preparation: {
+			firstKeptEntryId: "unsupported-producer-entry",
+			tokensBefore: 512,
+			previousSummary: undefined,
+			messagesToSummarize: [],
+			turnPrefixMessages: [],
+		},
+	} as never, createContext({ registryModels: [producer], notifications }));
+
+	expect(result).toBeUndefined();
+	expect(compactCalls).toHaveLength(0);
+	expect(fallbackCalls).toHaveLength(1);
+	expect(fallbackCalls[0]?.modelSpec).toBe("google/gemini-2.5-flash");
+	expect(notifications.some(({ level, message }) =>
+		level === "warning" && message.includes('remote compaction model "anthropic/claude-fable-5" unusable (unsupported-api)'),
+	)).toBe(true);
 });
 
 test("unavailable Context Management uses the configured remote compactor", async () => {

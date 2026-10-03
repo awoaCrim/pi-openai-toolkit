@@ -1,6 +1,6 @@
 {
   "name": "pi-openai-toolkit",
-  "version": "0.20.5",
+  "version": "0.20.6",
   "private": false,
   "type": "module",
   "engines": {

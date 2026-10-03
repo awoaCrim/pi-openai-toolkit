@@ -882,7 +882,9 @@ async function handleSessionBeforeCompact(
 			config,
 			ctx,
 		);
-		if (config.remoteCompactModel) {
+		const expectedConsumerCapabilityMiss =
+			resolution.reason === "unsupported-api" && resolution.modelSpec === undefined;
+		if (config.remoteCompactModel && !expectedConsumerCapabilityMiss) {
 			notifyWarning(
 				ctx,
 				`remote compaction model "${config.remoteCompactModel}" unusable (${resolution.reason}); using the native fallback chain`,

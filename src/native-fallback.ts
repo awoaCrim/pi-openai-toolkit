@@ -1,7 +1,8 @@
 import {
 	compact,
+	convertToLlm,
 	DEFAULT_COMPACTION_SETTINGS,
-	estimateTokens,
+	serializeConversation,
 	type CompactionResult,
 	type ExtensionContext,
 	type SessionBeforeCompactEvent,
@@ -59,16 +60,10 @@ function toErrorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-/**
- * Output budget Pi gives the summary itself: `generateSummary` caps `maxTokens` at
- * `min(floor(0.8 * reserveTokens), model.maxTokens)`.
- */
-const SUMMARIZATION_OUTPUT_RESERVE_TOKENS = Math.floor(
-	DEFAULT_COMPACTION_SETTINGS.reserveTokens * 0.8,
-);
-
-/** Summarization instructions plus the `<conversation>` framing around the transcript. */
+/** Summarization instructions plus the framing around the serialized transcript. */
 const SUMMARIZATION_TEMPLATE_TOKENS = 1024;
+const HISTORY_OUTPUT_RESERVE_RATIO = 0.8;
+const TURN_PREFIX_OUTPUT_RESERVE_RATIO = 0.5;
 
 export type SummarizationRequestSize = {
 	inputTokens: number;
@@ -76,33 +71,93 @@ export type SummarizationRequestSize = {
 	totalTokens: number;
 };
 
+function estimateTextTokens(text: string | undefined): number {
+	return text ? Math.ceil(String(text).length / 4) : 0;
+}
+
+function estimateSerializedConversationTokens(
+	messages: SessionBeforeCompactEvent["preparation"]["messagesToSummarize"],
+): number {
+	const serialized = serializeConversation(convertToLlm(messages));
+	return estimateTextTokens(serialized);
+}
+
+function getEffectiveReserveTokens(preparation: SessionBeforeCompactEvent["preparation"]): number {
+	const reserveTokens = preparation.settings?.reserveTokens;
+	return typeof reserveTokens === "number" && Number.isFinite(reserveTokens) && reserveTokens >= 0
+		? reserveTokens
+		: DEFAULT_COMPACTION_SETTINGS.reserveTokens;
+}
+
+function getOutputReserveTokens(
+	reserveTokens: number,
+	model: { maxTokens?: number },
+	ratio: number,
+): number {
+	const outputTokens = Math.floor(ratio * reserveTokens);
+	return typeof model.maxTokens === "number" && model.maxTokens > 0
+		? Math.min(outputTokens, model.maxTokens)
+		: outputTokens;
+}
+
+function estimateSummaryRequest(
+	messages: SessionBeforeCompactEvent["preparation"]["messagesToSummarize"],
+	outputTokens: number,
+	previousSummary?: string,
+	customInstructions?: string,
+): SummarizationRequestSize {
+	const inputTokens =
+		SUMMARIZATION_TEMPLATE_TOKENS
+		+ estimateSerializedConversationTokens(messages)
+		+ estimateTextTokens(previousSummary)
+		+ estimateTextTokens(customInstructions);
+	return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens };
+}
+
 /**
- * Size of the request Pi's `compact()` is about to send, measured the same way Pi
- * measures context (the exported `estimateTokens`, a conservative chars/4).
+ * Size of the individual request(s) Pi's `compact()` is about to send.
  *
- * A session driven by a wide-window model (400k) produces a preparation that a narrower
- * summary model (272k) cannot accept at all: the provider terminates the stream and the
- * first manual `/compact` fails. Callers must not attempt that request; the estimate is
- * deliberately an under-declaration of certainty, so a missing `contextWindow` skips the
- * check instead of guessing.
+ * Pi first converts messages with `convertToLlm()` and then applies
+ * `serializeConversation()`, which truncates tool results before they enter the
+ * summarization prompt. Split-turn compaction sends history and turn-prefix
+ * summaries as separate requests, so this returns the largest individual request
+ * rather than adding their inputs together. The fixed allowance remains
+ * deliberately conservative for Pi's system prompt, tags, and instructions.
+ *
+ * A session driven by a wide-window model (400k) can produce a preparation that a
+ * narrower summary model (272k) cannot accept. Callers must not attempt that request;
+ * a missing `contextWindow` skips the check instead of guessing.
  */
 export function estimateSummarizationRequest(
 	preparation: SessionBeforeCompactEvent["preparation"],
 	model: { contextWindow?: number; maxTokens?: number },
+	customInstructions?: string,
 ): SummarizationRequestSize {
-	const conversation = [
-		...(preparation.messagesToSummarize ?? []),
-		...(preparation.turnPrefixMessages ?? []),
-	];
-	let inputTokens = SUMMARIZATION_TEMPLATE_TOKENS;
-	for (const message of conversation) inputTokens += estimateTokens(message as never);
-	if (preparation.previousSummary) {
-		inputTokens += Math.ceil(String(preparation.previousSummary).length / 4);
+	const reserveTokens = getEffectiveReserveTokens(preparation);
+	const historyMessages = preparation.messagesToSummarize ?? [];
+	const turnPrefixMessages = preparation.turnPrefixMessages ?? [];
+	const historyOutputTokens = getOutputReserveTokens(reserveTokens, model, HISTORY_OUTPUT_RESERVE_RATIO);
+	const historyRequest = estimateSummaryRequest(
+		historyMessages,
+		historyOutputTokens,
+		preparation.previousSummary,
+		customInstructions,
+	);
+
+	if (!preparation.isSplitTurn || turnPrefixMessages.length === 0) {
+		return historyRequest;
 	}
-	const outputTokens = model.maxTokens && model.maxTokens > 0
-		? Math.min(SUMMARIZATION_OUTPUT_RESERVE_TOKENS, model.maxTokens)
-		: SUMMARIZATION_OUTPUT_RESERVE_TOKENS;
-	return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens };
+
+	const requests = [
+		...(historyMessages.length > 0 ? [historyRequest] : []),
+		estimateSummaryRequest(
+			turnPrefixMessages,
+			getOutputReserveTokens(reserveTokens, model, TURN_PREFIX_OUTPUT_RESERVE_RATIO),
+		),
+	];
+	return requests.reduce((largest, request) =>
+		request.totalTokens > largest.totalTokens ? request : largest,
+	);
 }
 
 /** Whether the summary model can accept this request at all; unknown windows always pass. */
@@ -163,7 +218,11 @@ export async function runNativeFallbackCompaction(args: {
 		return { ok: false, reason: "same-as-current-model", modelSpec: spec };
 	}
 
-	const size = estimateSummarizationRequest(event.preparation, model as { contextWindow?: number; maxTokens?: number });
+	const size = estimateSummarizationRequest(
+		event.preparation,
+		model as { contextWindow?: number; maxTokens?: number },
+		event.customInstructions,
+	);
 	if (!fitsSummarizationRequest(size, model as { contextWindow?: number })) {
 		return {
 			ok: false,
