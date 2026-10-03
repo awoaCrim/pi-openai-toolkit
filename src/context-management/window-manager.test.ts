@@ -777,52 +777,88 @@ test("the manager remembers the head that a boundary compaction removed", () => 
 	expect(compacted).toContain(currentTurn);
 });
 
-function bulkReport(overrides: Partial<WindowBulkReport> = {}): WindowBulkReport {
-	return {
-		windowId: "w9",
-		unmanagedTokens: 400_000,
-		managedTokens: 20_000,
-		targetContextWindow: 272_000,
-		expanded: true,
-		overBudget: true,
-		...overrides,
-	};
-}
-
-test("a bulk cliff is surfaced once per window and model", () => {
-	const head = headMessage(["read"]);
-	const first = projectedWindowMarker("w1", 0);
-	const second = projectedWindowMarker("w2", 1);
-	const turn = { role: "user", content: "work", timestamp: 2 } as unknown as AgentMessage;
+test("local projection trims retired windows, keeps the current tool head and leaves encrypted output unencoded", () => {
 	const manager = new CodexContextWindowManager();
-	manager.project([head, first, turn, second, turn], "remote");
+	manager.restore([rolloverMarker("w2")], "session-1");
+	const identity = manager.currentIdentity();
+	const head = headMessage(["read", "notes"]);
+	const oldTurn = { role: "user", content: "retired history ".repeat(100_000), timestamp: 2 } as AgentMessage;
+	const currentTurn = { role: "user", content: "local turn", timestamp: 3 } as AgentMessage;
+	const toolResult = {
+		role: "toolResult", toolCallId: "notes-call", toolName: "notes",
+		content: [{ type: "text", text: "notes operation completed" }],
+		details: { codexHistoryNotes: { encrypted_output: "opaque-value" } },
+		isError: false, timestamp: 4,
+	} as AgentMessage;
+	const toolDelta = { role: "system", content: "", toolsRemoved: [{ name: "notes" }], timestamp: 5 } as unknown as AgentMessage;
+	const reminder = { ...projectedWindowMarker("w2", 1), details: {
+		protocol: 1, id: "reminder", sessionId: "session-1",
+		contextManagement: { protocol: 1, kind: "reminder", firstWindowId: "w1", currentWindowId: "w2", windowNumber: 1 },
+	} } as AgentMessage;
+	const messages = [head, projectedWindowMarker("w1", 0), oldTurn, projectedWindowMarker("w2", 1), currentTurn, toolResult, toolDelta, reminder];
+	const original = structuredClone(messages);
 
-	const report = bulkReport();
-	manager.noteWindowBulk(report, "uwoacrimson/gpt-5.6-luna");
+	const projected = manager.project(messages, "local");
 
-	expect(manager.takeBulkCliff("uwoacrimson/gpt-5.6-luna")).toBe(report);
-	expect(manager.takeBulkCliff("uwoacrimson/gpt-5.6-luna")).toBeUndefined();
-	// The same retirement seen by a different model is a different decision.
-	expect(manager.takeBulkCliff("uwoacrimson/deepseek-v4-flash-0731")).toBe(report);
-	expect(manager.takeBulkCliff("uwoacrimson/deepseek-v4-flash-0731")).toBeUndefined();
-
-	// A new window re-arms the notice, and a reset forgets it entirely.
-	manager.noteWindowBulk(bulkReport({ expanded: false }), "uwoacrimson/gpt-5.6-luna");
-	expect(manager.takeBulkCliff("uwoacrimson/gpt-5.6-luna")).toBeUndefined();
-	manager.project([head, second, turn], "remote");
-	manager.noteWindowBulk(report, "uwoacrimson/gpt-5.6-luna");
-	manager.reset();
-	expect(manager.takeBulkCliff("uwoacrimson/gpt-5.6-luna")).toBeUndefined();
+	expect(declaredToolNames(projected)).toEqual(["read"]);
+	expect(projected.slice(1)).toEqual([currentTurn, toolResult]);
+	expect(JSON.stringify(projected.map((message) => "content" in message ? message.content : undefined))).not.toContain("opaque-value");
+	expect(projected[2]).toBe(toolResult);
+	expect(manager.currentIdentity()).toEqual(identity);
+	expect(manager.hasPendingTrim()).toBe(true);
+	expect(messages).toEqual(original);
 });
 
-test("the notice survives a model that never opened the window lifecycle", () => {
-	// An uncovered model never initializes a window identity, and that is exactly the
-	// session the cliff exists for: it must still be surfaced, once per model.
-	const manager = new CodexContextWindowManager();
-	const report = bulkReport();
-	manager.noteWindowBulk(report, "uwoacrimson/Qwen3.8-Flash");
+test("local projection uses the persisted boundary, not a queued rollover, and keeps its guard", async () => {
+	const manager = new CodexContextWindowManager(async () => undefined);
+	const marker = windowMarker("w1");
+	const ctx = fakeContext([marker]);
+	const sent: Array<Record<string, unknown>> = [];
+	manager.synchronize(ctx);
+	await manager.startNewWindow(fakePi(sent), ctx, { triggerTurn: true, trimPreviousWindow: true });
+	const queued = { role: "custom", customType: CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, content: "queued", details: sent[0]!.details, display: true, timestamp: 1 } as AgentMessage;
+	// The runtime synchronizes from the branch before projection.
+	manager.synchronize(ctx);
+	const identity = manager.currentIdentity();
+	const turn = { role: "user", content: "still in persisted window", timestamp: 2 } as AgentMessage;
+	expect(manager.project([projectedWindowMarker("w1", 0), turn, queued], "local")).toEqual([turn]);
+	expect(manager.currentIdentity()).toEqual(identity);
+	expect(manager.hasPendingRollover(ctx)).toBe(true);
+	expect(await manager.startNewWindow(fakePi(sent), ctx, { triggerTurn: true, trimPreviousWindow: true })).toBe(false);
+	expect(sent).toHaveLength(1);
+});
 
-	expect(manager.takeBulkCliff("uwoacrimson/Qwen3.8-Flash")).toBe(report);
-	expect(manager.takeBulkCliff("uwoacrimson/Qwen3.8-Flash")).toBeUndefined();
-	expect(manager.takeBulkCliff("uwoacrimson/gpt-5.6-luna")).toBe(report);
+test("local projection without a persisted boundary only strips internal markers", () => {
+	const manager = new CodexContextWindowManager();
+	const head = headMessage(["read"]);
+	const turn = { role: "user", content: "keep", timestamp: 2 } as AgentMessage;
+	expect(manager.project([head, projectedWindowMarker("w1", 0), turn], "local")).toEqual([head, turn]);
+	expect(manager.currentIdentity()).toBeUndefined();
+});
+
+test("a missing local boundary fails closed without clearing the persisted identity or trim", () => {
+	const manager = new CodexContextWindowManager();
+	manager.restore([rolloverMarker("w2")], "session-1");
+	const identity = manager.currentIdentity();
+	expect(() => manager.project([{ role: "user", content: "retired", timestamp: 1 }], "local")).toThrow("boundary missing");
+	expect(manager.currentIdentity()).toEqual(identity);
+	expect(manager.hasPendingTrim()).toBe(true);
+});
+
+test("detached compaction needs a persisted boundary but no scheduled trim and does not consume a proposal", () => {
+	const manager = new CodexContextWindowManager();
+	const marker = windowMarker("w1");
+	manager.restore([marker], "session-1");
+	const identity = manager.currentIdentity();
+	const event = { branchEntries: [marker], preparation: { firstKeptEntryId: "other", tokensBefore: 400_000 } } as never;
+	const expected = { compaction: {
+		summary: CONTEXT_WINDOW_COMPACTION_SUMMARY, firstKeptEntryId: marker.id, tokensBefore: 0,
+		details: { protocol: 1, strategy: "codex-context-window", windowId: "w1" },
+	} };
+	expect(manager.hasPendingTrim()).toBe(false);
+	expect(manager.prepareDetachedCompaction(event)).toEqual(expected);
+	expect(manager.prepareDetachedCompaction(event)).toEqual(expected);
+	expect(manager.prepareCompaction(event)).toEqual({ cancel: true });
+	expect(manager.currentIdentity()).toEqual(identity);
+	expect(manager.prepareDetachedCompaction({ branchEntries: [], preparation: {} } as never)).toBeUndefined();
 });

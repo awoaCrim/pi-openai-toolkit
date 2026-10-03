@@ -54,9 +54,9 @@ Toolkit 只读取一个全局配置文件，即使扩展安装在项目内也一
 
 **远程窗口**需要原生 `openai-codex` 提供商的 `openai-codex-responses` API，或支持相应协议的 `openai-responses` 网关。网关必须在精确模型下设置 `compatibility.transport: "codex-gateway"`；这一设置不会让普通兼容端点自动获得该能力。
 
-将上例的 `mode` 改为 `remote-windows` 后，符合条件的会话会提供 `new_context`、`get_context_remaining`、`history` 和 `notes`。手动 `/compact [instructions]` 会发起检查点交接：先成功写入 notes，再切换窗口。不具备窗口能力的模型仍走压缩流程；窗口激活失败不会静默改用摘要。
+将上例的 `mode` 改为 `remote-windows` 后，符合条件的会话会提供 `new_context`、`get_context_remaining`、`history` 和 `notes`。手动 `/compact [instructions]` 会发起检查点交接：先成功写入 notes，再切换窗口。不具备窗口能力的模型只使用当前本地窗口投影：已经由 Remote Context 托管的旧窗口历史不会发送给该模型，也不会发送给配置的 compaction 模型。扩展会用一个不生成摘要的本地边界保留已持久化的 Remote Window / Context Session；切回支持窗口的模型时会复用同一个窗口，不会重复创建。旧配置中的 `leaveManagedMode` 仍会解析，但不再触发批量 close-out 压缩。
 
-远程窗口依赖 alpha 接口，上游可能随时调整。切换模型前也要留意旧窗口历史仍未清理的情况，详见[窗口生命周期](docs/internals.md#rollover-lifecycle)。
+远程窗口依赖 alpha 接口，上游可能随时调整。切换模型时远程窗口状态仍会持久化并可复用，详见[窗口生命周期](docs/internals.md#rollover-lifecycle)。
 
 ## 搜索、生图与工具审查
 

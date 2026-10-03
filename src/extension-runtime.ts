@@ -21,12 +21,6 @@ import { loadHistoryNotesThreadHint } from "./context-management/history-notes";
 import { CodexContextWindowManager } from "./context-management/window-manager";
 import { ManagedManualCompact } from "./context-management/manual-compact";
 import {
-	BULK_CLIFF_RATIO,
-	decideBulkCliffAction,
-	decideBulkCloseOut,
-	evaluateWindowBulk,
-} from "./context-management/window-bulk";
-import {
 	registerContextManagementTools,
 	type ContextToolRegistrationState,
 } from "./context-management/tools";
@@ -752,14 +746,22 @@ async function handleSessionBeforeCompact(
 		return { cancel: true };
 	}
 
-	// Remote Context management owns this eligible Codex session. It persists a
-	// no-summary boundary while active; an unavailable runtime uses the configured
-	// Remote V2 compactor instead of silently returning to Pi's active-model path.
+	// Capability changes do not retire the persisted Remote session. Resolve its
+	// branch boundary before deciding whether any compactor may see this input.
+	if (config.contextManagement === "remote") {
+		try {
+			dependencies.contextWindows.synchronize(ctx);
+		} catch {
+			notifyRemoteContextFailure(ctx, "malformed-window-state");
+			return { cancel: true };
+		}
+	}
+
+	// Active and inactive covered Codex consumers retain their existing routing.
 	const contextModel = await resolveContextCapabilityModel(ctx);
 	if (isCodexContextModel(contextModel, config)) {
 		if (await remoteContextActive(ctx, config, contextModel)) {
 			try {
-				dependencies.contextWindows.synchronize(ctx);
 				if (event.reason === "manual" && dependencies.manualCompact && !dependencies.manualCompact.isMaintenance) {
 					await dependencies.manualCompact.request(event, ctx, resolved);
 					return { cancel: true };
@@ -784,6 +786,18 @@ async function handleSessionBeforeCompact(
 			config,
 			registrationState,
 		);
+	}
+
+	if (config.contextManagement === "remote") {
+		try {
+			const detached = dependencies.contextWindows.prepareDetachedCompaction(event);
+			// A local consumer cannot summarize history owned by a Remote window,
+			// even through a configured Luna producer or Pi's default compactor.
+			if (detached) return detached;
+		} catch {
+			notifyRemoteContextFailure(ctx, "malformed-window-state");
+			return { cancel: true };
+		}
 	}
 
 	// Resolve producer protocol policy from this operation's document, not a later disk read.
@@ -941,81 +955,6 @@ async function handleSessionBeforeCompact(
 	return undefined;
 }
 
-/**
- * Surface (and optionally close) the gap between the durable transcript and the remote window.
- *
- * Remote context management retires previous windows in the request projection, so a covered
- * model never notices that the branch still carries every one of them. Switching to a model
- * without remote context - or resuming such a session - hands that whole pile to the provider
- * at once, and the first manual `/compact` then has to summarize it. Runs once per agent turn,
- * never per request, and only once per window and model so the notice cannot become a nag.
- */
-async function handleWindowBulk(
-	ctx: ExtensionContext,
-	contextWindows: CodexContextWindowManager,
-	loadConfig: typeof loadToolkitConfig,
-	trigger: "model-switch" | "turn-end",
-	resolved = contextOperation(loadConfig, ctx),
-	beginMaintenance?: () => () => void,
-): Promise<void> {
-	requireContextPolicy(resolved, ctx);
-	const compaction = resolved.config.compaction;
-	if (!compaction.enabled || compaction.contextManagement !== "remote") return;
-	if (!ctx.model) return;
-
-	const modelKey = `${ctx.model.provider}/${ctx.model.id}`;
-	const report = evaluateWindowBulk(ctx);
-	if (!report) return;
-	contextWindows.noteWindowBulk(report, modelKey);
-	const cliff = contextWindows.takeBulkCliff(modelKey);
-	if (!cliff) return;
-	const action = decideBulkCloseOut({
-		action: decideBulkCliffAction(cliff, compaction.leaveManagedMode),
-		mode: ctx.mode,
-		trigger,
-		hasPendingTrim: contextWindows.hasPendingTrim(),
-	});
-	if (action === "ignore") return;
-
-	writeDebugArtifact(
-		"compaction-event",
-		{
-			event: `window-bulk.${action}`,
-			trigger,
-			policy: compaction.leaveManagedMode,
-			model: modelKey,
-			unmanagedTokens: cliff.unmanagedTokens,
-			managedTokens: cliff.managedTokens,
-			targetContextWindow: cliff.targetContextWindow,
-			overBudget: cliff.overBudget,
-		},
-		compaction,
-		ctx,
-	);
-
-	const gap = `${cliff.unmanagedTokens.toLocaleString()} tokens of retired windows are still in this session's transcript, while remote context management has been sending ${cliff.managedTokens.toLocaleString()}`;
-	if (action === "warn") {
-		notifyWarning(
-			ctx,
-			`${gap} to ${modelKey}${cliff.overBudget ? `, past ${Math.round(BULK_CLIFF_RATIO * 100)}% of its window` : ""}. Checkpoint with notes and run /compact (or new_context) before continuing on a model without remote context, or set compaction.leaveManagedMode="compact" to do it automatically.`,
-		);
-		return;
-	}
-
-	notifyWarning(ctx, `${gap} to ${modelKey}, past ${Math.round(BULK_CLIFF_RATIO * 100)}% of its window; compacting the retired windows first.`);
-	if (typeof ctx.compact !== "function") return;
-	const done = beginMaintenance?.();
-	try {
-		ctx.compact({
-			onComplete: () => done?.(),
-			onError: (error: Error) => {
-				done?.();
-				notifyWarning(ctx, `automatic boundary compaction failed: ${error.message}`);
-			},
-		});
-	} catch (error) { done?.(); throw error; }
-}
-
 async function handleContextInternal(
 	event: ContextWithSystemEvent,
 	ctx: ExtensionContext,
@@ -1035,6 +974,7 @@ async function handleContextInternal(
 			: { messages: visibleMessages };
 	}
 
+	let localMessages: AgentMessage[] | undefined;
 	if (config.contextManagement === "remote") {
 		const contextModel = await resolveContextCapabilityModel(ctx);
 		try {
@@ -1095,22 +1035,40 @@ async function handleContextInternal(
 				? undefined
 				: { messages: visibleMessages };
 		}
+
+		try {
+			const projected = contextWindows.project(event.messages, "local");
+			localMessages = projected;
+			if (contextWindows.currentIdentity()) {
+				// This boundary owns earlier history, including any older Remote V2
+				// checkpoint. A local request must not replay that history back in.
+				return projected.length === event.messages.length && projected.every((message, index) => message === event.messages[index])
+					? undefined
+					: { messages: projected };
+			}
+		} catch (error) {
+			notifyRemoteContextFailure(ctx, "malformed-window-state");
+			reportPiContextHookFailure(ctx, error instanceof Error ? error.message : String(error));
+			ctx.abort();
+			return undefined;
+		}
 	}
 
-	// Inactive/ineligible Remote mode must not expose internal window markers to a
-	// gateway or another provider. The existing compaction replay path remains the
-	// owner for this safe fallback.
-	const visibleMessages = contextWindows.project(event.messages, "off");
+	// With no Remote boundary, the ordinary checkpoint replay path remains the
+	// owner. Inactive covered Codex consumers were handled separately above.
+	const visibleMessages = localMessages ?? contextWindows.project(event.messages, "off");
+	const visibleResult = visibleMessages.length === event.messages.length && visibleMessages.every((message, index) => message === event.messages[index])
+		? undefined : { messages: visibleMessages };
 	const replayEvent = visibleMessages === event.messages ? event : { ...event, messages: visibleMessages };
 	const resolution = await resolveNativeCompactionEnvironment(ctx, {
 		enabled: config.enabled,
 		responsesApis: config.responsesApis,
 		codexGatewayModels: compactGatewayModels(resolved),
 	});
-	if (!resolution.ok) return undefined;
+	if (!resolution.ok) return visibleResult;
 	const branchEntries = ctx.sessionManager.getBranch();
 	const latest = resolveLatestNativeCompactionEntry(branchEntries, { baseUrl: resolution.runtime.baseUrl });
-	if (!latest.ok) return undefined;
+	if (!latest.ok) return visibleResult;
 	const result = removeNativeCompactionRetainedMessages({
 		messages: replayEvent.messages,
 		branchEntries,
@@ -1124,7 +1082,7 @@ async function handleContextInternal(
 		ctx.abort();
 		return undefined;
 	}
-	return result.messages === replayEvent.messages ? undefined : { messages: result.messages };
+	return result.messages === replayEvent.messages ? visibleResult : { messages: result.messages };
 }
 
 /**
@@ -1202,6 +1160,10 @@ async function handleBeforeProviderRequest(
 		}
 		return undefined;
 	}
+
+	// Do not reintroduce a pre-window opaque checkpoint after local projection.
+	// Request affinity/encrypted-output rewriting is reserved for active Remote.
+	if (config.contextManagement === "remote" && contextWindows.currentIdentity()) return undefined;
 
 	const resolution = await resolveNativeCompactionEnvironment(
 		ctx,
@@ -1518,10 +1480,9 @@ export default function registerCompactionExtension(
 		tools.reset();
 	});
 	pi.on("agent_settled", async (_event, ctx) => {
-		// Idle: no retry, compaction, or queued continuation is left running, so this is the
-		// only safe place to spend a model call on the user's behalf.
-		if (await manualCompact.settled(ctx)) return;
-		await handleWindowBulk(ctx, contextWindows, dependencies.loadConfig, "turn-end", undefined, () => manualCompact.beginMaintenance());
+		// Only the owned manual handoff restores/continues here; Pi owns normal
+		// compaction scheduling. Never compact retired windows on model changes.
+		await manualCompact.settled(ctx);
 	});
 	pi.on("model_select", async (event, ctx) => {
 		manualCompact.modelSelected(event.model, ctx);
@@ -1532,9 +1493,6 @@ export default function registerCompactionExtension(
 		// syncTools() activates and initializes the window when the model is covered.
 		const resolved = contextOperation(dependencies.loadConfig, ctx, event.model);
 		await syncTools(ctx, event.model, { notifyWindowFailure: true }, resolved);
-		// The switch itself is the moment the durable transcript changes consumer, and the
-		// session is idle here, so the close-out must happen now rather than mid-turn.
-		if (!manualCompact.busy) await handleWindowBulk(ctx, contextWindows, dependencies.loadConfig, "model-switch", resolved, () => manualCompact.beginMaintenance());
 	});
 	pi.on("before_agent_start", async (_event, ctx) => {
 		await syncTools(ctx, ctx.model, { notifyWindowFailure: true });

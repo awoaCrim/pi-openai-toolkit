@@ -79,7 +79,10 @@ export type NativeFallbackConfig = {
 	thinkingLevel: ThinkingLevel;
 };
 
-/** How the toolkit reacts when leaving remote context management would re-expand the transcript. */
+/**
+ * Legacy compatibility setting. Remote Context history is no longer bulk-compacted when
+ * selecting a non-window model; local projection and a no-summary boundary own that handoff.
+ */
 export type LeaveManagedModePolicy = "warn" | "compact";
 
 export type DebugConfig = {
@@ -94,8 +97,8 @@ export type DebugConfig = {
 export type CompactionConfig = {
 	enabled: boolean;
 	/**
-	 * What to do when the session is about to hand a model the whole durable transcript
-	 * instead of its remote window: warn, or compact the retired windows away first.
+	 * Legacy compatibility setting. Non-window consumers never receive retired Remote Context
+	 * history, regardless of this value; retained config files continue to parse it.
 	 */
 	leaveManagedMode: LeaveManagedModePolicy;
 	/** Optional Codex Remote Context management. Disabled by default for compatibility. */

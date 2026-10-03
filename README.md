@@ -54,9 +54,9 @@ Set `defaults.context.mode` or an individual model's `context.mode`:
 
 **Remote windows** require the native `openai-codex` provider with `openai-codex-responses`, or an `openai-responses` gateway implementing the protocol. Gateways require `compatibility.transport: "codex-gateway"` on the exact model entry. This setting does not add the capability to an ordinary compatible endpoint.
 
-Change `mode` in the example above to `remote-windows`. Eligible sessions expose `new_context`, `get_context_remaining`, `history`, and `notes`. Manual `/compact [instructions]` starts a checkpoint handoff: write notes successfully, then switch windows. Models without window capability retain the compaction flow; a failed window activation does not silently switch to a summary.
+Change `mode` in the example above to `remote-windows`. Eligible sessions expose `new_context`, `get_context_remaining`, `history`, and `notes`. Manual `/compact [instructions]` starts a checkpoint handoff: write notes successfully, then switch windows. Models without window capability use only the current local window projection: retired Remote Context history is not sent to the model or to a configured compaction producer. A no-summary local boundary preserves the persisted Remote Window / Context Session, so switching back to a supported model reuses the same window instead of opening a duplicate one. The legacy `leaveManagedMode` setting is retained for config compatibility but no longer triggers bulk close-out compaction.
 
-Remote windows use alpha endpoints that may change upstream. When switching models, also watch for retired-window history that has not yet been trimmed. See the [window lifecycle](docs/internals.md#rollover-lifecycle).
+Remote windows use alpha endpoints that may change upstream. When switching models, the remote window remains persisted and reusable; see the [window lifecycle](docs/internals.md#rollover-lifecycle).
 
 ## Search, images, and tool review
 

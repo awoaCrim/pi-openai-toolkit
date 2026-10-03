@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ProviderHeaders } from "@earendil-works/pi-ai";
 import {
+	buildSessionContext,
 	calculateContextTokens,
 	estimateTokens,
 	type CompactionResult,
@@ -11,7 +12,6 @@ import {
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { ContextWindowBudget, type ContextRemaining } from "./window-budget";
-import type { WindowBulkReport } from "./window-bulk";
 import {
 	rewriteEncryptedToolOutputs,
 	rewriteWindowHeaders,
@@ -86,8 +86,6 @@ export class CodexContextWindowManager {
 	private trimPendingWindowId: string | undefined;
 	private readonly projectionDiagnostics = new Set<string>();
 	private lastKnownSystemHead: AgentMessage | undefined;
-	private bulkReport: WindowBulkReport | undefined;
-	private bulkSurfacedKey: string | undefined;
 	/**
 	 * Pi's getContextUsage() measures the durable transcript. Remote windows are
 	 * projected only by this extension, so remember the last provider-visible
@@ -105,49 +103,15 @@ export class CodexContextWindowManager {
 		this.pendingRollover = undefined;
 		this.projectionDiagnostics.clear();
 		this.lastKnownSystemHead = undefined;
-		this.bulkReport = undefined;
-		this.bulkSurfacedKey = undefined;
 	}
 
 	currentIdentity(): ContextWindowIdentity | undefined {
 		return this.identity ? { ...this.identity } : undefined;
 	}
-	/**
-	 * Whether a rollover trim is queued for the next eligible compaction. A turn-end bulk
-	 * close-out is only worth a model call while that trim is still outstanding.
-	 */
+	/** Whether a rollover trim awaits a matching persisted compaction. */
 	hasPendingTrim(): boolean {
 		return this.trimPendingWindowId !== undefined;
 	}
-
-	/** Remember the latest measurement for this window; see `takeBulkCliff`. */
-	noteWindowBulk(report: WindowBulkReport | undefined, modelKey: string): void {
-		if (report) this.bulkReport = report;
-		else if (this.bulkKey(modelKey) === undefined) this.bulkReport = undefined;
-	}
-
-	/**
-	 * Drain the pending bulk-cliff notice for this window and model. The decision what to
-	 * do about it (warn, or compact before the next request) belongs to the runtime; this
-	 * only guarantees the same window and model is never surfaced twice.
-	 */
-	takeBulkCliff(modelKey: string): WindowBulkReport | undefined {
-		const report = this.bulkReport;
-		if (!report || !report.expanded) return undefined;
-		const key = this.bulkKey(modelKey);
-		if (key === undefined || this.bulkSurfacedKey === key) return undefined;
-		this.bulkSurfacedKey = key;
-		return report;
-	}
-
-	private bulkKey(modelKey: string): string | undefined {
-		// The report's own window id is authoritative: this notice exists precisely for the
-		// models that never open the window lifecycle, where `identity` stays undefined.
-		const windowId = this.bulkReport?.windowId ?? this.identity?.currentWindowId;
-		return windowId ? `${windowId}|${modelKey}` : undefined;
-	}
-
-
 
 	private resetWindowState(): void {
 		this.identity = undefined;
@@ -246,7 +210,7 @@ export class CodexContextWindowManager {
 
 	project(
 		messages: readonly AgentMessage[],
-		mode: "off" | "remote",
+		mode: "off" | "local" | "remote",
 	): AgentMessage[] {
 		if (mode === "off") {
 			this.projectedContextTokens = undefined;
@@ -268,20 +232,30 @@ export class CodexContextWindowManager {
 				if (!matchesSession(message.details.sessionId, this.sessionId)) continue;
 			}
 			if (!isContextWindowBoundary(message)) continue;
+			// Local consumers follow the synchronized persisted identity, not a
+			// queued marker from the request view. They never own the Remote session.
+			if (mode === "local" && message.details.contextManagement.currentWindowId !== this.identity?.currentWindowId) continue;
 			boundaryIndex = index;
-			this.identity = identityFromDetails(message.details);
+			if (mode === "remote") this.identity = identityFromDetails(message.details);
 		}
 		if (boundaryIndex < 0) {
-			this.identity = undefined;
-			this.restoredMarkerId = undefined;
-			this.budget.reset();
-			this.trimPendingWindowId = undefined;
+			if (mode === "local" && this.identity) {
+				throw new Error("Persisted Codex context-window boundary missing from local projection");
+			}
+			if (mode === "remote") {
+				this.identity = undefined;
+				this.restoredMarkerId = undefined;
+				this.budget.reset();
+				this.trimPendingWindowId = undefined;
+			}
 			this.projectedContextTokens = undefined;
 		}
 		// Projection observes the request view, never durable session state. A
 		// queued rollover marker must not clear the duplicate guard here.
-		const trimmed = boundaryIndex < 0 ? [...messages] : this.trimToWindow(messages, boundaryIndex);
-		const projected = mode === "remote" ? projectEncryptedToolResults(trimmed) : trimmed;
+		const trimmed = boundaryIndex < 0 ? [...messages] : this.trimToWindow(messages, boundaryIndex, mode === "local");
+		const projected = mode === "remote" ? projectEncryptedToolResults(trimmed) : trimmed.filter(
+			(message) => message.role !== "custom" || message.customType !== CODEX_CONTEXT_WINDOW_MESSAGE_TYPE,
+		);
 		this.projectedContextTokens = mode === "remote" && this.identity
 			? estimateProjectedWindowTokens(projected)
 			: undefined;
@@ -295,10 +269,13 @@ export class CodexContextWindowManager {
 	 * sent, because a window without tools silently degrades into a chat the model can
 	 * only narrate. Each refusal is reported once per window and reason.
 	 */
-	private trimToWindow(messages: readonly AgentMessage[], boundaryIndex: number): AgentMessage[] {
+	private trimToWindow(messages: readonly AgentMessage[], boundaryIndex: number, local = false): AgentMessage[] {
 		const repair = preserveSystemHead({ messages, boundaryIndex, fallbackHead: this.lastKnownSystemHead });
 		if (repair.head) this.lastKnownSystemHead = repair.head;
 		if (repair.shrinkRejected) {
+			// Remote requests retain the existing tool-preservation fallback. A
+			// local request must never recover tools by leaking retired windows.
+			if (local) throw new Error("Cannot preserve the system/tool head in local context-window projection");
 			this.recordProjectionDiagnostic(repair.lostToolNames);
 		}
 		return [...repair.messages];
@@ -459,6 +436,33 @@ export class CodexContextWindowManager {
 		// synchronize() consumes the trim after observing a durable compaction;
 		// recordCompaction() also handles hosts that emit a success callback.
 		return { compaction };
+	}
+
+	/**
+	 * Detach a local consumer at the durable Remote boundary, without summarizing
+	 * any Remote-managed history. Unlike a scheduled rollover trim, this needs
+	 * no pending trim and remains retryable until Pi persists the result.
+	 */
+	prepareDetachedCompaction(
+		event: SessionBeforeCompactEvent,
+	): { compaction: CompactionResult<ContextWindowCompactionDetails> } | undefined {
+		const boundary = findLatestWindowBoundaryEntry(event.branchEntries, this.sessionId);
+		if (!boundary) return undefined;
+		const compaction = this.createCompaction(event);
+		// Pi's preparation/tokensBefore describes the durable branch, which includes
+		// Remote-managed history. Detached local accounting must use the same current
+		// window projection that the non-window provider sees instead.
+		return {
+			compaction: {
+				...compaction,
+				tokensBefore: this.estimateLocalContextTokens(event.branchEntries),
+			},
+		};
+	}
+
+	private estimateLocalContextTokens(entries: readonly SessionEntry[]): number {
+		const messages = buildSessionContext(entries as never[]).messages as unknown as AgentMessage[];
+		return this.project(messages, "local").reduce((total, message) => total + estimateTokens(message as never), 0);
 	}
 
 	recordCompaction(details: unknown): void {

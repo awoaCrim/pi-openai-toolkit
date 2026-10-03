@@ -9,6 +9,12 @@ import type { LeaveManagedModePolicy } from "../types";
 import { isContextWindowBoundary } from "./messages";
 
 /**
+ * Legacy pure diagnostics retained for config/test compatibility. Runtime model switching no
+ * longer calls this module: non-window consumers use the current-local projection instead of
+ * measuring or compacting the durable Remote Context branch.
+ */
+
+/**
  * Share of the target model's context window above which a projection is considered
  * over budget. Estimates are conservative (`estimateTokens` is chars/4 and overestimates),
  * so the trigger fires slightly early rather than after a hard provider failure.

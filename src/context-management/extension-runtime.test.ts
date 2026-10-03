@@ -3,11 +3,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { CompactionResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { CODEX_CONTEXT_WINDOW_MESSAGE_TYPE } from "./messages";
-import { DEFAULT_COMPACTION_CONFIG, DEFAULT_TOOLKIT_CONFIG } from "../types";
+import { CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, CONTEXT_WINDOW_COMPACTION_SUMMARY, declaredToolNames } from "./messages";
+import { CodexContextWindowManager } from "./window-manager";
+import type { ContextWindowCompactionDetails } from "./types";
+import { createNativeCompactionDetails, DEFAULT_COMPACTION_CONFIG, DEFAULT_TOOLKIT_CONFIG, LEGACY_REMOTE_V2_INPUT_PROVENANCE } from "../types";
 import extension from "../extension-runtime";
 
 const model = {
@@ -753,6 +756,129 @@ test("late activation fails closed when the context window cannot initialize", a
 	expect(notices.filter((notice) => notice.includes("malformed-window-state"))).toHaveLength(1);
 });
 
+
+for (const leaveManagedMode of ["warn", "compact"] as const) {
+	for (const reason of ["manual", "threshold", "overflow"] as const) {
+		test(`non-window ${reason} detaches without any compactor and reuses Remote identity (${leaveManagedMode})`, async () => {
+			const handlers = new Map<string, (event: never, ctx: never) => unknown>();
+			const registered: Array<{ name: string }> = [];
+			const sent: Array<{ customType?: string }> = [];
+			const notices: string[] = [];
+			let active = ["read"];
+			let remoteCalls = 0;
+			let nativeCalls = 0;
+			let compactCalls = 0;
+			let localAuthCalls = 0;
+			let aborted = false;
+			const pi = {
+				on: (name: string, handler: (event: never, ctx: never) => unknown) => handlers.set(name, handler),
+				registerTool: (tool: { name: string }) => registered.push(tool),
+				getAllTools: () => registered, getActiveTools: () => active,
+				setActiveTools: (names: string[]) => { active = names; },
+				sendMessage: (message: { customType?: string }) => { sent.push(message); },
+			} as unknown as ExtensionAPI;
+			const windows = new CodexContextWindowManager(async () => undefined);
+			extension(pi, {
+				loadConfig: () => ({ config: {
+					...DEFAULT_TOOLKIT_CONFIG, compaction: {
+						...DEFAULT_COMPACTION_CONFIG, contextManagement: "remote", leaveManagedMode,
+						remoteCompactModel: "uwoacrimson/gpt-6-luna",
+						nativeFallback: { enabled: true, model: "uwoacrimson/gpt-6-luna", thinkingLevel: "off" },
+					},
+				}, warnings: [] }),
+				contextWindows: windows,
+				remoteCompact: async () => { remoteCalls++; throw new Error("must not summarize Remote history"); },
+				nativeFallback: async () => { nativeCalls++; throw new Error("must not send even the filtered current window to Luna"); },
+			});
+			const sm = SessionManager.inMemory("/synthetic-project");
+			const sessionId = sm.getSessionId();
+			const head = { role: "system", content: "", sections: { preamble: "prompt" },
+				toolsAdded: [{ name: "read", description: "read", parameters: {} }], timestamp: 1 } as AgentMessage;
+			const headId = sm.appendMessage(head);
+			// A checkpoint from before the Remote window must not be replayed into
+			// the local projection, even on the same endpoint.
+			sm.appendCompaction("old opaque checkpoint", headId, 10, createNativeCompactionDetails({
+				provider: model.provider, api: model.api, model: model.id, baseUrl: model.baseUrl,
+				inputProvenance: LEGACY_REMOTE_V2_INPUT_PROVENANCE,
+				compactedWindow: [{ type: "compaction", encrypted_content: "old-opaque" }],
+			}));
+			const addMarker = (windowId: string, windowNumber: number) => sm.appendCustomMessageEntry(
+				CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, "window", true, {
+					protocol: 1, id: `marker-${windowId}`, sessionId,
+					contextManagement: { protocol: 1, kind: "window", firstWindowId: "w1", currentWindowId: windowId, windowNumber },
+				},
+			);
+			addMarker("w1", 0);
+			const retired = { role: "user", content: "retired history ".repeat(100_000), timestamp: 2 } as AgentMessage;
+			sm.appendMessage(retired);
+			const boundaryId = addMarker("w2", 1);
+			// Already-Remote-managed current history can itself exceed Luna's
+			// physical window. Detachment is NOT a filtered summary request.
+			const current = { role: "user", content: reason === "manual" ? "current remote window ".repeat(60_000) : "current remote window", timestamp: 3 } as AgentMessage;
+			sm.appendMessage(current);
+			sm.appendMessage(fauxAssistantMessage("current work"));
+			const localModel = reason === "overflow"
+				? { provider: "anthropic", api: "anthropic-messages", id: "claude-x", baseUrl: "https://api.anthropic.com", contextWindow: 100_000 }
+				: { ...model, provider: "uwoacrimson", api: "openai-responses", id: "gpt-6-luna", contextWindow: 272_000 };
+			const context = (currentModel: typeof model) => ({
+				...makeContext([], currentModel), sessionManager: sm, hasUI: true,
+				ui: { notify: (message: string) => notices.push(message) },
+				abort: () => { aborted = true; },
+				compact: () => { compactCalls++; },
+				modelRegistry: { getApiKeyAndHeaders: async (requestedModel: typeof model) => {
+					if (requestedModel.provider !== model.provider || requestedModel.id !== model.id) { localAuthCalls++; throw new Error("no local provider/compactor resolution needed"); }
+					return { ok: true, apiKey: "token", headers: { "chatgpt-account-id": "account" }, baseUrl: model.baseUrl };
+				} },
+			}) as never;
+			const remoteCtx = context(model);
+			const localCtx = context(localModel);
+			await handlers.get("session_start")!({} as never, remoteCtx);
+			const identity = windows.currentIdentity();
+			expect(identity?.currentWindowId).toBe("w2");
+			const rawBranch = structuredClone(sm.getBranch());
+			await handlers.get("model_select")!({ model: localModel, previousModel: model, source: "set" } as never, remoteCtx);
+			await handlers.get("agent_settled")!({} as never, localCtx);
+			expect(active).toEqual(["read"]);
+			expect(windows.currentIdentity()).toEqual(identity);
+			const projected = await handlers.get("context_with_system")!({ messages: sm.buildSessionProjection().messages } as never, localCtx) as { messages: AgentMessage[] };
+			expect(declaredToolNames(projected.messages)).toEqual(["read"]);
+			expect(projected.messages).toContainEqual(current);
+			expect(projected.messages).not.toContainEqual(retired);
+			expect(projected.messages.some((message) => message.role === "custom" || message.role === "compactionSummary")).toBe(false);
+			expect(await handlers.get("before_provider_request")!({ payload: { model: localModel.id, input: [] } } as never, localCtx)).toBeUndefined();
+			expect(sm.getBranch()).toEqual(rawBranch);
+			const prepare = () => handlers.get("session_before_compact")!({
+				signal: new AbortController().signal, reason, branchEntries: sm.getBranch(),
+				preparation: { firstKeptEntryId: "wrong-boundary", tokensBefore: 700_000,
+					messagesToSummarize: [retired, current], turnPrefixMessages: [] },
+			} as never, localCtx);
+			const result = await prepare() as { compaction: CompactionResult<ContextWindowCompactionDetails> };
+			expect(result.compaction.summary).toBe(CONTEXT_WINDOW_COMPACTION_SUMMARY);
+			expect(result.compaction.firstKeptEntryId).toBe(boundaryId);
+			expect(result.compaction.tokensBefore).toBeLessThan(700_000);
+			expect(result.compaction.details).toEqual({ protocol: 1, strategy: "codex-context-window", windowId: "w2" });
+			expect(await prepare()).toEqual(result); // An unpersisted proposal remains retryable.
+			expect(sm.getBranch()).toEqual(rawBranch);
+			const { summary, firstKeptEntryId, tokensBefore, details } = result.compaction;
+			const compactionId = sm.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, true);
+			await handlers.get("session_compact")!({ compactionEntry: sm.getEntry(compactionId) } as never, localCtx);
+			const after = await handlers.get("context_with_system")!({ messages: sm.buildSessionProjection().messages } as never, localCtx) as { messages: AgentMessage[] };
+			expect(after.messages.slice(1)).toEqual(projected.messages.slice(1));
+			expect(declaredToolNames(after.messages)).toEqual(["read"]);
+			expect(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === CODEX_CONTEXT_WINDOW_MESSAGE_TYPE)).toHaveLength(2);
+			await handlers.get("model_select")!({ model, previousModel: localModel, source: "set" } as never, localCtx);
+			await handlers.get("agent_settled")!({} as never, remoteCtx);
+			expect(active).toEqual(["read", "new_context", "get_context_remaining", "history", "notes"]);
+			expect(windows.currentIdentity()).toEqual(identity);
+			const replay = await handlers.get("before_provider_request")!({ payload: { model: model.id, input: [] } } as never, remoteCtx) as { client_metadata: { "x-codex-turn-metadata": string } };
+			expect(JSON.parse(replay.client_metadata["x-codex-turn-metadata"]).context_window_id).toBe("w2");
+			expect(sent).toEqual([]); // No duplicate initialization or handoff marker.
+			expect(notices).toEqual([]);
+			expect([remoteCalls, nativeCalls, compactCalls, localAuthCalls]).toEqual([0, 0, 0, 0]);
+			expect(aborted).toBe(false);
+		});
+	}
+}
 
 test("v2 context lifecycle reads one snapshot across awaited activation and sees edits next operation", async () => {
 	const handlers = new Map<string, (event: never, ctx: never) => unknown>();
