@@ -129,6 +129,30 @@ describe("cache-stack activation and deferred tool carryover", () => {
 		expect(payload.tools).toEqual(originalTools);
 	});
 
+	test("full standalone window keeps historical declarations intact and reactivates current schemas only after its end", () => {
+		const canonicalWindow = [
+			{ type: "additional_tools", role: "developer", tools: [{ type: "function", name: "read_file", description: "historical schema", parameters: {} }] },
+			{ type: "message", role: "user", content: [{ type: "input_text", text: "canonical retained user" }], future: { preserve: true } },
+			{ type: "compaction", encrypted_content: "opaque-full-window" },
+			{ type: "message", role: "assistant", content: [{ type: "output_text", text: "retained assistant" }] },
+		];
+		const base = createPayload();
+		const payload = createPayload({ input: [base.input[0], ...canonicalWindow, base.input[2]] });
+		const before = structuredClone(payload);
+		const end = 1 + canonicalWindow.length;
+		const args = { carryover, compactionEntryId: "full-window", checkpointEndIndex: end, compat: { supportsAdditionalTools: true } };
+		const first = rewritePayloadWithDeferredToolCarryover({ ...args, payload });
+		expect(first.payload.input.slice(1, end)).toEqual(canonicalWindow);
+		expect(first.payload.input[end]).toEqual({ type: "additional_tools", role: "developer", tools: before.tools.slice(0, 2) });
+		expect(first.payload.input.at(-1)).toEqual(base.input[2]);
+		expect(payload).toEqual(before);
+		// Even if Pi emits current schemas again at the top level, an existing
+		// live-tail activation is reused rather than copied into a second load point.
+		const second = rewritePayloadWithDeferredToolCarryover({ ...args, payload: { ...first.payload, tools: before.tools } });
+		expect(second.payload).toEqual(first.payload);
+		expect(rewritePayloadWithDeferredToolCarryover({ ...args, payload: second.payload }).changed).toBe(false);
+	});
+
 	test("moves matching custom schemas without dropping provider-specific fields", () => {
 		const customTool = {
 			type: "custom",

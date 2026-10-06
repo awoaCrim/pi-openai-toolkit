@@ -118,11 +118,8 @@ function cloneStructuredValue(value: unknown): unknown {
 	}
 
 	if (isRecord(value)) {
-		const clone: Record<string, unknown> = {};
-		for (const [key, nested] of Object.entries(value)) {
-			clone[key] = cloneStructuredValue(nested);
-		}
-		return clone;
+		// Define own data properties, including provider JSON keys such as __proto__.
+		return Object.fromEntries(Object.entries(value).map(([key, nested]) => [key, cloneStructuredValue(nested)]));
 	}
 
 	throw new Error(`Unsupported structured value: ${typeof value}`);

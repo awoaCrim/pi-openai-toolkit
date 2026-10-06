@@ -3,7 +3,55 @@ import {
 	resolveNativeCompactionEnvironment,
 	resolveRemoteCompactionExecution,
 	resolveResponsesEnvironment,
+	isStandaloneCompactionEligible,
 } from "../src/runtime";
+
+describe("official standalone auth provenance", () => {
+	const model = { provider: "alias", api: "openai-responses", id: "test", baseUrl: "https://ignored.invalid/v1" };
+	for (const fixture of [
+		{ oauth: false, configured: true, expected: "non-oauth" },
+		{ oauth: true, configured: true, expected: "oauth" },
+		{ oauth: false, configured: false, expected: "unknown" },
+		{ oauth: "false", configured: true, expected: "unknown" },
+		{ oauth: false, configured: "true", expected: "unknown" },
+		{ missing: true, expected: "unknown" }, { throws: true, expected: "unknown" },
+	]) test(JSON.stringify(fixture), async () => {
+		let authCalls = 0;
+		const resolution = await resolveNativeCompactionEnvironment({ model, modelRegistry: {
+			getApiKeyAndHeaders: async () => { authCalls++; return { ok: true, apiKey: "synthetic-key", baseUrl: "https://api.openai.com/v1" }; },
+			...(fixture.missing ? {} : {
+				isUsingOAuth: (selected: unknown) => { expect(selected).toBe(model); if (fixture.throws) throw new Error("snapshot unavailable"); return fixture.oauth; },
+				hasConfiguredAuth: (selected: unknown) => { expect(selected).toBe(model); return fixture.throws ? true : fixture.configured; },
+			}),
+		} } as never);
+		expect(authCalls).toBe(1); expect(resolution.ok).toBe(true);
+		if (!resolution.ok) return;
+		expect(resolution.runtime.authMode).toBe(fixture.expected);
+		expect(isStandaloneCompactionEligible(resolution.runtime)).toBe(fixture.expected === "non-oauth");
+		for (const compactUrl of ["http://api.openai.com/v1/responses/compact", "https://api.openai.com:444/v1/responses/compact", "https://key@api.openai.com/v1/responses/compact", "https://api.openai.com/v1/responses/compact?key=secret", "https://api.openai.com/v1/responses/compact#fragment", "https://api.openai.com/other/responses/compact", "https://api.openai.com.evil.invalid/v1/responses/compact"]) {
+			expect(isStandaloneCompactionEligible({ ...resolution.runtime, authMode: "non-oauth", compactUrl })).toBe(false);
+		}
+		expect(isStandaloneCompactionEligible({ ...resolution.runtime, authMode: "non-oauth", headers: { AUTHORIZATION: "Bearer unrelated" } })).toBe(false);
+		expect(isStandaloneCompactionEligible({ ...resolution.runtime, authMode: "non-oauth", currentModel: { ...resolution.runtime.currentModel, headers: { Authorization: "Bearer unrelated" } } })).toBe(false);
+		expect(isStandaloneCompactionEligible({ ...resolution.runtime, authMode: "non-oauth", currentModel: { ...resolution.runtime.currentModel, headers: { Authorization: "Bearer unrelated" } }, headers: { authorization: null } })).toBe(true);
+		expect(isStandaloneCompactionEligible({ ...resolution.runtime, authMode: "non-oauth", codexAffinity: { model: "test", scope: "codex-session-v1" } })).toBe(false);
+	});
+
+	test("a virtual producer classifies/authenticates the physical model, not the logical selection", async () => {
+		const physical = { ...model, baseUrl: "https://api.openai.com/v1" };
+		const virtual = { provider: "virtual", api: "pi-virtual", id: "router", baseUrl: "https://unresolved.invalid" };
+		let authCalls = 0;
+		const resolution = await resolveRemoteCompactionExecution({ model: physical, sessionManager: { getSessionId: () => "virtual", buildSessionProjection: () => ({ messages: [] }) }, modelRegistry: {
+			find: (provider: string) => provider === "virtual" ? virtual : physical,
+			runtime: { resolveModel: async () => ({ model: physical }), getPhysicalModel: () => physical },
+			getApiKeyAndHeaders: async (selected: unknown) => { expect(selected).toBe(physical); authCalls++; return { ok: true, apiKey: "synthetic-key" }; },
+			hasConfiguredAuth: (selected: unknown) => { expect(selected).toBe(physical); return true; },
+			isUsingOAuth: (selected: unknown) => { expect(selected).toBe(physical); return false; },
+		} } as never, {}, "virtual/router");
+		expect(resolution.ok).toBe(true); expect(authCalls).toBe(2);
+		if (resolution.ok) { expect(resolution.execution.compactor.currentModel).toBe(physical); expect(isStandaloneCompactionEligible(resolution.execution.compactor)).toBe(true); }
+	});
+});
 
 describe("resolveNativeCompactionEnvironment", () => {
 	test("exposes the shared Responses runtime without compaction-only fields", async () => {

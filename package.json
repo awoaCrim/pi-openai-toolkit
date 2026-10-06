@@ -1,6 +1,6 @@
 {
   "name": "pi-openai-toolkit",
-  "version": "0.20.8",
+  "version": "0.21.0",
   "private": false,
   "type": "module",
   "engines": {
@@ -42,6 +42,7 @@
   },
   "files": [
     "src/compact-client.ts",
+    "src/compaction-errors.ts",
     "src/compaction-projection.ts",
     "src/pi-context-hook.ts",
     "src/config.ts",

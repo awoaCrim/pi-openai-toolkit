@@ -514,7 +514,7 @@ test("preserves pre-send abort, HTTP errors and body read failures", async () =>
 	});
 	const body = new ReadableStream<Uint8Array>({ start(controller) { controller.error(new Error("body disconnected")); } });
 	globalThis.fetch = mock(async () => new Response(body)) as typeof fetch;
-	expect(await executeRemoteV2Compaction({ runtime, request })).toMatchObject({ ok: false, reason: "network-error", errorMessage: "body disconnected" });
+	expect(await executeRemoteV2Compaction({ runtime, request })).toMatchObject({ ok: false, reason: "network-error", errorMessage: "Compaction transport failed; no remote checkpoint was produced." });
 	expect(body.locked).toBe(false);
 });
 

@@ -416,7 +416,7 @@ test("extractCompactedSummaryText joins assistant output_text blocks and skips o
 	).toBeUndefined();
 });
 
-test("executeNativeCompaction serializes codex-aligned passthrough fields and extracts summary text", async () => {
+test("executeNativeCompaction allows only standalone fields and labels assistant text as retained", async () => {
 	let requestBody: Record<string, unknown> = {};
 	globalThis.fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
 		requestBody = JSON.parse(String(init?.body));
@@ -467,11 +467,11 @@ test("executeNativeCompaction serializes codex-aligned passthrough fields and ex
 	if (result.ok) {
 		expect(result.summaryText).toBe("Native summary.");
 	}
-	expect(requestBody.tools).toEqual([{ type: "function", name: "read" }]);
-	expect(requestBody.parallel_tool_calls).toBe(true);
-	expect(requestBody.reasoning).toEqual({ effort: "high", summary: "auto" });
+	expect(requestBody.tools).toBeUndefined();
+	expect(requestBody.parallel_tool_calls).toBeUndefined();
+	expect(requestBody.reasoning).toBeUndefined();
 	expect(requestBody.prompt_cache_key).toBe("session-123");
-	expect(requestBody.text).toEqual({ verbosity: "low" });
+	expect(requestBody.text).toBeUndefined();
 	expect("service_tier" in requestBody).toBe(false);
 });
 

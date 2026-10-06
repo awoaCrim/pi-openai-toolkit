@@ -4,6 +4,7 @@ import { convertToLlm, type ExtensionAPI, type ExtensionContext } from "@earendi
 import { isExactModelAllowed } from "./model-scope";
 import {
 	CODEX_AFFINITY_SCOPE,
+	buildResponsesRequestHeaders,
 	type CodexAffinity,
 } from "./responses-headers";
 import { RESPONSES_COMPACT_CAPABLE_APIS } from "./types";
@@ -86,6 +87,8 @@ export type ResponsesRuntime = {
 };
 
 export type NativeCompactionRuntime = ResponsesRuntime & {
+	/** Public host snapshot for the resolved physical model; never inferred from token text. */
+	authMode?: "oauth" | "non-oauth" | "unknown";
 	compactPath: string;
 	compactUrl: string;
 	payload?: ResponsesCompatibleRequestPayload;
@@ -503,6 +506,35 @@ async function resolveRequestAuth(ctx: ExtensionContext, model: RuntimeModel): P
 	return modelRegistry.getApiKeyAndHeaders(model);
 }
 
+function resolveAuthMode(ctx: ExtensionContext, model: RuntimeModel): NativeCompactionRuntime["authMode"] {
+	const registry = ctx.modelRegistry as unknown as {
+		isUsingOAuth?: (model: RuntimeModel) => unknown;
+		hasConfiguredAuth?: (model: RuntimeModel) => unknown;
+	};
+	try {
+		if (typeof registry.isUsingOAuth !== "function" || typeof registry.hasConfiguredAuth !== "function" ||
+			registry.hasConfiguredAuth(model) !== true) return "unknown";
+		const oauth = registry.isUsingOAuth(model);
+		return oauth === true ? "oauth" : oauth === false ? "non-oauth" : "unknown";
+	} catch {
+		return "unknown";
+	}
+}
+
+/** Conservative automatic standalone routing; provider aliases alone prove nothing. */
+export function isStandaloneCompactionEligible(runtime: NativeCompactionRuntime): boolean {
+	if (runtime.api !== "openai-responses" || runtime.codexAffinity || runtime.authMode !== "non-oauth") return false;
+	try {
+		const url = new URL(runtime.compactUrl);
+		if (url.protocol !== "https:" || url.hostname !== "api.openai.com" || url.port ||
+			url.pathname !== "/v1/responses/compact" || url.username || url.password || url.search || url.hash) return false;
+		const headers = buildResponsesRequestHeaders(runtime, { accept: "application/json" });
+		return headers.get("authorization") === `Bearer ${runtime.apiKey}`;
+	} catch {
+		return false;
+	}
+}
+
 export function isSupportedApi(api: string): api is ResponsesCompactApi {
 	return (RESPONSES_COMPACT_CAPABLE_APIS as readonly string[]).includes(api);
 }
@@ -696,6 +728,7 @@ async function resolveNativeCompactionEnvironmentForModel(
 			requestModel,
 			baseUrl,
 			apiKey: auth.apiKey,
+			authMode: resolveAuthMode(ctx, effectiveModel),
 			env: auth.env,
 			headers: auth.headers,
 			responsesPath: buildResponsesPath(descriptor.api),

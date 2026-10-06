@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { writeDebugArtifact } from "./debug";
+import { decodeCompactionError, readCompactionResponseText, type CompactionErrorInfo } from "./compaction-errors";
 import { buildResponsesRequestHeaders } from "./responses-headers";
 import type { NativeCompactionRuntime } from "./runtime";
 import type { NativeCompactionRequestBody, ResponsesInputItem } from "./serializer";
@@ -55,7 +56,7 @@ export type RemoteV2CompactionClientSuccess = {
 	response: RemoteV2ResponseEnvelope;
 };
 
-export type RemoteV2CompactionClientFailure = {
+export type RemoteV2CompactionClientFailure = CompactionErrorInfo & {
 	ok: false;
 	reason: RemoteV2CompactionClientFailureReason;
 	status?: number;
@@ -211,14 +212,6 @@ function isRemoteV2CompactionItem(value: unknown): value is RemoteV2CompactionIt
 
 function getEventType(event: ParsedSseEvent): string | undefined {
 	return isRecord(event.data) && isNonEmptyString(event.data.type) ? event.data.type : event.event;
-}
-
-function getErrorMessage(value: unknown): string | undefined {
-	if (!isRecord(value)) return undefined;
-	if (isNonEmptyString(value.message)) return value.message;
-	if (isRecord(value.error) && isNonEmptyString(value.error.message)) return value.error.message;
-	if (isNonEmptyString(value.error)) return value.error;
-	return undefined;
 }
 
 function writeCompactArtifact(
@@ -397,7 +390,7 @@ function reconcileSseCheckpoint(events: readonly ParsedSseEvent[]): CheckpointRe
 			ok: false,
 			reason: "error-event",
 			responseJson: errorEvent.data,
-			errorMessage: getErrorMessage(errorEvent.data),
+			errorMessage: decodeCompactionError(errorEvent.data).errorMessage,
 		};
 	}
 
@@ -668,7 +661,7 @@ export async function executeRemoteV2Compaction(
 		});
 
 		if (!response.ok) {
-			const responseText = await response.text();
+			const responseText = await readCompactionResponseText(response, signal);
 			let responseJson: unknown;
 			if (responseText.trim()) {
 				try {
@@ -681,6 +674,7 @@ export async function executeRemoteV2Compaction(
 				ok: false,
 				reason: "non-2xx",
 				status: response.status,
+				...decodeCompactionError(responseJson),
 				responseText: responseText || undefined,
 				responseJson,
 			};
@@ -719,10 +713,13 @@ export async function executeRemoteV2Compaction(
 		}
 
 		if (!events) {
+			let bodyError: CompactionErrorInfo = {};
+			try { bodyError = decodeCompactionError(JSON.parse(responseText)); } catch { /* Not a JSON error. */ }
 			const failure: RemoteV2CompactionClientFailure = {
 				ok: false,
 				reason: "invalid-sse",
 				status: response.status,
+				...bodyError,
 				responseText,
 			};
 			writeCompactArtifact(
@@ -744,7 +741,7 @@ export async function executeRemoteV2Compaction(
 				ok: false,
 				reason: reconciliation.reason,
 				status: response.status,
-				errorMessage: reconciliation.errorMessage,
+				...decodeCompactionError(reconciliation.responseJson),
 				responseJson: reconciliation.responseJson,
 			};
 			writeCompactArtifact(
@@ -793,12 +790,12 @@ export async function executeRemoteV2Compaction(
 		);
 		return success;
 	} catch (error) {
-		const failure: RemoteV2CompactionClientFailure = isAbortError(error)
+		const failure: RemoteV2CompactionClientFailure = signal?.aborted || isAbortError(error)
 			? { ok: false, reason: "aborted" }
 			: {
 					ok: false,
 					reason: "network-error",
-					errorMessage: error instanceof Error ? error.message : String(error),
+					errorMessage: "Compaction transport failed; no remote checkpoint was produced.",
 				};
 		writeCompactArtifact(
 			{

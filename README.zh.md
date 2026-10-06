@@ -50,7 +50,9 @@ Toolkit 只读取一个全局配置文件，即使扩展安装在项目内也一
 - `remote-windows`：使用 Codex 远程上下文窗口，通过 `history` 检索较早内容、`notes` 保存交接信息
 - `pi`：交给 Pi 管理上下文
 
-**远程压缩**支持的 API 类型是 `openai-responses`、`openai-codex-responses` 和 `azure-openai-responses`，但后端仍须支持对应的检查点协议。可用 `context.remoteCompaction.model` 指定独立的压缩模型；远程压缩要求它与当前模型使用相同的有效 base URL。原生摘要回退有独立配置，并非所有失败都会回退；空检查点、来源不匹配或被修改的已封存历史会阻止存储或重放。详见[上下文配置](docs/configuration.md#context)和[检查点规则](docs/internals.md#remote-compaction-v2-wire-contract)。
+**远程压缩**支持 `openai-responses`、`openai-codex-responses` 和 `azure-openai-responses`，先尝试 V2。官方 OpenAI API-key 路由遇到符合条件的协议失败时，可再尝试一次独立的 `/v1/responses/compact`，并完整保存返回的加密替换窗口用于重放。OpenAI OAuth、原生 Codex、Azure 和网关保持原有 V2 路由。OpenAI subscription-sharing OAuth 与原生 Codex 登录是两种独立授权，凭据不能互换；模型和后端仍须具备相应权限。
+
+可用 `context.remoteCompaction.model` 指定同一有效 base URL 下的独立压缩模型，不改变当前模型。远程尝试全部失败后，会明确提示并继续普通文本摘要。`nativeFallback.enabled: false` 只关闭 Toolkit 的指定模型回退层，不关闭 Pi 默认摘要。取消操作、来源不匹配或已封存历史被修改时，仍会取消，不能绕过检查点安全检查。详见[上下文配置](docs/configuration.md#context)和[检查点规则](docs/internals.md#remote-compaction-v2-wire-contract)。
 
 **远程窗口**需要原生 `openai-codex` 提供商的 `openai-codex-responses` API，或支持相应协议的 `openai-responses` 网关。网关必须在精确模型下设置 `compatibility.transport: "codex-gateway"`；这一设置不会让普通兼容端点自动获得该能力。
 

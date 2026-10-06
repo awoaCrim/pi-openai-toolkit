@@ -35,6 +35,8 @@ import {
 	type UnprojectedCompactionReason,
 } from "./compaction-projection";
 import { CODEX_GATEWAY_FORWARD_HEADERS } from "./responses-headers";
+import { executeNativeCompaction, type NativeCompactionClientResult } from "./compact-client";
+import { qualifiesForStandaloneCompaction, type CompactionErrorInfo } from "./compaction-errors";
 import { resolveLatestNativeCompactionEntry } from "./details-store";
 import {
 	getPiContextHookProjector,
@@ -57,6 +59,7 @@ import {
 	resolveEffectiveModel,
 	resolveNativeCompactionEnvironment,
 	resolveRemoteCompactionExecution,
+	isStandaloneCompactionEligible,
 	parseModelSpec,
 	type RemoteCompactionExecution,
 } from "./runtime";
@@ -70,6 +73,8 @@ import {
 	createNativeCompactionDetails,
 	createNativeCompactionResult,
 	COMPACTION_EXTENSION_ID,
+	LEGACY_NATIVE_COMPACTION_STRATEGY,
+	REMOTE_V2_COMPACTION_STRATEGY,
 	getLatestDeferredToolCarryover,
 	getRemoteV2InputProvenance,
 	isNativeCompactionDetails,
@@ -107,6 +112,7 @@ function compactGatewayModels(resolved: ResolvedToolkitConfig): readonly string[
 type CompactionDependencies = {
 	loadConfig: typeof loadToolkitConfig;
 	remoteCompact: typeof executeRemoteV2Compaction;
+	standaloneCompact: typeof executeNativeCompaction;
 	nativeFallback: typeof runNativeFallbackCompaction;
 	contextWindows: CodexContextWindowManager;
 	manualCompact?: ManagedManualCompact;
@@ -132,7 +138,7 @@ type ContextToolSyncOutcome = {
 type ResponsesCompactOutcome =
 	| { outcome: "success"; compaction: CompactionResult<NativeCompactionDetails> }
 	| { outcome: "aborted" }
-	| { outcome: "failed" }
+	| { outcome: "failed"; remoteFailure?: CompactionErrorInfo & { reason: string; status?: number }; protocol?: string }
 	| {
 			outcome: "unprojected-input";
 			reason: UnprojectedCompactionReason;
@@ -343,6 +349,8 @@ async function runResponsesNativeCompact(
 	execution: RemoteCompactionExecution,
 	remoteCompact: typeof executeRemoteV2Compaction,
 	projectCompactionContext: CompactionContextProjection | undefined,
+	/** Only ordinary compaction supplies this; managed recovery remains V2-only. */
+	standaloneCompact?: typeof executeNativeCompaction,
 ): Promise<ResponsesCompactOutcome> {
 	const { consumer, compactor } = execution;
 	const instructions = buildCompactionInstructions(ctx.getSystemPrompt(), event.customInstructions);
@@ -477,7 +485,9 @@ async function runResponsesNativeCompact(
 		request = { ...request, ...extras };
 	}
 
-	const compactResult = await remoteCompact({
+	if (event.signal?.aborted) return { outcome: "aborted" };
+	let protocol: "remote-v2" | "standalone-compact" = "remote-v2";
+	let compactResult: Awaited<ReturnType<typeof executeRemoteV2Compaction>> | NativeCompactionClientResult = await remoteCompact({
 		runtime: compactor,
 		request,
 		signal: event.signal,
@@ -485,24 +495,46 @@ async function runResponsesNativeCompact(
 		context: ctx,
 	});
 
-	if (compactResult.ok === false) {
-		writeDebugArtifact(
-			"compaction-event",
-			{
-				event: "session_before_compact.remote-v2-failure",
+	if (!compactResult.ok) {
+		if (compactResult.reason === "aborted" || event.signal?.aborted) return { outcome: "aborted" };
+		const tryStandalone = !!standaloneCompact && isStandaloneCompactionEligible(compactor) && qualifiesForStandaloneCompaction(compactResult);
+		writeDebugArtifact("compaction-event", {
+			event: "session_before_compact.remote-v2-failure",
+			protocol,
+			reason: compactResult.reason,
+			status: compactResult.status,
+			errorCode: compactResult.errorCode,
+			errorType: compactResult.errorType,
+			errorParam: compactResult.errorParam,
+			errorMessage: compactResult.errorMessage,
+			nextStep: tryStandalone ? "standalone-compact" : "native-summary",
+		}, config, ctx);
+		if (tryStandalone && standaloneCompact) {
+			if (event.signal?.aborted) return { outcome: "aborted" };
+			protocol = "standalone-compact";
+			compactResult = await standaloneCompact({ runtime: compactor, request, signal: event.signal, settings: config, context: ctx });
+		}
+		if (!compactResult.ok) {
+			if (compactResult.reason === "aborted" || event.signal?.aborted) return { outcome: "aborted" };
+			const remoteFailure = {
 				reason: compactResult.reason,
 				status: compactResult.status,
+				errorCode: compactResult.errorCode,
+				errorType: compactResult.errorType,
+				errorParam: compactResult.errorParam,
 				errorMessage: compactResult.errorMessage,
-			},
-			config,
-			ctx,
-		);
-		return compactResult.reason === "aborted" ? { outcome: "aborted" } : { outcome: "failed" };
+			};
+			if (protocol === "standalone-compact") writeDebugArtifact("compaction-event", {
+				event: "session_before_compact.standalone-compact-failure", protocol, ...remoteFailure, nextStep: "native-summary",
+			}, config, ctx);
+			return { outcome: "failed", remoteFailure, protocol };
+		}
 	}
 
 	let details: NativeCompactionDetails;
 	try {
 		details = createNativeCompactionDetails({
+			strategy: protocol === "standalone-compact" ? LEGACY_NATIVE_COMPACTION_STRATEGY : REMOTE_V2_COMPACTION_STRATEGY,
 			provider: consumer.provider,
 			api: consumer.api,
 			model: consumer.model,
@@ -542,7 +574,7 @@ async function runResponsesNativeCompact(
 			config,
 			ctx,
 		);
-		return { outcome: "failed" };
+		return { outcome: "failed", remoteFailure: { reason: "invalid-native-details" }, protocol };
 	}
 
 	const compaction = createNativeCompactionResult({
@@ -554,7 +586,8 @@ async function runResponsesNativeCompact(
 	writeDebugArtifact(
 		"compaction-event",
 		{
-			event: "session_before_compact.remote-v2-success",
+			event: `session_before_compact.${protocol}-success`,
+			protocol,
 			consumer: {
 				provider: consumer.provider,
 				api: consumer.api,
@@ -829,6 +862,7 @@ async function handleSessionBeforeCompact(
 			resolution.execution,
 			dependencies.remoteCompact,
 			dependencies.projectCompactionContext,
+			dependencies.standaloneCompact,
 		);
 		if (responsesOutcome.outcome === "success") {
 			return { compaction: responsesOutcome.compaction };
@@ -865,7 +899,18 @@ async function handleSessionBeforeCompact(
 			);
 			return { cancel: true };
 		}
-		// failed: fall through to the configured-model fallback below.
+		// Only an actual exhausted remote attempt warns, never an input/routing skip.
+		if (event.signal?.aborted) return { cancel: true };
+		if (responsesOutcome.remoteFailure) {
+			const failure = responsesOutcome.remoteFailure;
+			writeDebugArtifact("compaction-event", {
+				event: "session_before_compact.remote-to-native-summary",
+				protocol: responsesOutcome.protocol,
+				...failure,
+				nextStep: "native-summary",
+			}, config, ctx);
+			notifyWarning(ctx, `Remote compaction failed (${failure.reason}${failure.status ? `, HTTP ${failure.status}` : ""}${failure.errorCode ? `, ${failure.errorCode}` : ""}); continuing with a native text summary. No encrypted remote checkpoint was produced.${failure.errorMessage ? ` ${failure.errorMessage}` : ""}`);
+		}
 	} else {
 		writeDebugArtifact(
 			"compaction-event",
@@ -1380,6 +1425,7 @@ export default function registerCompactionExtension(
 	const manualCompact = new ManagedManualCompact(pi, contextWindows);
 	const dependencies: CompactionDependencies = {
 		remoteCompact: executeRemoteV2Compaction,
+		standaloneCompact: executeNativeCompaction,
 		nativeFallback: runNativeFallbackCompaction,
 		contextWindows,
 		...overrides,

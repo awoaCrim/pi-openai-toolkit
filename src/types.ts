@@ -42,6 +42,7 @@ export type NativeCompactionInputProvenance =
  * replay shim; the provider receives the opaque item from details.compactedWindow.
  */
 export const NATIVE_COMPACTION_FALLBACK_SUMMARY = "[OpenAI remote v2 opaque compaction checkpoint]";
+export const STANDALONE_COMPACTION_FALLBACK_SUMMARY = "[OpenAI standalone opaque compaction window]";
 
 export const THINKING_LEVELS: readonly ThinkingLevel[] = [
 	"off",
@@ -262,6 +263,7 @@ export type NativeCompactionDetails = NativeCompactionIdentity & {
 export type NativeCompactionEntry = CompactionEntry<NativeCompactionDetails>;
 
 export type CreateNativeCompactionDetailsInput = NativeCompactionIdentity & {
+	strategy?: NativeCompactionStrategy;
 	inputProvenance: NativeCompactionInputProvenance;
 	compactionModel?: NativeCompactionIdentity;
 	deferredToolCarryover?: DeferredToolCarryoverV1;
@@ -276,8 +278,8 @@ export type CreateNativeCompactionResultInput = {
 	tokensBefore: number;
 	details: NativeCompactionDetails;
 	/**
-	 * Summary text extracted from the compact response. Stored as the entry summary so
-	 * pi's default replay still has real context after switching to an unsupported model.
+	 * An explicitly supplied genuine summary. Retained standalone assistant text is
+	 * not a summary of the sealed history; ordinary remote success uses an opaque marker.
 	 */
 	summary?: string;
 };
@@ -302,7 +304,7 @@ function isStructuredValue(value: unknown): boolean {
 	if (
 		value === null ||
 		typeof value === "string" ||
-		typeof value === "number" ||
+		(typeof value === "number" && Number.isFinite(value)) ||
 		typeof value === "boolean"
 	) {
 		return true;
@@ -334,17 +336,13 @@ function cloneStructuredValue(value: unknown): unknown {
 	}
 
 	if (isRecord(value)) {
-		const clone: Record<string, unknown> = {};
-		for (const [key, nested] of Object.entries(value)) {
-			clone[key] = cloneStructuredValue(nested);
-		}
-		return clone;
+		return Object.fromEntries(Object.entries(value).map(([key, nested]) => [key, cloneStructuredValue(nested)]));
 	}
 
 	throw new Error(`Unsupported structured value: ${typeof value}`);
 }
 
-function isCompactedWindowItem(value: unknown): value is Record<string, unknown> {
+export function isCompactedWindowItem(value: unknown): value is Record<string, unknown> {
 	return isRecord(value) && Object.values(value).every(isStructuredValue);
 }
 
@@ -471,8 +469,11 @@ export function isNativeCompactionEntry(value: unknown): value is NativeCompacti
 }
 
 export function createNativeCompactionDetails(input: CreateNativeCompactionDetailsInput): NativeCompactionDetails {
+	if (input.strategy !== undefined && input.strategy !== LEGACY_NATIVE_COMPACTION_STRATEGY && input.strategy !== REMOTE_V2_COMPACTION_STRATEGY) {
+		throw new Error("Invalid native compaction strategy");
+	}
 	return {
-		strategy: NATIVE_COMPACTION_STRATEGY,
+		strategy: input.strategy ?? NATIVE_COMPACTION_STRATEGY,
 		inputProvenance: input.inputProvenance,
 		provider: normalizeString(input.provider),
 		api: normalizeString(input.api),
@@ -508,7 +509,9 @@ export function createNativeCompactionResult(
 ): CompactionResult<NativeCompactionDetails> {
 	const summary = input.summary?.trim();
 	return {
-		summary: summary && summary.length > 0 ? summary : NATIVE_COMPACTION_FALLBACK_SUMMARY,
+		summary: summary && summary.length > 0 ? summary
+			: input.details.strategy === LEGACY_NATIVE_COMPACTION_STRATEGY ? STANDALONE_COMPACTION_FALLBACK_SUMMARY
+			: NATIVE_COMPACTION_FALLBACK_SUMMARY,
 		firstKeptEntryId: input.firstKeptEntryId,
 		tokensBefore: input.tokensBefore,
 		details: input.details,
