@@ -1,6 +1,6 @@
 import { resolveToolkitConfig } from "../config";
 import type { LoadedToolkitConfig } from "../types";
-import type { ConfigOrigin } from "./policy";
+import { RETIRED_AUTO_MODE_ISSUE, RETIRED_AUTO_MODE_MESSAGE, type ConfigOrigin } from "./policy";
 import { resolveV2Config } from "./v2";
 
 export type MigrationPreview = {
@@ -21,7 +21,11 @@ function modelRef(key: string): { provider: string; id: string; api: string } {
 
 /** Read-only analysis: never edits a source file or claims a lossy candidate is equivalent. */
 export function previewToolkitMigration(loaded: LoadedToolkitConfig): MigrationPreview {
-	if (loaded.document?.format === "v2") return { status: "already-v2", reasons: ["The document already uses schemaVersion 2."], unmappedPaths: [] };
+	if (loaded.document?.format === "v2") {
+		const retired = resolveToolkitConfig(loaded).issues.filter((issue) => issue.code === RETIRED_AUTO_MODE_ISSUE);
+		return { status: "already-v2", reasons: ["The document already uses schemaVersion 2.",
+			...(retired.length ? [RETIRED_AUTO_MODE_MESSAGE] : [])], unmappedPaths: retired.map((issue) => issue.path) };
+	}
 	if (loaded.document?.format === "invalid" || loaded.document?.format === "missing") {
 		return { status: "unavailable", reasons: ["A readable legacy document is required; no candidate was produced."], unmappedPaths: [] };
 	}
@@ -38,14 +42,12 @@ export function previewToolkitMigration(loaded: LoadedToolkitConfig): MigrationP
 	const keys = new Set([
 		...legacy.webSearch.models,
 		...Object.keys(legacy.webSearch.routes ?? {}),
-		...legacy.autoMode.models,
 		...legacy.compaction.gatewayContextModels,
 	]);
 	for (const key of keys) {
 		const resolved = resolveToolkitConfig(loaded, modelRef(key));
 		const override: Record<string, unknown> = {};
 		if (resolved.policy.webSearch.route !== defaults.webSearch.route) override.webSearch = resolved.policy.webSearch;
-		if (resolved.policy.autoMode.available !== defaults.autoMode.available) override.autoMode = { available: resolved.policy.autoMode.available };
 		if (resolved.policy.compatibility.transport !== "standard") override.compatibility = resolved.policy.compatibility;
 		if (Object.keys(override).length > 0) {
 			models[key] = override;
@@ -59,6 +61,11 @@ export function previewToolkitMigration(loaded: LoadedToolkitConfig): MigrationP
 	}
 	const candidate = { schemaVersion: 2, defaults, models, diagnostics };
 	const reasons: string[] = [];
+	// Retired sections are never migrated; their presence is a controlled removal reason.
+	if (baseline.issues.some((issue) => issue.code === RETIRED_AUTO_MODE_ISSUE)) {
+		reasons.push(RETIRED_AUTO_MODE_MESSAGE + " No Auto Mode settings were migrated; review the removal before applying this candidate.");
+		unmappedPaths.add("autoMode");
+	}
 	if (loaded.warnings.length || baseline.issues.length) {
 		reasons.push("Legacy warnings, unknown fields or normalized invalid values require review. Their original contents remain in the untouched source file.");
 	}
@@ -75,10 +82,6 @@ export function previewToolkitMigration(loaded: LoadedToolkitConfig): MigrationP
 	if (legacy.webSearch.models.length && (legacy.webSearch.defaultRoute !== undefined ||
 		legacy.webSearch.models.some((key) => Object.hasOwn(legacy.webSearch.routes ?? {}, key)))) {
 		unmappedPaths.add("webSearch.models");
-	}
-	if (!legacy.autoMode.enabled && legacy.autoMode.models.length) {
-		reasons.push("Disabled legacy auto mode contains a dormant eligibility list; keep the original file for review.");
-		unmappedPaths.add("autoMode.models");
 	}
 	if (!legacy.compaction.enabled && legacy.compaction.contextManagement === "remote") {
 		reasons.push("Disabled legacy context management retains a dormant remote mode; the candidate selects Pi ownership.");

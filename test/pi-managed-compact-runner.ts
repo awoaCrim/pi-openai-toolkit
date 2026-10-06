@@ -16,7 +16,6 @@ const cancelledAfter = scenario === "cancel-after-schedule";
 const userSelection = scenario === "user-select";
 const excludedNotes = scenario === "excluded-notes";
 const noContinuation = incomplete || cancelledAfter || userSelection || excludedNotes;
-const refused = scenario === "approval-refused";
 const targetKey = `${provider}/${sameModel ? "original" : "checkpoint"}`;
 const packageDir = resolve(import.meta.dir, "..");
 
@@ -55,7 +54,7 @@ try {
 		schemaVersion: 2,
 		defaults: { context: { mode: "remote-windows", remoteCompaction: { model: scenario === "unset-model" ? null : targetKey } } },
 		models: Object.fromEntries(["original", "checkpoint"].map((id) => [`${provider}/${id}`, { ...(native ? {} : { compatibility: { transport: "codex-gateway" } }),
-			...(scenario === "approval-refused" && id === "original" ? { autoMode: { available: true, reviewerModel: "managed/original" } } : {}) }])),
+			...(scenario === "retired-auto-config" && id === "original" ? { autoMode: { available: true, reviewerModel: "managed/original" } } : {}) }])),
 	}));
 	const runtime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsStore: new InMemoryModelsStore(),
 		modelsPath: null, refreshOnCreate: false, allowModelNetwork: false });
@@ -82,7 +81,7 @@ try {
 	let handoffSettlementObserved = false;
 	const errors: string[] = [];
 	const loader = new DefaultResourceLoader({ cwd: env.cwd, agentDir: env.agentDir, settingsManager: settings,
-		additionalExtensionPaths: [join(packageDir, "src/extension-runtime.ts"), ...(scenario === "approval-refused" ? [join(packageDir, "src/auto-mode/extension.ts")] : [])],
+		additionalExtensionPaths: [join(packageDir, "src/extension-runtime.ts")],
 		noSkills: true, noPromptTemplates: true, noContextFiles: true, noThemes: true,
 		systemPromptOverride: () => "MANAGED-SYSTEM-HEAD. Follow the deterministic fixture tools.",
 		extensionFactories: [(pi) => {
@@ -196,22 +195,21 @@ try {
 	try {
 		await session.bindExtensions({ mode: "print", onError: (error) => { errors.push(error.error); } });
 		if (scenario !== "excluded-notes") await session.prompt("ACTIVE-TASK-ONLY-IN-SOURCE: preserve this work and its next steps.");
-		if (scenario === "approval-refused") await session.prompt("/auto on");
 		if (excludedNotes) await session.compact("Preserve the exact acceptance criteria");
 		else await assert.rejects(session.compact("Preserve the exact acceptance criteria"), /cancelled/);
 		const start = Date.now();
-		while (!refused && !excludedNotes && Date.now() - start < 9000 && (settled < (noContinuation ? 2 : 3) || !session.isIdle)) await new Promise((done) => setTimeout(done, 10));
+		while (!excludedNotes && Date.now() - start < 9000 && (settled < (noContinuation ? 2 : 3) || !session.isIdle)) await new Promise((done) => setTimeout(done, 10));
 		if (failure) throw failure;
 		assert.deepEqual(errors, []);
 		assert(session.isIdle, `did not settle: ${JSON.stringify({ requests, settled })}`);
 		assert.equal(session.model?.id, "original");
 		assert.equal(session.thinkingLevel, userSelection ? "medium" : "high");
 		assert.equal(probeExecutions, 0);
-		if (!refused && !excludedNotes) assert(actionableTurns >= 2);
-		assert.equal(noteWrites, refused || excludedNotes ? 0 : 1);
-		assert.equal(noteReads, noContinuation || refused ? 0 : 1);
-		assert.equal(markers().length, scenario === "excluded-notes" ? 0 : incomplete || userSelection || refused ? 1 : 2);
-		assert.equal(resumedCalls, noContinuation || refused ? 0 : scenario === "queues" ? 3 : 2);
+		if (!excludedNotes) assert(actionableTurns >= 2);
+		assert.equal(noteWrites, excludedNotes ? 0 : 1);
+		assert.equal(noteReads, noContinuation ? 0 : 1);
+		assert.equal(markers().length, excludedNotes ? 0 : incomplete || userSelection ? 1 : 2);
+		assert.equal(resumedCalls, noContinuation ? 0 : scenario === "queues" ? 3 : 2);
 		for (const request of requests) {
 			assert.equal((request.reasoning as { effort?: string } | undefined)?.effort, request.model === "original" ? "high" : undefined);
 		}
@@ -226,8 +224,8 @@ try {
 			assert(JSON.stringify(compactions[0]).includes("opaque-excluded-notes"));
 		} else {
 		assert(records.length > 0, "no durable handoff record");
-		assert.equal((records.at(-1) as { data: { phase: string } }).data.phase, userSelection ? "superseded" : incomplete || refused ? "failed" : "completed");
-		if (!incomplete && !userSelection && !refused) {
+		assert.equal((records.at(-1) as { data: { phase: string } }).data.phase, userSelection ? "superseded" : incomplete ? "failed" : "completed");
+		if (!incomplete && !userSelection) {
 			const requestIndex = branch.indexOf(records[0]);
 			const noteIndex = branch.findIndex((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolCallId.startsWith("checkpoint-write"));
 			const markerIndex = branch.findIndex((entry) => entry.id === markers()[1].id);

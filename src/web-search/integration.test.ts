@@ -46,7 +46,6 @@ describe("Compaction and Web Search integration", () => {
 			"./src/extension-runtime.ts",
 			"./src/web-search/extension.ts",
 			"./src/image-generation/extension.ts",
-			"./src/auto-mode/extension.ts",
 			"./src/codex-astra/extension.ts",
 			"./src/responses-websocket/extension.ts",
 		]);
@@ -54,6 +53,7 @@ describe("Compaction and Web Search integration", () => {
 		expect(packageJson.files ?? []).not.toContain("extensions/web-search.ts");
 		expect(packageJson.files ?? []).not.toContain("extensions/image-generation.ts");
 		expect(packageJson.files ?? []).not.toContain("extensions/auto-mode.ts");
+		expect((packageJson.files ?? []).some((file) => file.startsWith("src/auto-mode/"))).toBe(false);
 		expect(packageJson.files ?? []).not.toContain("extensions/codex-astra.ts");
 	});
 

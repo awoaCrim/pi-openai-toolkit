@@ -12,7 +12,7 @@ describe("v2 policy resolution", () => {
 		expect(result.policy.context.mode).toBe("remote-compaction");
 		expect(result.policy.context.remoteCompaction.inputSource).toBe("legacy");
 		expect(result.policy.webSearch.route).toBe("unmanaged");
-		expect(result.policy.autoMode.available).toBe(false);
+		expect(result.policy).not.toHaveProperty("autoMode");
 		expect(result.policy.imageGeneration.enabled).toBe(false);
 		const visit = (value: unknown, prefix = "") => {
 			if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -40,24 +40,22 @@ describe("v2 policy resolution", () => {
 
 	test("merges known fields, replaces arrays, preserves false/zero, and clears nullable references", () => {
 		const result = resolve({ schemaVersion: 2, defaults: {
-			context: { remoteCompaction: { model: " p/producer ", apis: ["openai-responses"] } },
-			autoMode: { available: true, reviewerModel: "p/reviewer", extraTools: ["one", "two"], classifier: { model: "p/classifier" } },
+			context: { remoteCompaction: { model: " p/producer ", apis: ["openai-responses"] }, nativeFallback: { enabled: true, model: "p/summary" } },
 		}, models: { [key]: {
-			context: { remoteCompaction: { model: null, apis: [] }, remoteWindows: { reminderThresholdPercent: 0 } },
-			autoMode: { available: false, reviewerModel: null, extraTools: [" three ", "three"], classifier: { model: null } },
+			context: { remoteCompaction: { model: null, apis: [] }, remoteWindows: { reminderThresholdPercent: 0 }, nativeFallback: { enabled: false, model: null } },
 			compatibility: { transport: "codex-gateway" },
 		} } });
 		expect(result.invalidFeatures).toEqual([]);
 		expect(result.policy.context.remoteCompaction).toMatchObject({ model: null, apis: [], inputSource: "legacy" });
 		expect(result.policy.context.remoteWindows.reminderThresholdPercent).toBe(0);
-		expect(result.policy.autoMode).toMatchObject({ available: false, reviewerModel: null, extraTools: ["three"], classifier: { model: null } });
+		expect(result.policy.context.nativeFallback).toMatchObject({ enabled: false, model: null });
 		expect(result.policy.compatibility.transport).toBe("codex-gateway");
-		expect(result.origins["autoMode.reviewerModel"]).toEqual({ kind: "model", path: `models["${key}"].autoMode.reviewerModel` });
+		expect(result.origins["context.nativeFallback.model"]).toEqual({ kind: "model", path: `models["${key}"].context.nativeFallback.model` });
 	});
 
 	test("omitted leaves inherit and diagnostics have global provenance", () => {
 		const result = resolve({ schemaVersion: 2, defaults: { webSearch: { route: "local" } },
-			models: { [key]: { autoMode: { available: true } } }, diagnostics: { captureResponses: true } });
+			models: { [key]: { context: { mode: "pi" } } }, diagnostics: { captureResponses: true } });
 		expect(result.policy.webSearch.route).toBe("local");
 		expect(result.origins["webSearch.route"]).toEqual({ kind: "defaults", path: "defaults.webSearch.route" });
 		expect(result.origins["diagnostics.captureResponses"].path).toBe("diagnostics.captureResponses");
@@ -66,7 +64,7 @@ describe("v2 policy resolution", () => {
 	for (const raw of [null, [], {}, { schemaVersion: 3 }, { schemaVersion: 2, compaction: {} }, { schemaVersion: 2, defaults: null }]) {
 		test(`rejects malformed/version-mixed document ${JSON.stringify(raw)}`, () => {
 			expect(resolve(raw).invalidFeatures).toContain("webSearch");
-			expect(resolve(raw).invalidFeatures).toContain("autoMode");
+			expect(resolve(raw).invalidFeatures).toContain("context");
 		});
 	}
 
@@ -77,7 +75,7 @@ describe("v2 policy resolution", () => {
 	});
 
 	test("reports unrelated model errors without invalidating this model", () => {
-		const result = resolve({ schemaVersion: 2, models: { "other/model": { webSearch: { route: "typo" }, autoMode: null }, [key]: { webSearch: { route: "local" } } } });
+		const result = resolve({ schemaVersion: 2, models: { "other/model": { webSearch: { route: "typo" }, context: null }, [key]: { webSearch: { route: "local" } } } });
 		expect(result.issues.length).toBeGreaterThan(0);
 		expect(result.invalidFeatures).toEqual([]);
 		expect(result.policy.webSearch.route).toBe("local");
@@ -110,10 +108,12 @@ describe("v2 policy resolution", () => {
 	});
 
 	test("rejects patterns/model-less references but accepts nested model ids", () => {
-		const bad = resolve({ schemaVersion: 2, defaults: { autoMode: { reviewerModel: "p/*" } }, models: { "p/*": {} } });
-		expect(bad.invalidFeatures).toContain("autoMode");
-		expect(bad.issues.length).toBeGreaterThan(1);
-		expect(resolve({ schemaVersion: 2, defaults: { autoMode: { reviewerModel: "p/family/model" } } }).policy.autoMode.reviewerModel).toBe("p/family/model");
+		for (const model of ["p/*", "model-without-provider"]) {
+			const bad = resolve({ schemaVersion: 2, defaults: { context: { nativeFallback: { model } } }, models: { "p/*": {} } });
+			expect(bad.invalidFeatures).toContain("context");
+			expect(bad.issues.length).toBeGreaterThan(1);
+		}
+		expect(resolve({ schemaVersion: 2, defaults: { context: { nativeFallback: { model: "p/family/model" } } } }).policy.context.nativeFallback.model).toBe("p/family/model");
 	});
 
 	test("validates image membership independently of list order", () => {
@@ -128,8 +128,8 @@ describe("v2 policy resolution", () => {
 
 	test("invalid API narrowing and numeric limits are errors rather than fallback policies", () => {
 		expect(resolve({ schemaVersion: 2, defaults: { context: { remoteCompaction: { apis: ["other-api"] } } } }).invalidFeatures).toContain("context");
-		for (const autoMode of [{ timeoutMs: 0 }, { maxEvidenceRounds: 9 }, { classifier: { maxLag: -1 } }, { circuitBreaker: { windowSize: 0 } }]) {
-			expect(resolve({ schemaVersion: 2, defaults: { autoMode } }).invalidFeatures).toContain("autoMode");
+		for (const reminderThresholdPercent of [-1, 101, 0.5]) {
+			expect(resolve({ schemaVersion: 2, defaults: { context: { remoteWindows: { reminderThresholdPercent } } } }).invalidFeatures).toContain("context");
 		}
 	});
 

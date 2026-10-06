@@ -2,8 +2,6 @@ import { randomUUID } from "node:crypto";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { buildSessionContext, estimateTokens, type ExtensionAPI, type ExtensionContext, type SessionBeforeCompactEvent, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { resolveToolkitConfig, type ResolvedToolkitConfig } from "../config";
-import { isAutoModeEligible } from "../auto-mode/policy";
-import { protectAutoModeSelection } from "../auto-mode/model-selection-guard";
 import { parseModelSpec } from "../runtime";
 import { THINKING_LEVELS } from "../types";
 import { resolveCodexContextProvider } from "./codex-provider";
@@ -88,7 +86,6 @@ export class ManagedManualCompact implements ContextRolloverHandoff {
 	private sourcePolicy: ResolvedToolkitConfig | undefined;
 	private instructions = "";
 	private attemptSignal: AbortSignal | undefined;
-	private releaseApproval: (() => void) | undefined;
 	private selecting: string | undefined;
 	private selectionPromise: Promise<boolean> | undefined;
 	private expectedThinking: ThinkingLevel | undefined;
@@ -123,8 +120,6 @@ export class ManagedManualCompact implements ContextRolloverHandoff {
 	private clearActivity(): void {
 		clearTimeout(this.deliveryTimer);
 		this.deliveryTimer = undefined;
-		this.releaseApproval?.();
-		this.releaseApproval = undefined;
 		this.sourcePolicy = undefined;
 	}
 	private belongs(ctx: ExtensionContext, record = this.record): boolean {
@@ -193,12 +188,6 @@ export class ManagedManualCompact implements ContextRolloverHandoff {
 			if (!originalProvider.ok || !targetProvider.ok || !sameContextScope(originalProvider.provider, targetProvider.provider)) {
 				throw new Error("checkpoint model must authenticate to the same context backend/account");
 			}
-			const protection = protectAutoModeSelection(this.pi, {
-				sessionId: this.record!.sessionId, operationId: this.record!.operationId, target,
-				eligible: !targetPolicy.invalidFeatures.includes("autoMode") && isAutoModeEligible(target, targetPolicy.config.autoMode),
-			});
-			this.releaseApproval = protection.release;
-			if (!protection.allowed) throw new Error("checkpoint model would disable the engaged approval gate; allowlist it or choose another model");
 			this.notify(ctx, `checkpoint handoff requested (${this.record!.originalModel} → ${targetKey}); native compaction is intentionally cancelled.`);
 		} catch (error) {
 			if (!this.current(ctx, generation)) return;

@@ -46,12 +46,6 @@
         }
       ]
     },
-    "stringList": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
     "responsesApis": {
       "type": "array",
       "items": {
@@ -194,91 +188,9 @@
         }
       }
     },
-    "autoMode": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "available": {
-          "type": "boolean"
-        },
-        "reviewerModel": {
-          "$ref": "#/$defs/modelRef"
-        },
-        "gate": {
-          "enum": [
-            "side-effect",
-            "all"
-          ]
-        },
-        "extraTools": {
-          "$ref": "#/$defs/stringList"
-        },
-        "timeoutMs": {
-          "type": "integer",
-          "minimum": 1000,
-          "maximum": 120000
-        },
-        "transcript": {
-          "type": "boolean"
-        },
-        "evidenceTools": {
-          "type": "boolean"
-        },
-        "maxEvidenceRounds": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 8
-        },
-        "classifier": {
-          "$ref": "#/$defs/classifier"
-        },
-        "circuitBreaker": {
-          "$ref": "#/$defs/circuitBreaker"
-        }
-      }
-    },
-    "classifier": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "model": {
-          "$ref": "#/$defs/modelRef"
-        },
-        "timeoutMs": {
-          "type": "integer",
-          "minimum": 1000,
-          "maximum": 120000
-        },
-        "maxLag": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 20
-        }
-      }
-    },
-    "circuitBreaker": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "consecutiveDenials": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 100
-        },
-        "recentDenials": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 100
-        },
-        "windowSize": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 200
-        }
-      }
+    "retiredAutoMode": {
+      "deprecated": true,
+      "description": "Auto Mode has been removed. This value is ignored with a warning; tool calls are no longer reviewed by it. Remove this section from your configuration."
     },
     "compatibility": {
       "type": "object",
@@ -309,7 +221,7 @@
           "$ref": "#/$defs/responsesWebSocket"
         },
         "autoMode": {
-          "$ref": "#/$defs/autoMode"
+          "$ref": "#/$defs/retiredAutoMode"
         }
       }
     },
@@ -324,7 +236,7 @@
           "$ref": "#/$defs/webSearch"
         },
         "autoMode": {
-          "$ref": "#/$defs/autoMode"
+          "$ref": "#/$defs/retiredAutoMode"
         },
         "compatibility": {
           "$ref": "#/$defs/compatibility"

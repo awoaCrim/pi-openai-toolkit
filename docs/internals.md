@@ -11,7 +11,6 @@ Developer-facing reference for [pi-openai-toolkit](../README.md). The README kee
 - [Rollover lifecycle](#rollover-lifecycle)
 - [Managed manual compact](#managed-manual-compact)
 - [Remote Compaction v2 wire contract](#remote-compaction-v2-wire-contract)
-- [Auto Mode TUI review renderer](#auto-mode-tui-review-renderer)
 - [Artifacts and debugging](#artifacts-and-debugging)
 - [Provenance](#provenance)
 
@@ -23,7 +22,7 @@ The single global document is loaded through [src/config.ts](../src/config.ts). 
 
 Feature entrypoints resolve once per public operation and pass that immutable snapshot through awaited helpers. A separately named compaction producer is resolved from the same decoded document for its own identity. Subsequent independent callbacks reload; a managed manual handoff retains its initiating context-policy snapshot until selection is restored. There is no general cross-event provider transaction, project lookup, singleton cache, or config state writer. Internal legacy-shaped engine adapters preserve compaction/search algorithms without exposing v2 parsing to consumers. Cross-feature gateway policy belongs to the resolver, not the context enable switch.
 
-Selected invalid policy blocks dependent operations; unrelated model errors remain reportable without replacing the selected model. An engaged auto gate stays blocking when its policy becomes invalid. Image choices are checked before auth, uploads, or paid requests. The human `/toolkit-config` command inspects effective values, validation, or a migration candidate without action APIs or network access. Migration is preview-only; source bytes and unknown/dormant content stay untouched.
+Selected invalid policy blocks dependent operations; unrelated model errors remain reportable without replacing the selected model. Retired `autoMode` sections are ignored with a warning; they never create effective policy or invalidate other features. Image choices are checked before auth, uploads, or paid requests. The human `/toolkit-config` command inspects effective values, validation, or a migration candidate without action APIs or network access. Migration is preview-only; source bytes and unknown/dormant content stay untouched.
 
 ---
 
@@ -105,15 +104,13 @@ State invariants the lifecycle code must keep honest:
 
 [src/context-management/manual-compact.ts](../src/context-management/manual-compact.ts) owns manual checkpoint duty. It uses public Pi lifecycle and selection APIs; it does not replace the built-in command or patch the scheduler. [src/context-management/window-manager.ts](../src/context-management/window-manager.ts) remains the sole owner of notes pairing, window identity, projection and trim.
 
-1. An active managed `session_before_compact` with reason `manual` validates the source/target policies from one snapshot, actual permitted tools, remaining capacity, backend/account scope and approval eligibility. It records the original model/thinking and cancels the native compact attempt. Internal window-bulk maintenance has a separate in-process owner even though Pi also labels it `manual`.
+1. An active managed `session_before_compact` with reason `manual` validates the source/target policies from one snapshot, actual permitted tools, remaining capacity and backend/account scope. It records the original model/thinking and cancels the native compact attempt. Internal window-bulk maintenance has a separate in-process owner even though Pi also labels it `manual`.
 2. The matching `session_compact_failed` callback launches duty only after Pi is idle. Public `setModel` changes the session selection, and a visible `sendUserMessage` rebuilds the target's normal prompt/tools. Delivery is observed through `message_start`; return from the fire-and-forget send API is not proof. A delivery timeout restores an abandoned idle selection.
 3. The existing `new_context` gate additionally requires a successful paired notes result after this operation and any later delivered user message. It records the exact target window before queueing a context-only marker, and returns a terminating result. Ordinary tools are blocked during checkpoint duty. Normal `new_context` outside this operation is unchanged.
 4. A terminating result alone does not stop mixed batches or queued messages. At `turn_end`, Toolkit requests abort without awaiting idle; context/request guards also refuse an unsafe continuation. The standard Responses and native Codex transports must not send an already-aborted continuation. Pi can deliver queued user content during that stop; it remains persisted and ordered for the original model.
 5. At `agent_settled`, after Pi has flushed custom messages, the controller verifies the exact durable marker and fresh checkpoint, restores original model/thinking, and sends one visible receipt-reading continuation. Pi 0.87 defers that continuation until every settled handler has returned, so later observers still see an idle session. Restoration finishes before the next provider request; marker `message_end` alone is not proof of persistence.
 
 Versioned `pi-openai-toolkit:manual-compact` custom entries record operation/session/branch/window identities, exact model keys, original thinking and phase. They contain no credentials, transcript copy or note contents. Reload/navigation reads the current branch and only recovers still-owned selection; it never retries notes, rollover or paid inference. A newer user model/thinking selection ends ownership. Failed restoration stays durable and blocks further provider requests until recovery or an explicit user selection.
-
-An engaged Auto Mode gate grants a session/operation-scoped selection lease through [src/auto-mode/model-selection-guard.ts](../src/auto-mode/model-selection-guard.ts). An ineligible target is refused. While switching, a later eligibility change cannot silently disengage the gate: calls remain blocked. The lease neither enables Auto Mode nor widens its allowlist.
 
 The underlying native compact promise still rejects its intentional cancellation. Empty/already-compacted sessions can fail before the extension hook. This is a separate handoff operation, not a fabricated successful native compaction. An observed user cancellation before the owned checkpoint stop restores selection without automatically resuming. Tests use the official Pi runtime, disk-backed sessions, isolated HOME/settings and synthetic Responses/native Codex traffic in [test/pi-managed-compact.test.ts](../test/pi-managed-compact.test.ts); they assert every request's model/thinking, marker/note order, retained tool head and queue preservation.
 
@@ -136,25 +133,6 @@ Setting `context.remoteCompaction.inputSource: "pi-context-hook"` opts into a na
 Retained-message matching uses the SDK projection and source entry IDs, including omissions and replacements made before compaction. Older retained compaction entries contribute no second summary. A compaction whose kept boundary is its own ID retains no earlier messages. Edits to post-checkpoint input are applied to the live tail; an edit targeting history already sealed in an opaque checkpoint blocks replay and recursive compaction with `checkpoint-context-edited`. The encrypted checkpoint cannot be selectively rewritten. Start a new session or navigate before that checkpoint to rebuild from editable history; the raw log remains unchanged.
 
 New checkpoints record `inputProvenance: "pi-context-hook-v1"` or `"legacy-raw-context-v1"`, and replay/recursion reject missing or mode-mismatched markers without searching past the latest compaction. Retained `role: "custom"` messages are optional during replay because they may be changed or removed by context hooks; required user, assistant, and complete tool-call/result content remains ordered and fail-closed.
-
----
-
-### Auto Mode TUI review renderer
-
-Approval state is scoped to actual user-message delivery. Full structured user content is SHA-256 hashed independently of transcript truncation, and generation-owned classifier completions cannot overwrite newer samples. The bounded transcript selects recent user instructions first and reports omissions. The blocking reviewer and its read-only evidence loop share one deadline that also races uncooperative dependencies; timeout/cancellation is an unavailable review, never approval or a safety denial.
-
-Auto Mode owns the review decision, but Pi owns the built-in tool-block component. Pi 0.87 exports `ToolExecutionComponent` without a public decorator interface, so `src/auto-mode/tool-review-tui.ts` installs a narrow, idempotent compatibility patch on its `render()` method. The patch only reads the component's existing tool-call ID and appends one bounded, single-line status after the normal block output; it never changes tool execution, event ordering, or provider payloads.
-
-The extension updates an ephemeral per-call state through the same `tool_call` lifecycle that performs the review:
-
-- `skipped` when the tool is outside the configured Auto Mode gate;
-- `reviewing` while the reviewer model is running;
-- `awaiting-user` when an unavailable review reaches interactive confirmation;
-- `allowed`, `denied`, or `blocked` after the final decision.
-
-The state is intentionally not persisted to the session. It is bounded to recent calls and cleared at `session_start`, so reloading a session does not invent historical approval claims. The renderer uses Pi's current theme when available, truncates untrusted rationale text, and preserves the original render output when no state exists.
-
-This is a version-coupled adapter, not a stable Pi extension contract. It is feature-detected at registration time and marked with a global symbol so extension reloads do not wrap the class repeatedly. If the exported component shape changes or becomes non-writable, the adapter becomes a no-op, emits one warning in TUI mode, and the existing footer/working-message review indicators remain the fallback.
 
 ---
 

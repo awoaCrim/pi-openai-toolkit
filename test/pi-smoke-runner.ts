@@ -15,7 +15,7 @@ try {
 	await mkdir(configDir, { recursive: true });
 	await writeFile(join(configDir, "config.json"), JSON.stringify({
 		schemaVersion: 2,
-		defaults: { responsesWebSocket: { enabled: true } },
+		defaults: { responsesWebSocket: { enabled: true }, autoMode: { available: true, reviewerModel: "missing/reviewer" } },
 	}));
 	const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } =
 		await import("@earendil-works/pi-coding-agent");
@@ -44,6 +44,10 @@ try {
 	});
 	await resourceLoader.reload();
 	if (resourceLoader.getExtensions().errors.length) throw new Error(`Pi extension load failed: ${JSON.stringify(resourceLoader.getExtensions().errors)}`);
+	for (const extension of resourceLoader.getExtensions().extensions) {
+		if (extension.commands.has("auto") || extension.flags.has("auto")) throw new Error("Removed Auto Mode controls were registered");
+		if (extension.resolvedPath.replaceAll("\\", "/").includes("/auto-mode/")) throw new Error("Removed Auto Mode extension was loaded");
+	}
 	const { session } = await createAgentSession({
 		cwd: env.cwd, agentDir: env.agentDir, modelRuntime, settingsManager, resourceLoader,
 		sessionManager: SessionManager.inMemory(env.cwd), model: faux.getModel(),

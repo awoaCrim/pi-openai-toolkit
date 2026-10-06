@@ -1,6 +1,6 @@
 # pi-openai-toolkit
 
-为 Pi 添加远程上下文窗口、Responses 压缩、联网搜索、图像生成和工具调用审查。沿用 Pi 的模型、端点、认证和会话配置，不另行注册提供商或模型。
+为 Pi 添加远程上下文窗口、Responses 压缩、联网搜索和图像生成。沿用 Pi 的模型、端点、认证和会话配置，不另行注册提供商或模型。
 
 [![npm 版本](https://img.shields.io/npm/v/pi-openai-toolkit.svg)](https://www.npmjs.com/package/pi-openai-toolkit)
 [![MIT](https://img.shields.io/npm/l/pi-openai-toolkit.svg)](LICENSE)
@@ -15,7 +15,7 @@
 pi install npm:pi-openai-toolkit
 ```
 
-在 Pi 中配置好模型和凭据后，照常启动。没有 Toolkit 配置文件时，符合条件的模型默认使用远程压缩；搜索由 Pi 和其他扩展管理，生图和 Auto Mode 默认关闭。
+在 Pi 中配置好模型和凭据后，照常启动。没有 Toolkit 配置文件时，符合条件的模型默认使用远程压缩；搜索由 Pi 和其他扩展管理，生图默认关闭。
 
 Toolkit 只读取一个全局配置文件，即使扩展安装在项目内也一样：
 
@@ -58,7 +58,7 @@ Toolkit 只读取一个全局配置文件，即使扩展安装在项目内也一
 
 远程窗口依赖 alpha 接口，上游可能随时调整。切换模型时远程窗口状态仍会持久化并可复用，详见[窗口生命周期](docs/internals.md#rollover-lifecycle)。
 
-## 搜索、生图与工具审查
+## 搜索、生图与传输
 
 ### 联网搜索
 
@@ -107,29 +107,9 @@ Toolkit 的 WebSocket adapter 默认关闭。对使用 Pi `openai-responses` API
 
 它沿用当前模型的 provider、base URL、凭据、headers 和 model ID，不注册新的 provider。Pi 的 `transport: "auto"` 会先尝试 WebSocket，并在开始流式输出前回退到 SSE；会话 ID 稳定时还会复用连接，并在历史匹配时只发送新的 continuation 输入。使用 `transport: "websocket-cached"` 可强制要求缓存连接路径，使用 `transport: "sse"` 则保持原有 HTTP/SSE 路径。修改 Toolkit 配置后请重启或 reload Pi。详见[WebSocket 配置](docs/configuration.md#responses-websocket-transport)。
 
-### Auto Mode
-
-Auto Mode 在工具执行前进行模型审查。先允许使用并指定 Pi 中已注册、可认证的审查模型，再手动开启：
-
-```json
-{
-  "schemaVersion": 2,
-  "defaults": {
-    "autoMode": {
-      "available": true,
-      "reviewerModel": "provider/reviewer-model-id"
-    }
-  }
-}
-```
-
-将 `provider/reviewer-model-id` 替换为实际模型。用 `/auto on` 或启动参数 `--auto` 开启，`/auto off` 关闭；只设置 `available: true` 不会自动开启。
-
-默认 `gate: "side-effect"` 审查 `bash`、`write`、`edit` 和 `extraTools` 中的工具，`gate: "all"` 审查所有工具。支持只读取证、拒绝次数熔断和可选的后台分类器预评分；开启分类器后，部分调用可依据预评分放行。
-
-审查超时或不可用不算批准：交互模式会请求用户确认，无界面模式会阻止调用。它不是沙箱，也不保证每次判断正确；选择不符合条件的模型会关闭 Auto Mode。完整配置见[Auto Mode](docs/configuration.md#auto-mode)。
-
 ## 兼容性与排查
+
+Auto Mode、`/auto` 和 `--auto` 已移除，Toolkit 不再通过此功能审查工具调用。旧 `autoMode` 配置会被忽略并提示警告，可手动删除；其他有效设置继续正常工作。详见[移除说明](docs/configuration.md#removed-auto-mode)。
 
 - 提供商、端点和凭据仍由 Pi 管理，不写进 Toolkit 配置。Azure 的部署映射、`api-version` 和认证说明见[提供商配置](docs/configuration.md#provider-specific-responses-endpoints)
 - `pi-virtual` 使用 Pi 解析出的实际提供商和模型检查能力，不按虚拟模型名称推断支持情况

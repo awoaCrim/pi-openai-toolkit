@@ -1,12 +1,20 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ResolvedToolkitConfig } from "../config";
-import type { ConfigIssue } from "./policy";
+import { RETIRED_AUTO_MODE_ISSUE, RETIRED_AUTO_MODE_MESSAGE, type ConfigIssue } from "./policy";
 import { redactValue } from "../debug";
 
 const lastNotice = new WeakMap<object, string>();
 
+/** Controlled human text for a known code; never built from user-supplied configuration values. */
+function issueExplanation(issue: ConfigIssue): string {
+	return issue.code === RETIRED_AUTO_MODE_ISSUE
+		? RETIRED_AUTO_MODE_MESSAGE
+		: issue.code;
+}
+
 export function formatConfigIssues(issues: readonly ConfigIssue[], limit = 12): string {
-	const lines = issues.slice(0, limit).map((issue) => `${issue.severity}: ${issue.path.slice(0, 220)} — ${issue.code}`);
+	const lines = issues.slice(0, limit).map((issue) =>
+		`${issue.severity}: ${issue.path.slice(0, 220)} — ${issueExplanation(issue)}`);
 	if (issues.length > limit) lines.push(`${issues.length - limit} more issue(s); inspect the configuration file.`);
 	return String(redactValue(lines.join("\n")));
 }

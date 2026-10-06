@@ -46,6 +46,20 @@ test("editor schema covers every effective field and its built-in value", () => 
 	for (const [feature, value] of Object.entries(policy)) inspect(value, schema.$defs[feature]);
 });
 
+test("schema retains only opaque deprecated compatibility entries for Auto Mode", () => {
+	const schema = JSON.parse(read("config.schema.json"));
+	expect(schema.$defs).not.toHaveProperty("autoMode");
+	expect(schema.$defs).not.toHaveProperty("classifier");
+	expect(schema.$defs).not.toHaveProperty("circuitBreaker");
+	for (const scope of ["defaults", "modelOverride"]) {
+		const ref = schema.$defs[scope].properties.autoMode.$ref;
+		const retired = schema.$defs[ref.split("/").at(-1)];
+		expect(retired.deprecated).toBe(true);
+		expect(retired.description).toContain("no longer reviewed");
+		expect(Object.keys(retired).sort()).toEqual(["deprecated", "description"]);
+	}
+});
+
 test("package includes configuration runtime/schema/reference but no test helpers", () => {
 	const files: string[] = JSON.parse(read("package.json")).files;
 	for (const file of ["src/config.ts", "src/config-command.ts", "config.schema.json", "docs/configuration.md",

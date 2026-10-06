@@ -1,6 +1,6 @@
 # pi-openai-toolkit
 
-Remote context windows, Responses compaction, web search, image generation, and tool-call review for Pi. Uses Pi's existing models, endpoints, authentication, and sessions without registering another provider or model.
+Remote context windows, Responses compaction, web search, and image generation for Pi. Uses Pi's existing models, endpoints, authentication, and sessions without registering another provider or model.
 
 [![npm version](https://img.shields.io/npm/v/pi-openai-toolkit.svg)](https://www.npmjs.com/package/pi-openai-toolkit)
 [![MIT](https://img.shields.io/npm/l/pi-openai-toolkit.svg)](LICENSE)
@@ -15,7 +15,7 @@ Requires Node.js **22.19.0+** and Pi **0.87.0+**. Current development dependenci
 pi install npm:pi-openai-toolkit
 ```
 
-Configure your model and credentials in Pi, then start Pi normally. Without a Toolkit config file, eligible models use remote compaction by default. Search remains managed by Pi and other extensions; image generation and Auto Mode are off.
+Configure your model and credentials in Pi, then start Pi normally. Without a Toolkit config file, eligible models use remote compaction by default. Search remains managed by Pi and other extensions; image generation is off.
 
 Toolkit reads one global configuration file, even for a project-local installation:
 
@@ -58,7 +58,7 @@ Change `mode` in the example above to `remote-windows`. Eligible sessions expose
 
 Remote windows use alpha endpoints that may change upstream. When switching models, the remote window remains persisted and reusable; see the [window lifecycle](docs/internals.md#rollover-lifecycle).
 
-## Search, images, and tool review
+## Search, images, and transport
 
 ### Web search
 
@@ -107,29 +107,9 @@ The Toolkit WebSocket adapter is disabled by default. Enable it globally for GPT
 
 It reuses the selected model's provider, base URL, credentials, headers, and model ID without registering another provider. Pi's `transport: "auto"` tries WebSocket first and falls back to SSE before streaming starts; with a stable session it also reuses the socket and sends only the new continuation input when the transcript matches. Use `transport: "websocket-cached"` to require that cached path, or `transport: "sse"` to keep the original HTTP/SSE path. Restart or reload Pi after changing the Toolkit setting. See [WebSocket configuration](docs/configuration.md#responses-websocket-transport).
 
-### Auto Mode
-
-Auto Mode uses model-based review before tool execution. Permit it and select a reviewer registered and authenticated in Pi, then engage it explicitly:
-
-```json
-{
-  "schemaVersion": 2,
-  "defaults": {
-    "autoMode": {
-      "available": true,
-      "reviewerModel": "provider/reviewer-model-id"
-    }
-  }
-}
-```
-
-Replace `provider/reviewer-model-id` with a real model reference. Use `/auto on` or the `--auto` startup flag to engage, and `/auto off` to disengage. Setting `available: true` alone does not engage the gate.
-
-The default `gate: "side-effect"` reviews `bash`, `write`, `edit`, and `extraTools`. Use `gate: "all"` to cover every tool. Read-only evidence gathering, denial circuit breakers, and optional background classifier pre-scoring are supported. With the classifier enabled, some calls can pass based on a pre-score.
-
-A timeout or unavailable review is never approval: interactive sessions ask for confirmation, while headless sessions block the call. This is not a sandbox or a guarantee of correct decisions. Selecting an ineligible model disengages Auto Mode. See [Auto Mode settings](docs/configuration.md#auto-mode).
-
 ## Compatibility and troubleshooting
+
+Auto Mode, `/auto`, and `--auto` have been removed. Toolkit no longer reviews tool calls through this feature. Existing `autoMode` configuration is ignored with a warning and can be deleted; other valid settings keep working. See [removal guidance](docs/configuration.md#removed-auto-mode).
 
 - Keep providers, endpoints, and credentials in Pi, not Toolkit configuration. See [provider setup](docs/configuration.md#provider-specific-responses-endpoints) for Azure deployment mapping, `api-version`, and authentication
 - `pi-virtual` capability checks use the physical provider/model resolved by Pi, without inferring support from the virtual model's name

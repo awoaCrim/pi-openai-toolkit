@@ -13,8 +13,8 @@
  * {
  *   "schemaVersion": 2,
  *   "$schema": "…metadata only…",
- *   "defaults": { "context": …, "webSearch": …, "imageGeneration": …, "responsesWebSocket": …, "autoMode": … },
- *   "models": { "provider/model-id": { "context": …, "webSearch": …, "autoMode": …, "compatibility": … } },
+ *   "defaults": { "context": …, "webSearch": …, "imageGeneration": …, "responsesWebSocket": … },
+ *   "models": { "provider/model-id": { "context": …, "webSearch": …, "compatibility": … } },
  *   "diagnostics": { … }
  * }
  * ```
@@ -22,9 +22,9 @@
  * Rules:
  * - Precedence is built-ins -> `defaults` -> the exact override of the resolved model.
  * - Only known nested objects merge by field; arrays replace; `false` and `0` stay meaningful.
- * - `null` is accepted only for the optional producer/reviewer/classifier model references and
- *   clears an inherited reference. `null` anywhere else is a path-specific error and never
- *   deletes an object.
+ * - Active settings accept `null` only for optional producer/native-summary model references;
+ *   it clears an inherited reference, never an object. Retired `autoMode` sections at defaults
+ *   and model scope are ignored in any shape with a warning and never create effective policy.
  * - Unknown properties are errors with masked names. Model-key diagnostic segments are bounded;
  *   raw values and unknown subtrees are never copied into diagnostics.
  * - `defaults.compatibility` is not a recognized scope: the standard transport is internal and
@@ -54,21 +54,12 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { MAX_IMAGE_MODEL_ID_CHARS } from "../image-generation/types";
 import {
-	BREAKER_LIMIT_MAX,
-	BREAKER_LIMIT_MIN,
-	BREAKER_WINDOW_MAX,
-	BREAKER_WINDOW_MIN,
-	CLASSIFIER_MAX_LAG_MAX,
-	CLASSIFIER_MAX_LAG_MIN,
-	EVIDENCE_ROUNDS_MAX,
-	EVIDENCE_ROUNDS_MIN,
 	RESPONSES_COMPACT_CAPABLE_APIS,
-	REVIEWER_TIMEOUT_MAX_MS,
-	REVIEWER_TIMEOUT_MIN_MS,
 	THINKING_LEVELS,
 } from "../types";
 import {
 	CONFIG_FEATURES,
+	RETIRED_AUTO_MODE_ISSUE,
 	createPolicyDefaults,
 	type ConfigFeature,
 	type ConfigIssue,
@@ -113,7 +104,6 @@ const CONTEXT_MODES = ["pi", "remote-compaction", "remote-windows"] as const;
 const INPUT_SOURCES = ["legacy", "pi-context-hook"] as const;
 const LEAVE_MANAGED_MODES = ["warn", "compact"] as const;
 const SEARCH_ROUTES = ["unmanaged", "local", "hosted", "standalone-alpha"] as const;
-const AUTO_GATES = ["side-effect", "all"] as const;
 const TRANSPORTS = ["standard", "codex-gateway"] as const;
 const DIAGNOSTIC_LEVELS = ["error", "warn", "info", "debug"] as const;
 
@@ -130,20 +120,6 @@ const REMOTE_WINDOWS_KEYS = new Set(["leaveManagedMode", "reminderThresholdPerce
 const WEB_SEARCH_KEYS = new Set(["route"]);
 const IMAGE_GENERATION_KEYS = new Set(["enabled", "defaultModel", "allowedModels"]);
 const RESPONSES_WEBSOCKET_KEYS = new Set(["enabled"]);
-const AUTO_MODE_KEYS = new Set([
-	"available",
-	"reviewerModel",
-	"gate",
-	"extraTools",
-	"timeoutMs",
-	"transcript",
-	"evidenceTools",
-	"maxEvidenceRounds",
-	"classifier",
-	"circuitBreaker",
-]);
-const CLASSIFIER_KEYS = new Set(["enabled", "model", "timeoutMs", "maxLag"]);
-const BREAKER_KEYS = new Set(["consecutiveDenials", "recentDenials", "windowSize"]);
 const COMPATIBILITY_KEYS = new Set(["transport"]);
 const DIAGNOSTICS_KEYS = new Set([
 	"level",
@@ -158,7 +134,6 @@ const DIAGNOSTICS_KEYS = new Set([
 const MODEL_OVERRIDABLE_FEATURES: readonly ConfigFeature[] = [
 	"context",
 	"webSearch",
-	"autoMode",
 	"compatibility",
 ];
 
@@ -173,7 +148,6 @@ const FEATURE_NAMES: ReadonlyMap<string, ConfigFeature> = new Map<string, Config
 	["webSearch", "webSearch"],
 	["imageGeneration", "imageGeneration"],
 	["responsesWebSocket", "responsesWebSocket"],
-	["autoMode", "autoMode"],
 	["compatibility", "compatibility"],
 	["diagnostics", "diagnostics"],
 ]);
@@ -198,21 +172,6 @@ const POLICY_LEAVES: readonly { leaf: string; feature: ConfigFeature }[] = [
 	{ leaf: "imageGeneration.defaultModel", feature: "imageGeneration" },
 	{ leaf: "imageGeneration.allowedModels", feature: "imageGeneration" },
 	{ leaf: "responsesWebSocket.enabled", feature: "responsesWebSocket" },
-	{ leaf: "autoMode.available", feature: "autoMode" },
-	{ leaf: "autoMode.reviewerModel", feature: "autoMode" },
-	{ leaf: "autoMode.gate", feature: "autoMode" },
-	{ leaf: "autoMode.extraTools", feature: "autoMode" },
-	{ leaf: "autoMode.timeoutMs", feature: "autoMode" },
-	{ leaf: "autoMode.transcript", feature: "autoMode" },
-	{ leaf: "autoMode.evidenceTools", feature: "autoMode" },
-	{ leaf: "autoMode.maxEvidenceRounds", feature: "autoMode" },
-	{ leaf: "autoMode.classifier.enabled", feature: "autoMode" },
-	{ leaf: "autoMode.classifier.model", feature: "autoMode" },
-	{ leaf: "autoMode.classifier.timeoutMs", feature: "autoMode" },
-	{ leaf: "autoMode.classifier.maxLag", feature: "autoMode" },
-	{ leaf: "autoMode.circuitBreaker.consecutiveDenials", feature: "autoMode" },
-	{ leaf: "autoMode.circuitBreaker.recentDenials", feature: "autoMode" },
-	{ leaf: "autoMode.circuitBreaker.windowSize", feature: "autoMode" },
 	{ leaf: "compatibility.transport", feature: "compatibility" },
 	{ leaf: "diagnostics.level", feature: "diagnostics" },
 	{ leaf: "diagnostics.notifyOnLoad", feature: "diagnostics" },
@@ -864,190 +823,19 @@ function applyResponsesWebSocketSettings(
 	);
 }
 
-function applyAutoModeSettings(
-	raw: Record<string, unknown>,
-	scope: Scope,
-	state: ResolutionState,
-): void {
-	reportUnknownKeys(raw, AUTO_MODE_KEYS, scope, state, "autoMode");
-
-	applyField(
-		raw,
-		{ key: "available", leaf: "autoMode.available", feature: "autoMode" },
-		scope,
-		state,
-		readBoolean,
-		(value) => {
-			state.policy.autoMode.available = value;
-		},
-	);
-	applyField(
-		raw,
-		{ key: "reviewerModel", leaf: "autoMode.reviewerModel", feature: "autoMode" },
-		scope,
-		state,
-		readModelRef,
-		(value) => {
-			state.policy.autoMode.reviewerModel = value;
-		},
-	);
-	applyField(
-		raw,
-		{ key: "gate", leaf: "autoMode.gate", feature: "autoMode" },
-		scope,
-		state,
-		(value) => readEnum(AUTO_GATES, value),
-		(value) => {
-			state.policy.autoMode.gate = value;
-		},
-	);
-	applyField(
-		raw,
-		{ key: "extraTools", leaf: "autoMode.extraTools", feature: "autoMode" },
-		scope,
-		state,
-		readStringList,
-		(value) => {
-			state.policy.autoMode.extraTools = value;
-		},
-	);
-	applyField(
-		raw,
-		{ key: "timeoutMs", leaf: "autoMode.timeoutMs", feature: "autoMode" },
-		scope,
-		state,
-		(value) => readInteger(value, REVIEWER_TIMEOUT_MIN_MS, REVIEWER_TIMEOUT_MAX_MS),
-		(value) => {
-			state.policy.autoMode.timeoutMs = value;
-		},
-	);
-	applyField(
-		raw,
-		{ key: "transcript", leaf: "autoMode.transcript", feature: "autoMode" },
-		scope,
-		state,
-		readBoolean,
-		(value) => {
-			state.policy.autoMode.transcript = value;
-		},
-	);
-	applyField(
-		raw,
-		{ key: "evidenceTools", leaf: "autoMode.evidenceTools", feature: "autoMode" },
-		scope,
-		state,
-		readBoolean,
-		(value) => {
-			state.policy.autoMode.evidenceTools = value;
-		},
-	);
-	applyField(
-		raw,
-		{ key: "maxEvidenceRounds", leaf: "autoMode.maxEvidenceRounds", feature: "autoMode" },
-		scope,
-		state,
-		(value) => readInteger(value, EVIDENCE_ROUNDS_MIN, EVIDENCE_ROUNDS_MAX),
-		(value) => {
-			state.policy.autoMode.maxEvidenceRounds = value;
-		},
-	);
-
-	const classifier = openGroup(raw, "classifier", scope, state, "autoMode");
-	if (classifier) applyClassifierSettings(classifier.raw, classifier.scope, state);
-
-	const circuitBreaker = openGroup(raw, "circuitBreaker", scope, state, "autoMode");
-	if (circuitBreaker) applyCircuitBreakerSettings(circuitBreaker.raw, circuitBreaker.scope, state);
-}
-
-function applyClassifierSettings(
-	raw: Record<string, unknown>,
-	scope: Scope,
-	state: ResolutionState,
-): void {
-	reportUnknownKeys(raw, CLASSIFIER_KEYS, scope, state, "autoMode");
-
-	applyField(
-		raw,
-		{ key: "enabled", leaf: "autoMode.classifier.enabled", feature: "autoMode" },
-		scope,
-		state,
-		readBoolean,
-		(value) => {
-			state.policy.autoMode.classifier.enabled = value;
-		},
-	);
-	applyField(
-		raw,
-		{ key: "model", leaf: "autoMode.classifier.model", feature: "autoMode" },
-		scope,
-		state,
-		readModelRef,
-		(value) => {
-			state.policy.autoMode.classifier.model = value;
-		},
-	);
-	applyField(
-		raw,
-		{ key: "timeoutMs", leaf: "autoMode.classifier.timeoutMs", feature: "autoMode" },
-		scope,
-		state,
-		(value) => readInteger(value, REVIEWER_TIMEOUT_MIN_MS, REVIEWER_TIMEOUT_MAX_MS),
-		(value) => {
-			state.policy.autoMode.classifier.timeoutMs = value;
-		},
-	);
-	applyField(
-		raw,
-		{ key: "maxLag", leaf: "autoMode.classifier.maxLag", feature: "autoMode" },
-		scope,
-		state,
-		(value) => readInteger(value, CLASSIFIER_MAX_LAG_MIN, CLASSIFIER_MAX_LAG_MAX),
-		(value) => {
-			state.policy.autoMode.classifier.maxLag = value;
-		},
-	);
-}
-
-function applyCircuitBreakerSettings(
-	raw: Record<string, unknown>,
-	scope: Scope,
-	state: ResolutionState,
-): void {
-	reportUnknownKeys(raw, BREAKER_KEYS, scope, state, "autoMode");
-
-	applyField(
-		raw,
-		{
-			key: "consecutiveDenials",
-			leaf: "autoMode.circuitBreaker.consecutiveDenials",
-			feature: "autoMode",
-		},
-		scope,
-		state,
-		(value) => readInteger(value, BREAKER_LIMIT_MIN, BREAKER_LIMIT_MAX),
-		(value) => {
-			state.policy.autoMode.circuitBreaker.consecutiveDenials = value;
-		},
-	);
-	applyField(
-		raw,
-		{ key: "recentDenials", leaf: "autoMode.circuitBreaker.recentDenials", feature: "autoMode" },
-		scope,
-		state,
-		(value) => readInteger(value, BREAKER_LIMIT_MIN, BREAKER_LIMIT_MAX),
-		(value) => {
-			state.policy.autoMode.circuitBreaker.recentDenials = value;
-		},
-	);
-	applyField(
-		raw,
-		{ key: "windowSize", leaf: "autoMode.circuitBreaker.windowSize", feature: "autoMode" },
-		scope,
-		state,
-		(value) => readInteger(value, BREAKER_WINDOW_MIN, BREAKER_WINDOW_MAX),
-		(value) => {
-			state.policy.autoMode.circuitBreaker.windowSize = value;
-		},
+/**
+ * A retired `autoMode` section is recognized only to explain its removal. Its value is never read
+ * or validated, whatever shape it has, so an old reviewer/classifier/breaker configuration cannot
+ * invalidate another feature, and no user-supplied content is copied into a diagnostic.
+ */
+function reportRetiredAutoMode(scope: Scope, state: ResolutionState): void {
+	state.issues.push(
+		withModel(scope, {
+			severity: "warning",
+			code: RETIRED_AUTO_MODE_ISSUE,
+			path: joinPath(scope.input, "autoMode"),
+			feature: "document",
+		}),
 	);
 }
 
@@ -1186,8 +974,7 @@ function applyAutoModeScope(
 	scope: Scope,
 	state: ResolutionState,
 ): void {
-	const group = openGroup(container, "autoMode", scope, state, "autoMode");
-	if (group) applyAutoModeSettings(group.raw, group.scope, state);
+	if (Object.hasOwn(container, "autoMode")) reportRetiredAutoMode(scope, state);
 }
 
 function applyCompatibilityScope(

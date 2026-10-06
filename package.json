@@ -6,7 +6,7 @@
   "engines": {
     "node": ">=22.19.0"
   },
-  "description": "OpenAI toolkit for Pi: Codex Remote Context windows, remote compaction v2, routed Web Search, image gen, auto mode.",
+  "description": "OpenAI toolkit for Pi: Codex Remote Context windows, remote compaction v2, routed Web Search, image gen.",
   "author": "awoaCrim and contributors",
   "license": "MIT",
   "repository": {
@@ -28,7 +28,6 @@
     "compaction",
     "web-search",
     "image-generation",
-    "auto-mode",
     "codex",
     "responses"
   ],
@@ -37,7 +36,6 @@
       "./src/extension-runtime.ts",
       "./src/web-search/extension.ts",
       "./src/image-generation/extension.ts",
-      "./src/auto-mode/extension.ts",
       "./src/codex-astra/extension.ts",
       "./src/responses-websocket/extension.ts"
     ]
@@ -79,15 +77,6 @@
     "src/image-generation/render.ts",
     "src/image-generation/service.ts",
     "src/image-generation/types.ts",
-    "src/auto-mode/extension.ts",
-    "src/auto-mode/tool-review-tui.ts",
-    "src/auto-mode/policy.ts",
-    "src/auto-mode/model-selection-guard.ts",
-    "src/auto-mode/prompt.ts",
-    "src/auto-mode/transcript.ts",
-    "src/auto-mode/reviewer.ts",
-    "src/auto-mode/classifier.ts",
-    "src/auto-mode/types.ts",
     "src/codex-astra/effort-planner.ts",
     "src/codex-astra/extension.ts",
     "src/responses-websocket/extension.ts",

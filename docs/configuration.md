@@ -21,8 +21,7 @@ Create the file and parent directory if absent. This example states the shipped 
       "defaultModel": "grok-imagine-image-2.0",
       "allowedModels": ["grok-imagine-image-2.0"]
     },
-    "responsesWebSocket": { "enabled": false },
-    "autoMode": { "available": false }
+    "responsesWebSocket": { "enabled": false }
   },
   "models": {},
   "diagnostics": {
@@ -43,11 +42,11 @@ Create the file and parent directory if absent. This example states the shipped 
 
 Precedence is built-ins, then `defaults`, then `models["provider/model-id"]`. Keys are exact and case-sensitive. Leading/trailing whitespace is trimmed; conflicting normalized keys are rejected. Model IDs may contain further slashes. No pattern matching or endpoint/capability guessing occurs.
 
-Known nested objects merge by field. Missing fields inherit, arrays replace instead of append, and `false`/`0` retain their meanings. Only optional model references accept `null`: context producer, native-fallback model, auto reviewer, and classifier model. `null` elsewhere is invalid. Defaults do not prohibit exact overrides; an exact model can set `available: true` over a default of `false`.
+Known nested objects merge by field. Missing fields inherit, arrays replace instead of append, and `false`/`0` retain their meanings. Only optional model references accept `null`: context producer and native-fallback model. Other active settings reject `null`. Defaults do not prohibit exact overrides; an exact model can select a different context mode or search route.
 
 A missing file uses independent built-in defaults. Invalid JSON, an unreadable file, missing/unsupported `schemaVersion` on a v2-shaped document, or mixed legacy/v2 fields are reported distinctly. Unknown v2 policy keys are errors in their owning scope. Invalid selected settings block dependent operations; they never silently pick a more permissive route. Errors in other models remain visible without replacing a valid current model's policy. A valid exact leaf may shadow an invalid default leaf, but cannot hide a malformed containing object or unknown field in that feature scope.
 
-Each public callback, tool execution, compaction, reviewer/classifier operation, or config command uses an immutable snapshot across its awaited helpers. The next operation reads again. This does not make separate Pi headers, payload, and tool events one atomic transaction. Engagement, overrides, scores, windows, and results stay out of the config file.
+Each public callback, tool execution, compaction, or config command uses an immutable snapshot across its awaited helpers. The next operation reads again. This does not make separate Pi headers, payload, and tool events one atomic transaction. Windows and results stay out of the config file.
 
 ---
 
@@ -70,7 +69,7 @@ Place `context` under `defaults` or an exact `models` entry.
 
 Native Codex eligibility derives from the actual Pi provider/API. Gateways additionally need the exact transport opt-in below. `remote-windows` keeps the Remote Window state persisted when a model without window capability is selected: that model receives only the current local window, while retired/managed Remote Context history is excluded from live requests and compaction producers. A no-summary boundary preserves the marker for later reuse. A configured window model whose activation fails does not silently receive a summary fallback. Normal `new_context` keeps its persisted-notes, duplicate and cooldown gates. Synthetic Remote V2 producer/consumer identity and checkpoint provenance are unchanged. See [Toolkit internals](internals.md).
 
-In active `remote-windows`, `/compact [instructions]` starts checkpoint duty rather than producing a summary. The selected model must authenticate to the same native backend/account or gateway credential/affinity domain, fit the projected window plus its output reserve, and retain the required permitted context tools. Invalid or unsuitable explicit targets are refused without switching to a fallback model. If Auto Mode is engaged, the target must also be eligible for its gate. The entire handoff uses the initiating context-policy snapshot; no config or global Pi defaults are rewritten.
+In active `remote-windows`, `/compact [instructions]` starts checkpoint duty rather than producing a summary. The selected model must authenticate to the same native backend/account or gateway credential/affinity domain, fit the projected window plus its output reserve, and retain the required permitted context tools. Invalid or unsuitable explicit targets are refused without switching to a fallback model. The entire handoff uses the initiating context-policy snapshot; no config or global Pi defaults are rewritten.
 
 Only a new persisted successful notes write/append after the handoff and the latest delivered user message authorizes its rollover. After the exact target marker is durable, Toolkit restores the original model/thinking before new-window inference and asks it to read the receipt first. Failure or cancellation restores an owned selection; a later user selection takes priority. Failed restoration blocks further handoff requests until selection/auth is repaired. Reload can recover selection, but does not automatically restart inference.
 
@@ -236,29 +235,11 @@ At the compaction and replay boundary, Toolkit applies the declared resize profi
 
 ---
 
-### Auto Mode
+### Removed Auto Mode
 
-Place `autoMode` under `defaults` or an exact model. `available` permits engagement; it does not engage the runtime. Use `/auto on` or `--auto`, and `/auto off` to disengage. If an engaged session encounters invalid policy, calls remain blocked until policy is corrected or the user explicitly turns the gate off. A review timeout never means approval.
+Auto Mode, `/auto`, and `--auto` have been removed. Toolkit no longer performs this feature's tool-call review, background classification, or review confirmations. No replacement approval gate is installed.
 
-| Relative field | Default | Contract |
-| --- | --- | --- |
-| `available` | `false` | Model eligibility for engagement. |
-| `reviewerModel` | `null` | Exact review-model reference; required for useful engagement. |
-| `gate` | `"side-effect"` | Reviews `bash`, `write`, `edit`, and `extraTools`; `"all"` reviews every tool. Session gate overrides remain runtime state. |
-| `extraTools` | `[]` | Additional names for the side-effect gate. |
-| `timeoutMs` | `30000` | Integer 1000-120000 milliseconds. |
-| `transcript` | `true` | Include transcript context in the blocking review. |
-| `evidenceTools` | `true` | Permit the reviewer's existing read-only evidence tools. |
-| `maxEvidenceRounds` | `3` | Integer 0-8. |
-| `classifier.enabled` | `false` | Enable nonblocking trajectory pre-scoring. |
-| `classifier.model` | `null` | Exact reference; `null` uses the reviewer. |
-| `classifier.timeoutMs` | `15000` | Integer 1000-120000 milliseconds. |
-| `classifier.maxLag` | `2` | Integer 0-20. |
-| `circuitBreaker.consecutiveDenials` | `3` | Integer 0-100; `0` disables this limit. |
-| `circuitBreaker.recentDenials` | `10` | Integer 0-100; `0` disables this limit. |
-| `circuitBreaker.windowSize` | `50` | Integer 1-200, recent-verdict window size. |
-
-Reviewer and classifier references are not active-session overrides. Classifier scores, denial history, and human decisions never become config entries. The reviewer and its read-only evidence calls share one cancellable deadline, including dependencies that ignore abort. Denial history resets on actual delivery of a user message, including identical queued messages, not on enqueue or an ordinary tool continuation. Pre-scores are bound to a full structured authorization fingerprint; the bounded review transcript prioritizes recent user instructions and reports omissions.
+Legacy root `autoMode`, v2 `defaults.autoMode`, and exact-model `autoMode` sections are ignored with an explicit removal warning, regardless of their contents. They do not invalidate other valid settings. The editor schema retains only deprecated compatibility entries, not the old controls. Remove these sections and any `--auto` launcher argument manually; Toolkit does not rewrite your configuration, session history, or saved review artifacts. Unrelated invalid settings and mixed legacy/v2 documents still fail validation.
 
 ---
 
@@ -283,7 +264,7 @@ Diagnostics are plugin-wide, not model-scoped.
 
 ### Legacy compatibility and migration
 
-Do not combine unversioned roots (`compaction`, `webSearch`, `imageGeneration`, `autoMode`) with `schemaVersion: 2`. Valid legacy behavior is retained through a compatibility adapter, including nullable model clears, legacy image-list defaults, and source-dependent hosted-search failure handling. Invalid selected legacy route values are now blocked instead of disappearing into another selection.
+Do not combine unversioned roots (`compaction`, `webSearch`, `imageGeneration`, `autoMode`) with `schemaVersion: 2`. Remaining legacy features are retained through a compatibility adapter, including nullable model clears, legacy image-list defaults, and source-dependent hosted-search failure handling. Invalid selected legacy route values are now blocked instead of disappearing into another selection.
 
 The preview maps recognized fields into a candidate, supplies leaf origins, lists unmapped/dormant paths, and reports `ready`, `needs-review`, `already-v2`, or `unavailable`. `ready` means no known semantic difference was found in recognized active policy; it is not authorization to apply or proof of provider support. Unknown names are masked and their values are never copied into the report. The original source bytes remain the authoritative copy of unknown and dormant content.
 
@@ -296,8 +277,7 @@ The preview maps recognized fields into a candidate, supplies leaf origins, list
 | `compaction.gatewayContextModels` | Exact `models[key].compatibility.transport` |
 | `webSearch.defaultRoute`, `routes`, `models` | Default/exact search route candidates, subject to review below |
 | `imageGeneration.models` | `allowedModels` plus an explicit default taken from the legacy first entry |
-| `autoMode.enabled` / `models` | Default/exact `autoMode.available` |
-| Legacy auto reviewer/classifier/breaker controls | Corresponding `autoMode` controls |
+| `autoMode` | Removed; omitted from the candidate with a warning and `needs-review` |
 | Legacy compaction debug/capture/path settings | `diagnostics` |
 
 The preview cannot claim universal lossless conversion:

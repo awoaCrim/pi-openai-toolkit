@@ -1,14 +1,12 @@
 import {
-	DEFAULT_AUTO_MODE_CONFIG,
 	DEFAULT_COMPACTION_CONFIG,
 	DEFAULT_IMAGE_GENERATION_MODEL,
-	type AutoModeConfig,
 	type LeaveManagedModePolicy,
 	type NativeFallbackConfig,
 	type RemoteV2ContextSource,
 } from "../types";
 
-export type ConfigFeature = "context" | "webSearch" | "imageGeneration" | "autoMode" | "compatibility" | "responsesWebSocket" | "diagnostics";
+export type ConfigFeature = "context" | "webSearch" | "imageGeneration" | "compatibility" | "responsesWebSocket" | "diagnostics";
 export type SearchRoute = "unmanaged" | "local" | "hosted" | "standalone-alpha";
 export type DiagnosticsConfig = {
 	level: "error" | "warn" | "info" | "debug";
@@ -33,17 +31,11 @@ export type ContextPolicy = {
 		reminderThresholdPercent: number;
 	};
 };
-export type AutoModePolicy = Omit<AutoModeConfig, "enabled" | "models" | "reviewerModel" | "classifier"> & {
-	available: boolean;
-	reviewerModel: string | null;
-	classifier: Omit<AutoModeConfig["classifier"], "model"> & { model: string | null };
-};
 export type EffectiveToolkitPolicy = {
 	context: ContextPolicy;
 	webSearch: { route: SearchRoute };
 	imageGeneration: { enabled: boolean; defaultModel: string; allowedModels: string[] };
 	responsesWebSocket: { enabled: boolean };
-	autoMode: AutoModePolicy;
 	compatibility: { transport: "standard" | "codex-gateway" };
 	diagnostics: DiagnosticsConfig;
 };
@@ -61,6 +53,14 @@ export type ConfigIssue = {
 	/** Issues for a different model do not invalidate the selected model. */
 	modelKey?: string;
 };
+/**
+ * Stable code for a configuration section that was removed from the Toolkit. A retired section is
+ * ignored in any shape and must never invalidate another feature, so it is reported as a warning.
+ */
+export const RETIRED_AUTO_MODE_ISSUE = "retired.autoMode" as const;
+/** Controlled explanation of the retirement; never contains user-supplied values. */
+export const RETIRED_AUTO_MODE_MESSAGE =
+	"Auto Mode has been removed; these settings are ignored and tool calls are no longer reviewed by it.";
 export type ResolvedToolkitPolicy = {
 	policy: EffectiveToolkitPolicy;
 	origins: Record<string, ConfigOrigin>;
@@ -75,14 +75,12 @@ export type ConfigDocumentSnapshot = {
 	issues: ConfigIssue[];
 };
 export const CONFIG_FEATURES: readonly ConfigFeature[] = [
-	"context", "webSearch", "imageGeneration", "autoMode", "compatibility", "responsesWebSocket", "diagnostics",
+	"context", "webSearch", "imageGeneration", "compatibility", "responsesWebSocket", "diagnostics",
 ];
 
 /** Independent per-operation defaults, preserving the existing shipped policy. */
 export function createPolicyDefaults(): EffectiveToolkitPolicy {
 	const context = DEFAULT_COMPACTION_CONFIG;
-	const auto = structuredClone(DEFAULT_AUTO_MODE_CONFIG);
-	const { enabled: _enabled, models: _models, reviewerModel, classifier, ...autoOptions } = auto;
 	return {
 		context: {
 			mode: "remote-compaction",
@@ -105,12 +103,6 @@ export function createPolicyDefaults(): EffectiveToolkitPolicy {
 			allowedModels: [DEFAULT_IMAGE_GENERATION_MODEL],
 		},
 		responsesWebSocket: { enabled: false },
-		autoMode: {
-			...autoOptions,
-			available: false,
-			reviewerModel: reviewerModel ?? null,
-			classifier: { ...classifier, model: classifier.model ?? null },
-		},
 		compatibility: { transport: "standard" },
 		diagnostics: {
 			level: "info",

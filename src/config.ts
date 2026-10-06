@@ -7,6 +7,7 @@ import { CONFIG_PATH, normalizeLegacyConfig } from "./config/legacy";
 import { resolveV2Config } from "./config/v2";
 import {
 	CONFIG_FEATURES,
+	RETIRED_AUTO_MODE_ISSUE,
 	createPolicyDefaults,
 	type ConfigDocumentSnapshot,
 	type ConfigFeature,
@@ -116,7 +117,6 @@ const LEGACY_PATHS: Record<string, string> = {
 	"imageGeneration.enabled": "imageGeneration.enabled",
 	"imageGeneration.defaultModel": "imageGeneration.models",
 	"imageGeneration.allowedModels": "imageGeneration.models",
-	"autoMode.available": "autoMode.models",
 	"compatibility.transport": "compaction.gatewayContextModels",
 	"diagnostics.level": "compaction.debug",
 	"diagnostics.notifyOnLoad": "compaction.notifyOnLoad",
@@ -155,13 +155,17 @@ function legacyIssues(loaded: LoadedToolkitConfig, modelKey: string | undefined)
 		}
 	}
 	const issues = loaded.warnings.filter((warning) => !warning.startsWith("Ignoring webSearch.routes.")).map((warning): ConfigIssue => {
+		// A removed feature is retired, not invalid: it never blocks another feature.
+		if (warning.startsWith("Ignoring autoMode:")) {
+			return { severity: "warning", code: RETIRED_AUTO_MODE_ISSUE, path: "autoMode", feature: "document" };
+		}
 		const match = /^Ignoring ([^:]+):/.exec(warning);
 		const field = warning.startsWith("Ignoring compaction.responsesApis entry ") ? "compaction.responsesApis" : match?.[1] ?? "$";
 		const root = field.split(".")[0];
 		const diagnostic = Object.entries(LEGACY_PATHS).some(([leaf, input]) => leaf.startsWith("diagnostics.") && input === field);
 		const feature: ConfigFeature | "document" = diagnostic ? "diagnostics"
 			: field === "compaction.gatewayContextModels" ? "compatibility" : root === "compaction" ? "context"
-			: root === "webSearch" || root === "imageGeneration" || root === "autoMode" ? root : "document";
+			: root === "webSearch" || root === "imageGeneration" ? root : "document";
 		const supersededDefault = field === "webSearch.defaultRoute" && legacyRouteKey(raw, modelKey) !== undefined;
 		const warningOnly = warning.endsWith("unknown field.") || !match
 			|| warning.includes("expected at least one model id") || supersededDefault;
@@ -209,13 +213,6 @@ function fromLegacy(loaded: LoadedToolkitConfig, model: WebSearchModel | undefin
 		allowedModels: [...config.imageGeneration.models],
 	};
 	policy.responsesWebSocket = { enabled: false };
-	const { enabled, models, reviewerModel, classifier, ...auto } = config.autoMode;
-	policy.autoMode = {
-		...structuredClone(auto),
-		available: enabled && modelKey !== undefined && models.includes(modelKey),
-		reviewerModel: reviewerModel ?? null,
-		classifier: { ...classifier, model: classifier.model ?? null },
-	};
 	policy.compatibility.transport = modelKey && compaction.gatewayContextModels.includes(modelKey) ? "codex-gateway" : "standard";
 	policy.diagnostics = {
 		level: compaction.debug ? "debug" : "info",
@@ -230,7 +227,6 @@ function fromLegacy(loaded: LoadedToolkitConfig, model: WebSearchModel | undefin
 	for (const leaf of leafPaths(policy)) {
 		let input = LEGACY_PATHS[leaf] ?? leaf;
 		if (leaf === "context.mode" && !compaction.enabled) input = "compaction.enabled";
-		if (leaf === "autoMode.available" && !enabled) input = "autoMode.enabled";
 		if (leaf === "webSearch.route") {
 			if (!config.webSearch.enabled) input = "webSearch.enabled";
 			else if (route.source === "exact") {
@@ -251,9 +247,8 @@ function fromLegacy(loaded: LoadedToolkitConfig, model: WebSearchModel | undefin
 }
 
 /** Internal engine adapter. All interpretation of document names stays in this module. */
-function engineConfig(policy: EffectiveToolkitPolicy, modelKey: string | undefined, gatewayKeys: string[]): ToolkitConfig {
-	const { context, diagnostics, imageGeneration, autoMode } = policy;
-	const { available, reviewerModel, classifier, ...auto } = autoMode;
+function engineConfig(policy: EffectiveToolkitPolicy, gatewayKeys: string[]): ToolkitConfig {
+	const { context, diagnostics, imageGeneration } = policy;
 	return {
 		compaction: {
 			enabled: context.mode !== "pi",
@@ -276,10 +271,6 @@ function engineConfig(policy: EffectiveToolkitPolicy, modelKey: string | undefin
 		webSearch: policy.webSearch.route === "unmanaged" ? { enabled: false, models: [] }
 			: { enabled: true, models: [], defaultRoute: policy.webSearch.route },
 		imageGeneration: { enabled: imageGeneration.enabled, models: [...imageGeneration.allowedModels] },
-		autoMode: {
-			...structuredClone(auto), enabled: available, models: available && modelKey ? [modelKey] : [],
-			reviewerModel: reviewerModel ?? undefined, classifier: { ...classifier, model: classifier.model ?? undefined },
-		},
 	};
 }
 
@@ -302,7 +293,7 @@ export function resolveToolkitConfig(loaded: LoadedToolkitConfig, model?: ExactM
 		for (const origin of Object.values(resolution.origins)) if (origin.kind !== "builtin") origin.source = source;
 	}
 	const gatewayModelKeys = v2 ? v2.gatewayModelKeys : [...loaded.config.compaction.gatewayContextModels];
-	const config = format === "v2" ? engineConfig(resolution.policy, modelKey, gatewayModelKeys) : structuredClone(loaded.config);
+	const config = format === "v2" ? engineConfig(resolution.policy, gatewayModelKeys) : structuredClone(loaded.config);
 	return freeze({ ...resolution, config, format, source, modelKey, gatewayModelKeys, snapshot: structuredClone(loaded) });
 }
 
