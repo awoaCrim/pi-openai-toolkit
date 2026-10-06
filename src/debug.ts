@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -157,7 +158,7 @@ export function writeDebugArtifact(
 	ensureDir(targetDir);
 
 	const timestamp = new Date().toISOString();
-	const fileName = `${timestamp.replace(/[.:]/g, "-")}-${kind}.json`;
+	const fileName = `${timestamp.replace(/[.:]/g, "-")}-${kind}-${randomUUID()}.json`;
 	const filePath = path.join(targetDir, fileName);
 	const criticallyRedactedData = redactCriticalValue(data);
 	const envelope: DebugArtifactEnvelope = {
@@ -174,7 +175,7 @@ export function writeDebugArtifact(
 		data: settings.redactSensitiveData ? redactValue(criticallyRedactedData) : criticallyRedactedData,
 	};
 
-	fs.writeFileSync(filePath, `${JSON.stringify(envelope, null, 2)}\n`, "utf8");
+	fs.writeFileSync(filePath, `${JSON.stringify(envelope, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
 	return filePath;
 }
 
@@ -206,7 +207,7 @@ export function writeReplayFailureArtifact(
 		ensureDir(targetDir);
 
 		const timestamp = new Date().toISOString();
-		const filePath = path.join(targetDir, `${timestamp.replace(/[.:]/g, "-")}-replay-failure.json`);
+		const filePath = path.join(targetDir, `${timestamp.replace(/[.:]/g, "-")}-replay-failure-${randomUUID()}.json`);
 		const data = redactCriticalValue({
 			event: "before_provider_request.rewrite-failed",
 			reason: details.reason,
@@ -227,7 +228,7 @@ export function writeReplayFailureArtifact(
 			redaction: { enabled: true },
 			data,
 		};
-		fs.writeFileSync(filePath, `${JSON.stringify(envelope, null, 2)}\n`, "utf8");
+		fs.writeFileSync(filePath, `${JSON.stringify(envelope, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
 		return filePath;
 	} catch {
 		// The replay failure path itself must never be masked by an artifact write
