@@ -199,10 +199,69 @@ function buildCacheKey(model: Model<Api>, options: StreamOptions, requestHeaders
 	return [model.provider, model.id, cleanBaseUrl(model.baseUrl), options.sessionId, stableHash(JSON.stringify(identity))].join("\u0000");
 }
 
+// Only transport failures (not arbitrary caught errors) authorize auto fallback.
+class RecoverableWebSocketError extends Error {}
+
+const STREAM_INTERRUPTION = /\bstream closed before response\.completed\b/iu;
+const TERMINAL_FAILURE_TEXT = /quota|billing|budget|usage.?limit|api.?key|unauthori[sz]ed|forbidden|authenticat|permission|invalid|malformed|unsupported|policy|context.?length|context.?overflow|\babort(?:ed)?\b|\bcancell?ed\b/iu;
+const TRANSIENT_ERROR_CODES = new Set(["stream_error", "server_error", "request_timeout"]);
+
+function transportError(error: unknown): Error {
+	const message = error instanceof Error ? error.message : String(error);
+	if ((error instanceof Error && error.name === "AbortError") || TERMINAL_FAILURE_TEXT.test(message)) {
+		return error instanceof Error ? error : new Error(message);
+	}
+	return new RecoverableWebSocketError(/^WebSocket (?:error|closed|.*timeout)/iu.test(message)
+		? message : `WebSocket error: ${message}`);
+}
+
 function socketError(event: WebSocketEvent): Error {
-	if (typeof event.message === "string" && event.message.length > 0) return new Error(event.message);
-	if (event.error instanceof Error) return event.error;
-	return new Error("WebSocket transport failed");
+	if (typeof event.message === "string" && event.message.length > 0) return transportError(event.message);
+	if (event.error instanceof Error) return transportError(event.error);
+	return transportError("WebSocket transport failed");
+}
+
+function socketCloseError(event: WebSocketEvent, streaming: boolean): Error {
+	const suffix = event.reason ? `: ${event.reason}` : "";
+	if ([1002, 1003, 1007, 1008].includes(event.code ?? 0) || TERMINAL_FAILURE_TEXT.test(event.reason ?? "")) {
+		return new Error(`Responses connection rejected${event.code ? ` (${event.code})` : ""}${suffix}`);
+	}
+	return transportError(streaming
+		? `WebSocket closed before response completion${suffix}`
+		: `WebSocket closed${event.code ? ` ${event.code}` : ""}${suffix}`);
+}
+
+function compatibleFailureMetadata(error: Record<string, unknown>): boolean {
+	if (typeof error.message === "string" && TERMINAL_FAILURE_TEXT.test(error.message)) return false;
+	for (const field of ["code", "type"]) {
+		const value = error[field];
+		if (value !== undefined && value !== null && value !== "" &&
+			(typeof value !== "string" || !TRANSIENT_ERROR_CODES.has(value.toLowerCase()))) return false;
+	}
+	for (const field of ["status", "status_code"]) {
+		const value = error[field];
+		if (value !== undefined && value !== null &&
+			(typeof value !== "number" || ![408, 429, 500, 502, 503, 504].includes(value))) return false;
+	}
+	return true;
+}
+
+function normalizeStreamInterruption(event: Record<string, unknown>): Record<string, unknown> | undefined {
+	const response = isRecord(event.response) ? event.response : undefined;
+	const error = event.type === "error" ? event : event.type === "response.failed" && isRecord(response?.error) ? response.error : undefined;
+	if (!error || typeof error.message !== "string" || !STREAM_INTERRUPTION.test(error.message) ||
+		TERMINAL_FAILURE_TEXT.test(error.message)) return undefined;
+	// Envelope type/status describe the event/response, not its failure category.
+	// Still check their code/HTTP status so a nested transient message cannot
+	// override explicit fatal metadata on an enclosing envelope.
+	const metadata: Record<string, unknown>[] = [{ ...event, type: undefined }];
+	if (event.type === "response.failed") {
+		metadata.push({ ...response, type: undefined, status: response?.status === "failed" ? undefined : response?.status }, error);
+	}
+	if (isRecord(error.error)) metadata.push(error.error);
+	if (metadata.some((value) => !compatibleFailureMetadata(value))) return undefined;
+	const normalized = { ...error, message: `WebSocket error: ${error.message}` };
+	return event.type === "error" ? normalized : { ...event, response: { ...response, error: normalized } };
 }
 
 function closeSocket(socket: WebSocketLike | undefined, reason = "done"): void {
@@ -247,8 +306,9 @@ export function closeResponsesWebSocketSessions(sessionId?: string): void {
 }
 
 
-function liveSignals(options: StreamOptions, init?: RequestInit): AbortSignal[] {
-	return [options.signal, init?.signal].filter((signal): signal is AbortSignal => signal !== undefined);
+function liveSignals(options: StreamOptions, input: RequestInfo | URL, init?: RequestInit): AbortSignal[] {
+	return [...new Set([options.signal, init?.signal, input instanceof Request ? input.signal : undefined]
+		.filter((signal): signal is AbortSignal => signal !== undefined && signal !== null))];
 }
 
 async function connectWebSocket(
@@ -258,7 +318,7 @@ async function connectWebSocket(
 	timeoutMs: number,
 ): Promise<WebSocketLike> {
 	const WebSocketCtor = globalThis.WebSocket as unknown as WebSocketConstructor | undefined;
-	if (typeof WebSocketCtor !== "function") throw new Error("WebSocket transport is not available in this runtime");
+	if (typeof WebSocketCtor !== "function") throw transportError("WebSocket transport is not available in this runtime");
 	if (signals.some((signal) => signal.aborted)) throw new Error("Request was aborted");
 
 	return new Promise((resolve, reject) => {
@@ -286,9 +346,7 @@ async function connectWebSocket(
 			resolve(socket!);
 		};
 		const onError = (event: WebSocketEvent) => fail(socketError(event));
-		const onClose = (event: WebSocketEvent) => fail(new Error(
-			`WebSocket closed${typeof event.code === "number" ? ` ${event.code}` : ""}${event.reason ? ` ${event.reason}` : ""}`,
-		));
+		const onClose = (event: WebSocketEvent) => fail(socketCloseError(event, false));
 		const onAbort = () => fail(new Error("Request was aborted"));
 
 		try {
@@ -301,7 +359,8 @@ async function connectWebSocket(
 		socket.addEventListener("error", onError);
 		socket.addEventListener("close", onClose);
 		for (const signal of signals) signal.addEventListener("abort", onAbort, { once: true });
-		if (timeoutMs > 0) timeout = setTimeout(() => fail(new Error(`WebSocket connect timeout after ${timeoutMs}ms`)), timeoutMs);
+		if (signals.some((signal) => signal.aborted)) { onAbort(); return; }
+		if (timeoutMs > 0) timeout = setTimeout(() => fail(transportError(`WebSocket connect timeout after ${timeoutMs}ms`)), timeoutMs);
 	});
 }
 
@@ -439,22 +498,26 @@ function completedContinuation(entry: CachedSocketEntry | undefined, fullPayload
 	return true;
 }
 
-function createSseResponse(
+async function createSseResponse(
 	socket: WebSocketLike,
 	signals: AbortSignal[],
 	idleTimeoutMs: number,
 	requestFrame: string,
 	onTerminal: (event: Record<string, unknown>) => boolean,
 	onRelease: (keep: boolean) => void,
-): Response {
+	allowBootstrapFallback: boolean,
+): Promise<Response> {
 	const encoder = new TextEncoder();
-	let cancelBody: (reason?: unknown) => void = () => closeSocket(socket, "consumer_cancelled");
+	let resolveReady!: () => void;
+	let rejectReady!: (error: unknown) => void;
+	const ready = new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+	let cancelBody: (reason?: unknown) => void = () => {};
 	const body = new ReadableStream<Uint8Array>({
 		start(controller) {
 			let closed = false;
-			let released = false;
+			let committed = false;
 			let idleTimer: ReturnType<typeof setTimeout> | undefined;
-			let sawTerminal = false;
+			let pending = Promise.resolve();
 			const cleanup = () => {
 				if (idleTimer) clearTimeout(idleTimer);
 				socket.removeEventListener("message", onMessage);
@@ -462,73 +525,75 @@ function createSseResponse(
 				socket.removeEventListener("close", onClose);
 				for (const signal of signals) signal.removeEventListener("abort", onAbort);
 			};
-			const release = (keep: boolean) => {
-				if (released) return;
-				released = true;
-				onRelease(keep);
-			};
-			const finish = () => {
-				if (closed) return;
-				closed = true;
-				cleanup();
-				controller.close();
-			};
 			const fail = (error: unknown) => {
 				if (closed) return;
 				closed = true;
 				cleanup();
-				release(false);
-				closeSocket(socket, "stream_failed");
+				onRelease(false);
+				if (!committed) {
+					if (signals.some((signal) => signal.aborted) || (allowBootstrapFallback && error instanceof RecoverableWebSocketError)) {
+						rejectReady(error);
+					} else {
+						// Return an errored body for deterministic failures/explicit WS.
+						// Rejecting fetch would make the SDK recast these as connection errors.
+						resolveReady();
+					}
+				}
 				controller.error(error);
 			};
 			const armIdleTimer = () => {
 				if (idleTimeoutMs <= 0) return;
 				if (idleTimer) clearTimeout(idleTimer);
-				idleTimer = setTimeout(() => fail(new Error(`WebSocket idle timeout after ${idleTimeoutMs}ms`)), idleTimeoutMs);
+				idleTimer = setTimeout(() => fail(transportError(`WebSocket idle timeout after ${idleTimeoutMs}ms`)), idleTimeoutMs);
 			};
-			const onMessage = (event: WebSocketEvent) => {
-				void (async () => {
-					try {
-						const text = await decodeSocketData(event.data);
-						if (!text) return;
-						const parsed: unknown = JSON.parse(text);
-						if (!isRecord(parsed) || typeof parsed.type !== "string") throw new Error("Invalid Responses WebSocket event");
-						controller.enqueue(encoder.encode(`event: ${parsed.type}\ndata: ${JSON.stringify(parsed)}\n\n`));
-						armIdleTimer();
-						if (TERMINAL_EVENTS.has(parsed.type)) {
-							sawTerminal = true;
-							const keep = onTerminal(parsed);
-							release(keep);
-							finish();
-						}
-					} catch (error) {
-						fail(error);
-					}
-				})();
+			const enqueue = (operation: () => Promise<void> | void) => {
+				pending = pending.then(() => { if (!closed) return operation(); }).catch(fail);
 			};
-			const onError = (event: WebSocketEvent) => fail(socketError(event));
-			const onClose = (event: WebSocketEvent) => {
-				if (sawTerminal) finish();
-				else fail(new Error(`WebSocket closed before response completion${event.reason ? `: ${event.reason}` : ""}`));
-			};
+			const onMessage = (event: WebSocketEvent) => enqueue(async () => {
+				const text = await decodeSocketData(event.data);
+				if (closed) return;
+				if (text === undefined) throw new Error("Invalid Responses WebSocket frame");
+				const parsed: unknown = JSON.parse(text);
+				if (!isRecord(parsed) || typeof parsed.type !== "string" || !parsed.type) throw new Error("Invalid Responses WebSocket event");
+				const normalized = normalizeStreamInterruption(parsed);
+				if (!committed && allowBootstrapFallback && normalized) {
+					fail(transportError("stream closed before response.completed"));
+					return;
+				}
+				const forwarded = normalized ?? parsed;
+				controller.enqueue(encoder.encode(`event: ${forwarded.type}\ndata: ${JSON.stringify(forwarded)}\n\n`));
+				committed = true;
+				resolveReady();
+				armIdleTimer();
+				if (TERMINAL_EVENTS.has(parsed.type)) {
+					closed = true;
+					cleanup();
+					const keep = onTerminal(parsed);
+					onRelease(keep);
+					controller.close();
+				}
+			});
+			const onError = (event: WebSocketEvent) => enqueue(() => fail(socketError(event)));
+			const onClose = (event: WebSocketEvent) => enqueue(() => fail(socketCloseError(event, true)));
+			// Abort/timeout deliberately bypass decoding: a stuck decoder must not
+			// prevent cancellation. Its late result sees closed and is discarded.
 			const onAbort = () => fail(new Error("Request was aborted"));
-
 			cancelBody = (reason) => fail(reason instanceof Error ? reason : new Error("Response stream was cancelled"));
 			socket.addEventListener("message", onMessage);
 			socket.addEventListener("error", onError);
 			socket.addEventListener("close", onClose);
 			for (const signal of signals) signal.addEventListener("abort", onAbort, { once: true });
+			if (signals.some((signal) => signal.aborted)) { onAbort(); return; }
 			armIdleTimer();
 			try {
 				socket.send(requestFrame);
 			} catch (error) {
-				fail(error);
+				fail(transportError(error));
 			}
 		},
-		cancel(reason) {
-			cancelBody(reason);
-		},
+		cancel(reason) { cancelBody(reason); },
 	});
+	await ready;
 	return new Response(body, {
 		status: 200,
 		headers: { "content-type": "text/event-stream", connection: "keep-alive" },
@@ -573,12 +638,12 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 		}
 		if (!isRecord(payload)) return fallback(input, init);
 
-		const signals = liveSignals(options, init);
+		const signals = liveSignals(options, input, init);
 		const requestId = options.sessionId?.slice(0, 64) || crypto.randomUUID();
 		const fetchHeaders = requestHeaders(input, init);
 		const headers = buildWebSocketHeaders(model, options, fetchHeaders, requestId);
 		const cacheKey = shouldCacheSocket(options) ? buildCacheKey(model, options, fetchHeaders) : undefined;
-		let acquired: AcquiredSocket | undefined;
+		let release: ((keep: boolean) => void) | undefined;
 		try {
 			const lease = await acquireWebSocket(
 				buildResponsesWebSocketUrl(model),
@@ -588,21 +653,27 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 				cacheKey,
 				options.sessionId,
 			);
-			acquired = lease;
+			let released = false;
+			release = (keep) => {
+				if (released) return;
+				released = true;
+				lease.release(keep);
+			};
 			const fullPayload = payload;
 			const requestPayload = lease.entry ? buildCachedRequestBody(lease.entry, fullPayload) : fullPayload;
 			const requestFrame = JSON.stringify({ type: "response.create", ...requestPayload });
-			return createSseResponse(
+			return await createSseResponse(
 				lease.socket,
 				signals,
 				options.timeoutMs ?? 0,
 				requestFrame,
 				(event) => completedContinuation(lease.entry, fullPayload, event),
-				(keep) => lease.release(keep),
+				release,
+				transportMode(options) === "auto",
 			);
 		} catch (error) {
-			acquired?.release(false);
-			if (transportMode(options) === "auto" && !signals.some((signal) => signal.aborted)) {
+			release?.(false);
+			if (error instanceof RecoverableWebSocketError && transportMode(options) === "auto" && !signals.some((signal) => signal.aborted)) {
 				return fallback(input, init);
 			}
 			throw error;

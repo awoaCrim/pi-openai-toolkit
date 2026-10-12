@@ -93,18 +93,22 @@ This selects an existing Toolkit protocol profile, independently of context mode
 
 The Responses WebSocket extension is disabled by default. Enable it globally with `defaults.responsesWebSocket.enabled: true`; it is intentionally not a model-scoped override. Restart or reload Pi after changing this setting. An invalid or legacy configuration keeps the feature disabled.
 
-The extension is an API-adapter override, not a provider registration. It applies to GPT model IDs whose Pi API is `openai-responses`, regardless of provider name. The active model's `baseUrl`, `apiKey`, configured headers, session id, and payload remain the source of truth.
+The extension is an API-adapter override, not a provider registration. For requests dispatched through this API adapter, it applies to GPT model IDs whose Pi API is `openai-responses`, regardless of provider name. Providers that bypass the compat API adapter keep their own transport behavior. The active model's `baseUrl`, `apiKey`, configured headers, session id, and payload remain the source of truth.
 
 The extension honors Pi's global `transport` setting:
 
 | Pi `transport` | Behavior |
 | --- | --- |
-| `auto` | Try `wss://.../responses?model=...` first; fall back to the original SSE adapter only before a stream starts. With a stable session id, reuse the WebSocket and send a continuation delta when possible. |
+| `auto` | Try `wss://.../responses?model=...` first; allow one original HTTP/SSE fallback per fetch call for a recoverable WS failure before the first valid event is exposed. With a stable session id, reuse the WebSocket and send a continuation delta when possible. |
 | `websocket` | Require the WebSocket path; do not fall back to SSE. This mode opens a request-scoped connection. |
 | `websocket-cached` | Require the WebSocket path and keep a session-scoped connection for later turns. |
 | `sse` | Bypass the extension and use the original HTTP/SSE adapter. |
 
 The endpoint is derived from the model's base URL by appending `/responses` when needed and switching `https:`/`http:` to `wss:`/`ws:`. The first frame is a standard `response.create` object and incoming frames are passed through Pi's existing Responses event normalizer. For `auto` and `websocket-cached`, Toolkit caches an open socket by session/model/endpoint/auth identity for up to five minutes idle or 55 minutes of age. When the current transcript has the cached request and response as a prefix, the next frame uses `previous_response_id` and only the new input items; if it cannot prove that relationship, it sends the full payload instead. A missing session id or `cacheRetention: "none"` disables reuse. The upstream must support the standard Responses WebSocket contract, including continuation semantics for `previous_response_id`; this does not rewrite a server that only exposes Codex's `/codex/responses` path or Codex-only authentication.
+
+The first valid exposed event commits the WS attempt, including `response.created` even before text or tool arguments arrive. After that boundary, Toolkit never switches transport or splices a new generation into the same stream. Local transient WS failures and compatible WS error envelopes containing `stream closed before response.completed` retain their diagnostics with a Pi-recognized transport indication; Pi's native retry settings and budget decide whether to retry the failed step. Authentication, quota/billing, context/invalid-request/policy errors, malformed frames, and cancellation do not authorize Toolkit fallback. An SDK request deadline can cancel startup before a fallback is possible.
+
+A failed connection is evicted. Any permitted fallback receives the original complete effective request, not a cached input delta; a new WS connection also starts from the full request. Pi remains responsible for effective context, completed tool results, failed-attempt history, tool execution, and usage. This prevents Toolkit from replaying completed tools as part of recovery, but does not guarantee idempotency if the model explicitly requests the same operation again. Direct SSE and errors from the original fallback SSE path are unchanged. Recovery depends on backend health and Pi's native retry policy; it is not token-level resumption or an unlimited retry loop.
 
 This feature does not write Pi settings, model files, auth files, or global extensions. To keep the Toolkit adapter disabled, set `defaults.responsesWebSocket.enabled` to `false` or omit it. Once enabled, Pi's global `transport: "sse"` still bypasses the WebSocket path for a request.
 
