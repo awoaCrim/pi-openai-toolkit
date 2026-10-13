@@ -29,7 +29,7 @@ Selected invalid policy blocks dependent operations; unrelated model errors rema
 
 ### Codex Fast session control
 
-[src/codex-fast/extension.ts](../src/codex-fast/extension.ts) registers the human-only, no-argument `/fast` toggle and an owned `ctx.ui.setStatus()` item. Default OFF requests `service_tier: "default"`; ON requests `"priority"`, the Codex Fast wire value. The status is the local request preference, not verified server acceptance or latency. Fast can increase usage/cost. No config setting, model tool, credential probe, retry, new header, reasoning-effort change or custom footer is added.
+[src/codex-fast/extension.ts](../src/codex-fast/extension.ts) registers the human-only, no-argument `/fast` toggle and an owned `ctx.ui.setStatus()` item. The command accepts UI-backed TUI/RPC (including pi-web) and older UI contexts without `mode`; print/JSON and headless commands cannot toggle. Notifications confirm changes, while status rendering belongs to the client. Default OFF requests `service_tier: "default"`; ON requests `"priority"`, the Codex Fast wire value. The status is the local request preference, not verified server acceptance or latency. Fast can increase usage/cost. No config setting, model tool, credential probe, retry, new header, reasoning-effort change or custom footer is added.
 
 Native `openai-codex-responses` routes qualify. Non-official HTTP(S) `openai-responses` gateways qualify for recognizable GPT/Codex IDs or an existing exact Codex gateway identity, including a resolved virtual route. Unknown opaque aliases without that identity, Azure, other APIs and ordinary `api.openai.com` API-key routes remain untouched. A capability marker is not backend entitlement.
 
@@ -37,7 +37,7 @@ Version-1 `pi-openai-toolkit:codex-fast` custom entries contain only the owning 
 
 The payload hook takes one selection snapshot and returns a new object only when a matching ordinary Responses request needs a tier change. Explicit OFF also overrides an existing Fast/Flex tier to Standard. Dedicated compaction shapes and malformed/foreign payloads are left unchanged. Fast loads after Web Search/image registration and before the final Astra effort pass, so its tier does not alter the pre-search cached extras used by separate search/image/compaction clients.
 
-Native Pi and Toolkit gateway WebSocket adapters already compare non-input body fields before incremental reuse. A changed `service_tier` invalidates the incompatible `previous_response_id` delta; the existing transport/retry logic is retained. Offline official-Pi fixtures in [test/pi-codex-fast.test.ts](../test/pi-codex-fast.test.ts) cover terminal command/status, actual native/gateway HTTP/WebSocket bodies, saved reopen/reload, fork isolation and continuation transitions. They do not establish live Fast availability.
+Native Pi and Toolkit gateway WebSocket adapters already compare non-input body fields before incremental reuse. A changed `service_tier` invalidates the incompatible `previous_response_id` delta; the existing transport/retry logic is retained. Offline official-Pi fixtures in [test/pi-codex-fast.test.ts](../test/pi-codex-fast.test.ts) cover TUI/RPC command/status/notifications, actual native/gateway HTTP/WebSocket bodies, saved reopen/reload, fork isolation and continuation transitions. They do not establish live Fast availability.
 
 ---
 

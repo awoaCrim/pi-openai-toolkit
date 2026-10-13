@@ -15,14 +15,14 @@ function model(overrides: Record<string, unknown> = {}): NonNullable<ExtensionCo
 function request() {
 	return { model: "gpt-5.6-sol", input: [{ role: "user", content: "hello" }], reasoning: { effort: "max" } };
 }
-function harness(options: { sm?: SessionManager; model?: ExtensionContext["model"];
+function harness(options: { sm?: SessionManager; model?: ExtensionContext["model"]; mode?: ExtensionContext["mode"];
 	loadConfig?: typeof loadToolkitConfig; resolveModel?: typeof resolveEffectiveModel } = {}) {
 	const handlers = new Map<string, Handler[]>();
 	const commands = new Map<string, Command>();
 	const statuses = new Map<string, string | undefined>([["other", "keep"]]);
 	const notices: string[] = [];
 	const ctx = { model: options.model ?? model(), sessionManager: options.sm ?? SessionManager.inMemory("/fixture"),
-		hasUI: true, mode: "tui" as "tui" | "rpc" | "print", ui: {
+		hasUI: true, mode: options.mode ?? "tui", ui: {
 			setStatus: (key: string, value: string | undefined) => statuses.set(key, value),
 			notify: (text: string) => notices.push(text),
 		} };
@@ -47,24 +47,28 @@ function harness(options: { sm?: SessionManager; model?: ExtensionContext["model
 }
 
 describe("Codex Fast extension", () => {
-	test("default OFF and one command toggles ON/OFF without tools, flags or configuration", async () => {
-		const h = harness();
-		expect([...h.commands.keys()]).toEqual(["fast"]);
-		expect(h.handlers.has("before_provider_headers")).toBe(false);
-		await h.fire("session_start");
-		expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe("Fast OFF");
-		expect(await h.wire()).toMatchObject({ service_tier: "default", reasoning: { effort: "max" } });
-		await h.toggle();
-		expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe("Fast ON");
-		expect(await h.wire()).toMatchObject({ service_tier: "priority" });
-		expect(h.notices.at(-1)).toContain("increase usage/cost");
-		await h.toggle();
-		expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe("Fast OFF");
-		expect(await h.wire()).toMatchObject({ service_tier: "default" });
-		expect(h.ctx.sessionManager.getBranch().filter((e) => e.type === "custom")).toHaveLength(2);
-		expect(h.ctx.sessionManager.buildSessionProjection().messages).toEqual([]);
-		expect(h.statuses.get("other")).toBe("keep");
-	});
+	for (const mode of ["tui", "rpc"] as const) {
+		test("default OFF and one command toggles ON/OFF without tools, flags or configuration: " + mode, async () => {
+			const h = harness({ mode });
+			expect([...h.commands.keys()]).toEqual(["fast"]);
+			expect(h.handlers.has("before_provider_headers")).toBe(false);
+			await h.fire("session_start");
+			expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe("Fast OFF");
+			expect(await h.wire()).toMatchObject({ service_tier: "default", reasoning: { effort: "max" } });
+			await h.toggle();
+			expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe("Fast ON");
+			expect(await h.wire()).toMatchObject({ service_tier: "priority" });
+			expect(h.notices.at(-1)).toContain("increase usage/cost");
+			expect(h.notices.at(-1)).toContain("Backend acceptance is not verified");
+			await h.toggle();
+			expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe("Fast OFF");
+			expect(h.notices.at(-1)).toContain("Fast OFF");
+			expect(await h.wire()).toMatchObject({ service_tier: "default" });
+			expect(h.ctx.sessionManager.getBranch().filter((e) => e.type === "custom")).toHaveLength(2);
+			expect(h.ctx.sessionManager.buildSessionProjection().messages).toEqual([]);
+			expect(h.statuses.get("other")).toBe("keep");
+		});
+	}
 
 	test("reload and a same-session remote window marker retain ON", async () => {
 		const h = harness();
@@ -156,41 +160,63 @@ describe("Codex Fast extension", () => {
 		expect(await h.wire({ ...request(), model: "logical" })).toBeUndefined();
 	});
 
-	test("argument, non-terminal, missing-identity and save failure do not toggle", async () => {
-		const h = harness();
-		await h.fire("session_start");
-		await h.toggle("on");
-		expect(h.notices.at(-1)).toContain("Usage");
-		h.ctx.mode = "rpc";
-		await h.toggle();
-		expect(h.notices.at(-1)).toContain("interactive terminal");
-		h.ctx.mode = "tui";
-		const missing = { ...h.ctx, sessionManager: { getSessionId: () => { throw new Error("missing"); }, getBranch: () => [] } };
-		await h.fire("session_start", {}, missing);
-		await h.toggle("", missing);
-		expect(h.notices.at(-1)).toContain("unchanged");
-		expect(await h.wire(request(), missing)).toBeUndefined();
-		await h.fire("session_start");
-		h.failSave();
-		await h.toggle();
-		expect(h.notices.at(-1)).toContain("could not save");
-		expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe("Fast OFF");
-		expect(h.ctx.sessionManager.getBranch()).toHaveLength(0);
-		expect(await h.wire()).toMatchObject({ service_tier: "default" });
-	});
+	for (const mode of ["tui", "rpc"] as const) {
+		test("argument, missing-identity and save failure do not toggle: " + mode, async () => {
+			const h = harness({ mode });
+			await h.fire("session_start");
+			await h.toggle("on");
+			expect(h.notices.at(-1)).toContain("Usage");
+			expect(h.ctx.sessionManager.getBranch()).toHaveLength(0);
+			const missing = { ...h.ctx, sessionManager: { getSessionId: () => { throw new Error("missing"); }, getBranch: () => [] } };
+			await h.fire("session_start", {}, missing);
+			await h.toggle("", missing);
+			expect(h.notices.at(-1)).toContain("unchanged");
+			expect(await h.wire(request(), missing)).toBeUndefined();
+			await h.fire("session_start");
+			h.failSave();
+			await h.toggle();
+			expect(h.notices.at(-1)).toContain("could not save");
+			expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe("Fast OFF");
+			expect(h.ctx.sessionManager.getBranch()).toHaveLength(0);
+			expect(await h.wire()).toMatchObject({ service_tier: "default" });
+		});
+	}
 
-	test("headless restore/request does not use UI; shutdown clears only owned status", async () => {
-		const h = harness();
-		const headless = { ...h.ctx, hasUI: false, ui: new Proxy({}, { get() { throw new Error("unexpected UI"); } }) };
-		await h.fire("session_start", {}, headless);
-		expect(await h.wire(request(), headless)).toMatchObject({ service_tier: "default" });
-		await h.toggle("", headless);
-		await h.fire("session_shutdown", {}, headless);
-		await h.fire("session_start");
-		await h.fire("session_shutdown");
-		expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBeUndefined();
-		expect(h.statuses.get("other")).toBe("keep");
-	});
+	for (const mode of ["print", "json", "unsupported"]) {
+		test("unsupported mode cannot toggle even with UI: " + mode, async () => {
+			const h = harness();
+			const context = { ...h.ctx, mode };
+			await h.fire("session_start", {}, context);
+			await h.toggle("", context);
+			expect(h.notices.at(-1)).toContain("interactive");
+			expect(h.ctx.sessionManager.getBranch()).toHaveLength(0);
+			expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe("Fast OFF");
+			expect(await h.wire(request(), context)).toMatchObject({ service_tier: "default" });
+		});
+	}
+
+	for (const mode of ["tui", "rpc", "print", "json"] as const) {
+		test("headless command cannot toggle or touch UI; saved state and owned cleanup survive: " + mode, async () => {
+			const h = harness();
+			const headless = { ...h.ctx, mode, hasUI: false, ui: new Proxy({}, { get() { throw new Error("unexpected UI"); } }) };
+			await h.fire("session_start", {}, headless);
+			expect(await h.wire(request(), headless)).toMatchObject({ service_tier: "default" });
+			await h.toggle("", headless);
+			expect(h.ctx.sessionManager.getBranch()).toHaveLength(0);
+			await h.toggle();
+			await h.fire("session_start", {}, headless);
+			expect(await h.wire(request(), headless)).toMatchObject({ service_tier: "priority" });
+			await h.toggle("", headless);
+			expect(h.ctx.sessionManager.getBranch()).toHaveLength(1);
+			expect(await h.wire(request(), headless)).toMatchObject({ service_tier: "priority" });
+			await h.fire("session_shutdown", {}, headless);
+			await h.fire("session_start");
+			expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe("Fast ON");
+			await h.fire("session_shutdown");
+			expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBeUndefined();
+			expect(h.statuses.get("other")).toBe("keep");
+		});
+	}
 
 	test("an in-flight request retains its captured mode after a later toggle", async () => {
 		let blockNext = false;

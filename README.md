@@ -62,7 +62,7 @@ Remote windows use alpha endpoints that may change upstream. When switching mode
 
 ## Codex Fast
 
-Fast is OFF by default. In the terminal, run `/fast` to turn it ON, then run `/fast` again to turn it OFF. The status bar shows `Fast ON`, `Fast OFF`, or `Fast N/A` for an ineligible route. No Fast configuration is needed.
+Fast is OFF by default. Run `/fast` in Pi's terminal or a UI-backed RPC client such as pi-web to turn it ON, then run it again to turn it OFF. Notifications confirm changes; the status is `Fast ON`, `Fast OFF`, or `Fast N/A` for an ineligible route, with display placement controlled by the client. Print/JSON and headless commands cannot toggle Fast. No Fast configuration is needed.
 
 Supports native Codex and recognizable GPT/Codex models on compatible Responses gateways. The selection is saved only in the current session: reload/resume and `new_context` retain it; new or forked sessions start OFF. ON requests Fast, while OFF requests Standard, overriding an existing service-tier preference on eligible conversation requests without changing reasoning effort or configuration files.
 

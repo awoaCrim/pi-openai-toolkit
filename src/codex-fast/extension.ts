@@ -72,8 +72,8 @@ export function registerCodexFastExtension(
 	pi.registerCommand("fast", {
 		description: "Toggle Codex Fast for this session (default OFF; may increase usage/cost).",
 		handler: async (args, ctx) => {
-			if (!ctx.hasUI || (ctx.mode !== undefined && ctx.mode !== "tui")) {
-				notify(ctx, "/fast requires an interactive terminal.", "warning");
+			if (!ctx.hasUI || (ctx.mode !== undefined && ctx.mode !== "tui" && ctx.mode !== "rpc")) {
+				notify(ctx, "/fast requires an interactive UI (terminal or RPC).", "warning");
 				return;
 			}
 			if (args.trim()) { notify(ctx, "Usage: /fast (toggle ON/OFF)", "warning"); return; }

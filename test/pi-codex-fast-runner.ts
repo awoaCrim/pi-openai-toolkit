@@ -7,6 +7,8 @@ import { createSmokeEnvironment } from "./pi-smoke-environment";
 
 const scenario = process.argv[2];
 assert(["native-http", "native-ws", "gateway-http", "gateway-ws"].includes(scenario));
+const uiMode = process.argv[3];
+assert(uiMode === "tui" || uiMode === "rpc");
 const native = scenario.startsWith("native");
 const websocket = scenario.endsWith("ws");
 const env = await createSmokeEnvironment();
@@ -107,7 +109,7 @@ try {
 		assert.deepEqual(loader.getExtensions().errors, []);
 		({ session } = await createAgentSession({ cwd: env.cwd, agentDir: env.agentDir, modelRuntime: runtime, model,
 			settingsManager: settings, resourceLoader: loader, sessionManager: sm, noTools: "all" }));
-		await session.bindExtensions({ mode: "tui", uiContext: {
+		await session.bindExtensions({ mode: uiMode, uiContext: {
 			setStatus: (key: string, value: string | undefined) => statuses.set(key, value), notify: (text: string) => notices.push(text),
 		} as never, onError: (error) => errors.push(error.error) });
 	}
@@ -121,11 +123,20 @@ try {
 	const sm = SessionManager.create(env.cwd, join(env.cwd, "sessions"));
 	await bind(sm);
 	assert.equal(statuses.get(key), "Fast OFF");
+	await prompt("/fast on");
+	assert(notices.at(-1)?.includes("Usage: /fast"), "invalid argument was not rejected");
+	assert.equal(statuses.get(key), "Fast OFF");
+	assert.equal(sm.getBranch().filter((entry) => entry.type === "custom" && entry.customType === CODEX_FAST_ENTRY_TYPE).length, 0);
+	assert.equal(bodies.length, 0, "invalid command performed inference");
 	await prompt("Initial Standard request");
 	assert.equal(bodies[0]!.service_tier, "default");
 	await prompt("/fast");
 	assert.equal(bodies.length, 1, "toggle performed inference");
 	assert.equal(statuses.get(key), "Fast ON");
+	assert(notices.at(-1)?.startsWith("Fast ON"), "toggle did not emit an ON notification");
+	assert(notices.at(-1)?.includes("increase usage/cost"));
+	assert(notices.at(-1)?.includes("Backend acceptance is not verified"));
+	assert.equal(readCodexFastState(sm.getBranch(), sm.getSessionId()), true);
 	await prompt("First Fast request");
 	assert.equal(bodies[1]!.service_tier, "priority");
 	assert.equal(bodies[1]!.previous_response_id, undefined, "tier change reused old continuation");
@@ -148,6 +159,8 @@ try {
 	assert.equal(bodies[3]!.service_tier, "priority");
 	await prompt("/fast");
 	assert.equal(statuses.get(key), "Fast OFF");
+	assert(notices.at(-1)?.startsWith("Fast OFF"), "toggle did not emit an OFF notification");
+	assert.equal(readCodexFastState(reopened.getBranch(), reopened.getSessionId()), false);
 	assert.equal(bodies.length, 4, "disable performed inference");
 	await prompt("Standard after disable");
 	assert.equal(bodies[4]!.service_tier, "default");

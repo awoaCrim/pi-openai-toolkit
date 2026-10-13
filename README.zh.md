@@ -62,7 +62,7 @@ Toolkit 只读取一个全局配置文件，即使扩展安装在项目内也一
 
 ## Codex Fast
 
-Fast 默认关闭。在终端输入 `/fast` 开启，再输入一次 `/fast` 关闭。状态栏显示 `Fast ON`、`Fast OFF`，不适用的路由显示 `Fast N/A`。无需添加 Fast 配置。
+Fast 默认关闭。在 Pi 终端或 pi-web 等支持 UI 的 RPC 客户端中输入 `/fast` 开启，再输入一次关闭。切换结果通过通知确认；状态为 `Fast ON`、`Fast OFF`，不适用的路由为 `Fast N/A`，显示位置由客户端决定。print/JSON 和无 UI 模式不能切换 Fast。无需添加 Fast 配置。
 
 支持原生 Codex，以及兼容 Responses 网关中可识别的 GPT/Codex 模型。开关只保存在当前会话：reload、续聊和 `new_context` 保留状态，新建或 fork 的会话默认关闭。开启时请求 Fast，关闭时请求标准档，会覆盖符合条件的对话请求中原有的服务档位，但不改变 reasoning effort 或配置文件。
 
