@@ -44,7 +44,12 @@ try {
 	});
 	await resourceLoader.reload();
 	if (resourceLoader.getExtensions().errors.length) throw new Error(`Pi extension load failed: ${JSON.stringify(resourceLoader.getExtensions().errors)}`);
-	for (const extension of resourceLoader.getExtensions().extensions) {
+	const extensions = resourceLoader.getExtensions().extensions;
+	const fastOwners = extensions.filter((extension) => extension.commands.has("fast"));
+	if (fastOwners.length !== 1 || !fastOwners[0]!.resolvedPath.replaceAll("\\", "/").endsWith("/codex-fast/extension.ts")) {
+		throw new Error("Codex Fast command was not loaded exactly once from its package entrypoint");
+	}
+	for (const extension of extensions) {
 		if (extension.commands.has("auto") || extension.flags.has("auto")) throw new Error("Removed Auto Mode controls were registered");
 		if (extension.resolvedPath.replaceAll("\\", "/").includes("/auto-mode/")) throw new Error("Removed Auto Mode extension was loaded");
 	}

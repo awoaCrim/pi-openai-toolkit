@@ -7,6 +7,7 @@ Developer-facing reference for [pi-openai-toolkit](../README.md). The README kee
 ### Table of Contents
 
 - [Configuration resolution](#configuration-resolution)
+- [Codex Fast session control](#codex-fast-session-control)
 - [Remote Context protocol](#remote-context-protocol)
 - [Rollover lifecycle](#rollover-lifecycle)
 - [Managed manual compact](#managed-manual-compact)
@@ -23,6 +24,20 @@ The single global document is loaded through [src/config.ts](../src/config.ts). 
 Feature entrypoints resolve once per public operation and pass that immutable snapshot through awaited helpers. A separately named compaction producer is resolved from the same decoded document for its own identity. Subsequent independent callbacks reload; a managed manual handoff retains its initiating context-policy snapshot until selection is restored. There is no general cross-event provider transaction, project lookup, singleton cache, or config state writer. Internal legacy-shaped engine adapters preserve compaction/search algorithms without exposing v2 parsing to consumers. Cross-feature gateway policy belongs to the resolver, not the context enable switch.
 
 Selected invalid policy blocks dependent operations; unrelated model errors remain reportable without replacing the selected model. Retired `autoMode` sections are ignored with a warning; they never create effective policy or invalidate other features. Image choices are checked before auth, uploads, or paid requests. The human `/toolkit-config` command inspects effective values, validation, or a migration candidate without action APIs or network access. Migration is preview-only; source bytes and unknown/dormant content stay untouched.
+
+---
+
+### Codex Fast session control
+
+[src/codex-fast/extension.ts](../src/codex-fast/extension.ts) registers the human-only, no-argument `/fast` toggle and an owned `ctx.ui.setStatus()` item. Default OFF requests `service_tier: "default"`; ON requests `"priority"`, the Codex Fast wire value. The status is the local request preference, not verified server acceptance or latency. Fast can increase usage/cost. No config setting, model tool, credential probe, retry, new header, reasoning-effort change or custom footer is added.
+
+Native `openai-codex-responses` routes qualify. Non-official HTTP(S) `openai-responses` gateways qualify for recognizable GPT/Codex IDs or an existing exact Codex gateway identity, including a resolved virtual route. Unknown opaque aliases without that identity, Azure, other APIs and ordinary `api.openai.com` API-key routes remain untouched. A capability marker is not backend entitlement.
+
+Version-1 `pi-openai-toolkit:codex-fast` custom entries contain only the owning Pi `sessionId` and `enabled` boolean. They are excluded from model context. Reload/resume and active-branch navigation reconstruct the latest valid owned preference; malformed latest metadata defaults OFF. Independent new/forked sessions ignore copied foreign preferences and start OFF. Remote window UUID changes do not reset the Pi session selection. A model switch shows N/A without discarding it. Missing identity or a failed append does not report a successful toggle.
+
+The payload hook takes one selection snapshot and returns a new object only when a matching ordinary Responses request needs a tier change. Explicit OFF also overrides an existing Fast/Flex tier to Standard. Dedicated compaction shapes and malformed/foreign payloads are left unchanged. Fast loads after Web Search/image registration and before the final Astra effort pass, so its tier does not alter the pre-search cached extras used by separate search/image/compaction clients.
+
+Native Pi and Toolkit gateway WebSocket adapters already compare non-input body fields before incremental reuse. A changed `service_tier` invalidates the incompatible `previous_response_id` delta; the existing transport/retry logic is retained. Offline official-Pi fixtures in [test/pi-codex-fast.test.ts](../test/pi-codex-fast.test.ts) cover terminal command/status, actual native/gateway HTTP/WebSocket bodies, saved reopen/reload, fork isolation and continuation transitions. They do not establish live Fast availability.
 
 ---
 

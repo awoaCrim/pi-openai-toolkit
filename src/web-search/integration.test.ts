@@ -8,6 +8,8 @@ import {
 	rememberRequestContext,
 } from "../request-context-cache";
 import { rewritePayloadWithDeferredToolCarryover } from "../deferred-tool-carryover";
+import { rewriteCodexFastPayload } from "../codex-fast/payload";
+import { registerCodexAstraExtension } from "../codex-astra/extension";
 import { CACHE_STACK_ACTIVATION_ENTRY_TYPE } from "../types";
 import { registerWebSearchExtension } from "./extension";
 import { transformWebSearchPayload } from "./payload";
@@ -46,9 +48,13 @@ describe("Compaction and Web Search integration", () => {
 			"./src/extension-runtime.ts",
 			"./src/web-search/extension.ts",
 			"./src/image-generation/extension.ts",
+			"./src/codex-fast/extension.ts",
 			"./src/codex-astra/extension.ts",
 			"./src/responses-websocket/extension.ts",
 		]);
+		for (const file of ["extension.ts", "payload.ts", "state.ts"]) {
+			expect(packageJson.files ?? []).toContain("src/codex-fast/" + file);
+		}
 		expect(packageJson.files ?? []).not.toContain("extensions/compaction.ts");
 		expect(packageJson.files ?? []).not.toContain("extensions/web-search.ts");
 		expect(packageJson.files ?? []).not.toContain("extensions/image-generation.ts");
@@ -88,6 +94,38 @@ describe("Compaction and Web Search integration", () => {
 		expect(compactExtras?.tools).not.toContainEqual({ type: "web_search" });
 		expect(compactExtras).not.toHaveProperty("include");
 	});
+
+	for (const fast of [true, false]) {
+		test(`Fast ${fast ? "ON" : "OFF"} changes only the live tier before the final Astra effort pass`, () => {
+			const handlers = new Map<string, (event: { payload: unknown }, ctx: unknown) => unknown>();
+			registerCodexAstraExtension({ on: (name: string, handler: (event: { payload: unknown }, ctx: unknown) => unknown) => handlers.set(name, handler) } as never);
+			const astraModel = { ...model, id: "gpt-6-astra", baseUrl: identity.baseUrl };
+			const astraIdentity = { ...identity, model: astraModel.id };
+			const ctx = { model: astraModel, sessionManager: { getSessionId: () => identity.sessionId } };
+			const astra = (payload: unknown) => handlers.get("before_provider_request")!({ payload }, ctx);
+			const first = { model: astraModel.id, input: [{ role: "user", content: "a" }], reasoning: { effort: "low" } };
+			expect(astra(first)).toBeUndefined();
+			const original = { ...first, input: [...first.input, { role: "user", content: "b" }],
+				reasoning: { effort: "max" }, service_tier: "flex", tools: [{ type: "function", name: "read_file" }],
+				prompt_cache_key: "unchanged-session", prompt_cache_options: { ttl: "30m" } };
+			const before = structuredClone(original);
+			rememberRequestContext(original, astraIdentity);
+			const search = transformWebSearchPayload({ model: astraModel, config: { ...enabled, models: ["newapi/gpt-6-astra"] }, payload: original });
+			const tier = rewriteCodexFastPayload(search.payload, astraModel.id, fast)!;
+			expect(tier.reasoning).toBe(original.reasoning);
+			const final = astra(tier) as Record<string, unknown>;
+			expect(final.service_tier).toBe(fast ? "priority" : "default");
+			expect(final.reasoning).toEqual({ effort: "low" });
+			expect(final.input).toEqual([first.input[0], { type: "configuration_update", reasoning: { effort: "max" } }, original.input[1]]);
+			expect(final.tools).toEqual([...original.tools, { type: "web_search" }]);
+			expect(final.include).toEqual([WEB_SEARCH_SOURCE_INCLUDE]);
+			expect(final.prompt_cache_key).toBe(original.prompt_cache_key);
+			expect(final.prompt_cache_options).toBe(original.prompt_cache_options);
+			expect(getCompactionRequestExtras(astraIdentity)).toMatchObject({ service_tier: "flex", reasoning: { effort: "max" }, tools: original.tools });
+			expect(getCompactionRequestExtras(astraIdentity)).not.toHaveProperty("include");
+			expect(original).toEqual(before);
+		});
+	}
 
 	test("toolkit Web Search takes precedence without polluting compaction extras", () => {
 		const localTool = { type: "function", name: "web_search", description: "local search" };

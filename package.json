@@ -1,6 +1,6 @@
 {
   "name": "pi-openai-toolkit",
-  "version": "0.21.1",
+  "version": "0.22.0",
   "private": false,
   "type": "module",
   "engines": {
@@ -36,6 +36,7 @@
       "./src/extension-runtime.ts",
       "./src/web-search/extension.ts",
       "./src/image-generation/extension.ts",
+      "./src/codex-fast/extension.ts",
       "./src/codex-astra/extension.ts",
       "./src/responses-websocket/extension.ts"
     ]
@@ -78,6 +79,9 @@
     "src/image-generation/render.ts",
     "src/image-generation/service.ts",
     "src/image-generation/types.ts",
+    "src/codex-fast/extension.ts",
+    "src/codex-fast/payload.ts",
+    "src/codex-fast/state.ts",
     "src/codex-astra/effort-planner.ts",
     "src/codex-astra/extension.ts",
     "src/responses-websocket/extension.ts",

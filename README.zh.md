@@ -60,6 +60,14 @@ Toolkit 只读取一个全局配置文件，即使扩展安装在项目内也一
 
 远程窗口依赖 alpha 接口，上游可能随时调整。切换模型时远程窗口状态仍会持久化并可复用，详见[窗口生命周期](docs/internals.md#rollover-lifecycle)。
 
+## Codex Fast
+
+Fast 默认关闭。在终端输入 `/fast` 开启，再输入一次 `/fast` 关闭。状态栏显示 `Fast ON`、`Fast OFF`，不适用的路由显示 `Fast N/A`。无需添加 Fast 配置。
+
+支持原生 Codex，以及兼容 Responses 网关中可识别的 GPT/Codex 模型。开关只保存在当前会话：reload、续聊和 `new_context` 保留状态，新建或 fork 的会话默认关闭。开启时请求 Fast，关闭时请求标准档，会覆盖符合条件的对话请求中原有的服务档位，但不改变 reasoning effort 或配置文件。
+
+Fast 可能增加额度消耗或费用。状态栏表示请求模式，不代表后端已确认加速；网关可能拒绝、忽略或降级请求。无法识别的网关模型别名需要已有的 Codex 网关路由标识。适用范围和生命周期见 [Fast 规则](docs/internals.md#codex-fast-session-control)。
+
 ## 搜索、生图与传输
 
 ### 联网搜索
