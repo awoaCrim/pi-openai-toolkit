@@ -460,7 +460,15 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 	return {
 		sessionStart,
 		contextHook,
-		sessionBeforeCompact,
+		// Real Pi always includes the active branch in this public event. Older
+		// ordinary-compaction cases omitted it because no window check ran there.
+		sessionBeforeCompact: (event, ctx) => {
+			if (Object.hasOwn(event as object, "branchEntries")) return sessionBeforeCompact(event, ctx);
+			return sessionBeforeCompact({
+				...(event as Record<string, unknown>),
+				branchEntries: (ctx as ReturnType<typeof createContext>).sessionManager.getBranch(),
+			}, ctx);
+		},
 		beforeProviderRequest,
 		beforeProviderHeaders,
 		compactCalls,

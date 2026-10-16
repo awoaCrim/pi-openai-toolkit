@@ -129,7 +129,7 @@ function hookHarness(options: {
 		...(options.standaloneCompact ? { standaloneCompact: options.standaloneCompact } : {}),
 	});
 	return { ctx, consumer, notifications, fallbackCalls, root, get projections() { return projections; }, get authCalls() { return authCalls; },
-		run: (reason = "manual", signal = new AbortController().signal) => handlers.get("session_before_compact")!({ reason, signal, preparation: { firstKeptEntryId: "keep", tokensBefore: 777, messagesToSummarize: [], turnPrefixMessages: [] } }, ctx),
+		run: (reason = "manual", signal = new AbortController().signal) => handlers.get("session_before_compact")!({ reason, signal, branchEntries: ctx.sessionManager.getBranch(), preparation: { firstKeptEntryId: "keep", tokensBefore: 777, messagesToSummarize: [], turnPrefixMessages: [] } }, ctx),
 	};
 }
 
