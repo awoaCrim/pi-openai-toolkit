@@ -1071,3 +1071,106 @@ test("v2 context lifecycle reads one snapshot across awaited activation and sees
 	expect(reads).toBe(2);
 	expect(active).toEqual(["read"]);
 });
+
+for (const reason of ["manual", "threshold", "overflow"] as const) {
+	test(`consumed detached boundary reaches the configured fallback model (${reason})`, async () => {
+		const handlers = new Map<string, (event: never, ctx: never) => unknown>();
+		const registered: Array<{ name: string }> = [];
+		const sent: Array<{ customType?: string }> = [];
+		const notices: string[] = [];
+		let active = ["read"];
+		let aborted = false;
+		const fallbackCalls: Array<{ modelSpec?: string; event: unknown }> = [];
+		const producerCalls: string[] = [];
+		const pi = {
+			on: (name: string, handler: (event: never, ctx: never) => unknown) => handlers.set(name, handler),
+			registerTool: (tool: { name: string }) => registered.push(tool),
+			getAllTools: () => registered, getActiveTools: () => active,
+			setActiveTools: (names: string[]) => { active = names; },
+			sendMessage: (message: { customType?: string }) => { sent.push(message); },
+		} as unknown as ExtensionAPI;
+		const windows = new CodexContextWindowManager(async () => undefined);
+		extension(pi, {
+			loadConfig: () => ({ config: {
+				...DEFAULT_TOOLKIT_CONFIG, compaction: {
+					...DEFAULT_COMPACTION_CONFIG, contextManagement: "remote",
+					nativeFallback: { enabled: true, model: "uwoacrimson/gpt-6-summary", thinkingLevel: "off" },
+				},
+			}, warnings: [] }),
+			contextWindows: windows,
+			remoteCompact: async () => { producerCalls.push("remote"); throw new Error("no Remote V2 for a local API"); },
+			nativeFallback: async (args: { modelSpec?: string; event: unknown }) => {
+				fallbackCalls.push(args);
+				return { ok: false, reason: "no-model-configured" } as never;
+			},
+		});
+		const sm = SessionManager.inMemory("/synthetic-project");
+		const sessionId = sm.getSessionId();
+		sm.appendMessage({ role: "system", content: "", sections: { preamble: "prompt" },
+			toolsAdded: [{ name: "read", description: "read", parameters: {} }], timestamp: 1 } as AgentMessage);
+		const addMarker = (windowId: string, windowNumber: number) => sm.appendCustomMessageEntry(
+			CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, "window", true, {
+				protocol: 1, id: `marker-${windowId}`, sessionId,
+				contextManagement: { protocol: 1, kind: "window", firstWindowId: "w1", currentWindowId: windowId, windowNumber },
+			},
+		);
+		addMarker("w1", 0);
+		const retired = { role: "user", content: "RETIRED-SENTINEL ".repeat(2000), timestamp: 2 } as AgentMessage;
+		sm.appendMessage(retired);
+		const boundaryId = addMarker("w2", 1);
+		sm.appendMessage({ role: "user", content: "CURRENT-WINDOW-SENTINEL", timestamp: 3 });
+		sm.appendMessage(fauxAssistantMessage("current work"));
+		const localModel = { ...model, provider: "uwoacrimson", api: "openai-completions", id: "gpt-6-luna", contextWindow: 272_000 };
+		const context = (currentModel: typeof model) => ({
+			...makeContext([], currentModel), sessionManager: sm, hasUI: true,
+			ui: { notify: (message: string) => notices.push(message) },
+			abort: () => { aborted = true; },
+			compact: () => undefined,
+			modelRegistry: {
+				find: () => ({ ...model, provider: "uwoacrimson", api: "openai-responses", id: "gpt-6-summary" }),
+				getApiKeyAndHeaders: async () => ({
+					ok: true, apiKey: "token", headers: { "chatgpt-account-id": "account" }, baseUrl: model.baseUrl,
+				}),
+			},
+		}) as never;
+		const remoteCtx = context(model);
+		const localCtx = context(localModel);
+		await handlers.get("session_start")!({} as never, remoteCtx);
+		const identity = windows.currentIdentity();
+		expect(identity?.currentWindowId).toBe("w2");
+		await handlers.get("model_select")!({ model: localModel, previousModel: model, source: "set" } as never, remoteCtx);
+		const prepare = (preparation: unknown) => handlers.get("session_before_compact")!({
+			signal: new AbortController().signal, reason, branchEntries: sm.getBranch(), preparation,
+		} as never, localCtx);
+		const preparation = { firstKeptEntryId: "wrong-boundary", tokensBefore: 700_000,
+			messagesToSummarize: [retired], turnPrefixMessages: [] };
+
+		// First pass detaches at the durable boundary with no producer involvement.
+		const detached = await prepare(preparation) as { compaction: CompactionResult<ContextWindowCompactionDetails> };
+		expect(detached.compaction.summary).toBe(CONTEXT_WINDOW_COMPACTION_SUMMARY);
+		expect(detached.compaction.firstKeptEntryId).toBe(boundaryId);
+		expect([producerCalls.length, fallbackCalls.length]).toEqual([0, 0]);
+		const { summary, firstKeptEntryId, tokensBefore, details } = detached.compaction;
+		sm.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, true);
+		await handlers.get("session_compact")!({ compactionEntry: sm.getBranch().at(-1) } as never, localCtx);
+
+		// Second pass: a consumed boundary must not cancel the configured fallback tier.
+		expect(await prepare(preparation)).toBeUndefined();
+		expect(fallbackCalls).toHaveLength(1);
+		expect(fallbackCalls[0]!.modelSpec).toBe("uwoacrimson/gpt-6-summary");
+		expect(producerCalls).toEqual([]);
+		expect(aborted).toBe(false);
+
+		// The projection the producer would consume already excludes retired history.
+		const effective = sm.buildSessionProjection().messages;
+		expect(JSON.stringify(effective)).not.toContain("RETIRED-SENTINEL");
+		expect(JSON.stringify(effective)).toContain("CURRENT-WINDOW-SENTINEL");
+
+		// Window identity survives and is reused on switch-back without a duplicate marker.
+		await handlers.get("model_select")!({ model, previousModel: localModel, source: "set" } as never, localCtx);
+		await handlers.get("agent_settled")!({} as never, remoteCtx);
+		expect(active).toEqual(["read", "new_context", "get_context_remaining", "history", "notes"]);
+		expect(windows.currentIdentity()).toEqual(identity);
+		expect(sent).toEqual([]);
+	});
+}

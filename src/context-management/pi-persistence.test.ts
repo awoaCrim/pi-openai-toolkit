@@ -206,7 +206,10 @@ test("explicit new_context after supersession creates a real later boundary with
 	sm.appendCompaction(summary, firstKeptEntryId, tokensBefore, details);
 	manager.synchronize(ctx); // No callback needed.
 	expect(manager.prepareCompaction(event())).toEqual({ cancel: true });
-	expect(manager.prepareDetachedCompaction(event())).toEqual({ cancel: true });
+	// The scheduled-trim path keeps cancelling (a second boundary would move the
+	// retained start backwards), but a local consumer detaches nothing once that
+	// boundary is durable and must continue through the ordinary chain.
+	expect(manager.prepareDetachedCompaction(event())).toBeUndefined();
 	expect(JSON.stringify(manager.project(sm.buildSessionProjection().messages, "local"))).not.toContain("recent");
 });
 

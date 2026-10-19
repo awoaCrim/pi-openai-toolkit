@@ -1,5 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import {
 	loadHistoryNotesThreadHint,
 } from "./history-notes";
@@ -838,4 +840,34 @@ test("detached compaction needs a persisted boundary but no scheduled trim and d
 	expect(manager.prepareCompaction(event)).toEqual({ cancel: true });
 	expect(manager.currentIdentity()).toEqual(identity);
 	expect(manager.prepareDetachedCompaction({ branchEntries: [], preparation: {} } as never)).toBeUndefined();
+});
+
+test("a consumed detached boundary yields to the ordinary chain instead of cancelling", () => {
+	const sm = SessionManager.inMemory("/synthetic-project");
+	sm.appendMessage({ role: "user", content: "retired pre-window history", timestamp: 1 });
+	const marker = sm.appendCustomMessageEntry(CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, "window", true, {
+		protocol: 1, id: "marker-w2", sessionId: sm.getSessionId(),
+		contextManagement: { protocol: 1, kind: "window", firstWindowId: "w1", currentWindowId: "w2",
+			previousWindowId: "w1", windowNumber: 1, trimPreviousWindow: true },
+	});
+	sm.appendMessage({ role: "user", content: "current window work", timestamp: 2 });
+	sm.appendMessage(fauxAssistantMessage("current work", { timestamp: 3 }));
+	const manager = new CodexContextWindowManager(async () => undefined);
+	manager.synchronize({ sessionManager: sm } as never);
+	const event = () => ({ branchEntries: sm.getBranch(), preparation: { tokensBefore: 100 } }) as never;
+
+	// First attempt detaches at the durable boundary without summarizing anything.
+	const proposal = manager.prepareDetachedCompaction(event());
+	if (!proposal || !("compaction" in proposal)) throw new Error("Expected a no-summary detachment");
+	expect(proposal.compaction.summary).toBe(CONTEXT_WINDOW_COMPACTION_SUMMARY);
+	expect(proposal.compaction.firstKeptEntryId).toBe(marker);
+	const { summary, firstKeptEntryId, tokensBefore, details } = proposal.compaction;
+	sm.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, true);
+	manager.synchronize({ sessionManager: sm } as never);
+
+	// Once persisted, the scheduled-trim path still refuses (a second boundary would
+	// move retention backwards) but a local consumer must continue to the ordinary chain.
+	expect(manager.prepareCompaction(event())).toEqual({ cancel: true });
+	expect(manager.prepareDetachedCompaction(event())).toBeUndefined();
+	expect(manager.currentIdentity()?.currentWindowId).toBe("w2");
 });

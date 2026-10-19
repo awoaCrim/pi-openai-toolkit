@@ -198,8 +198,11 @@ for (const policy of policies) {
 			expect(f.sm.getBranch()).toEqual(before);
 			const { summary, firstKeptEntryId, tokensBefore, details } = result.compaction;
 			f.sm.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, true);
-			expect(await f.compaction(reason)).toEqual({ cancel: true });
-			expect(f.producerCalls).toEqual([0, 0]);
+			// A consumed boundary is no longer a dead end: the ordinary chain continues.
+			// Disabled/Pi selections exit before any producer; other local policies reach
+			// the native fallback tier, which this fixture reports as unconfigured.
+			expect(await f.compaction(reason)).toBeUndefined();
+			expect(f.producerCalls).toEqual([0, policy === "pi" || policy === "legacy-disabled" ? 0 : 1]);
 			expect(f.auth).toEqual([]);
 			expect(f.windows.currentIdentity()?.currentWindowId).toBe("window-1");
 		});

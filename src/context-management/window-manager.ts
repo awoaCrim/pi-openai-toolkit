@@ -449,14 +449,24 @@ export class CodexContextWindowManager {
 	 * Detach a local consumer at the durable Remote boundary, without summarizing
 	 * any Remote-managed history. Unlike a scheduled rollover trim, this needs
 	 * no pending trim and remains retryable until Pi persists the result.
+	 *
+	 * A consumed boundary is not an error. Once Pi has persisted the no-summary
+	 * boundary, `buildSessionProjection()` already starts at that marker, so
+	 * retired Remote history is outside every producer's input and the ordinary
+	 * compaction chain may summarize the remaining local window. Returning
+	 * `undefined` hands the event back to that chain; returning `{ cancel: true }`
+	 * would strand the session with no working compaction path at all.
 	 */
 	prepareDetachedCompaction(
 		event: SessionBeforeCompactEvent,
-	): { cancel: true } | { compaction: CompactionResult<ContextWindowCompactionDetails> } | undefined {
+	): { compaction: CompactionResult<ContextWindowCompactionDetails> } | undefined {
 		const boundary = resolveWindowBoundary(event.branchEntries, this.sessionId);
 		if (boundary.kind === "ambiguous") throw new Error("Persisted Codex context-window boundary missing or edited");
 		if (boundary.kind !== "effective") return undefined;
-		if (boundary.cleaned) return { cancel: true };
+		// A matching no-summary boundary is already the effective compaction anchor.
+		// Nothing is left to detach, and writing a second boundary for the same window
+		// would move the retained start backwards.
+		if (boundary.cleaned) return undefined;
 		const compaction = this.createCompaction(event, boundary.entry);
 		// Pi's preparation/tokensBefore describes the durable branch, which includes
 		// Remote-managed history. Detached local accounting must use the same current

@@ -824,6 +824,22 @@ async function handleSessionBeforeCompact(
 		// A local consumer cannot summarize history owned by a Remote window,
 		// even after switching modes or disabling Toolkit compaction.
 		if (detached) return detached;
+		// A boundary already persisted by an earlier detach still owns this session.
+		// Retired Remote history is outside Pi's effective projection at that point, so
+		// ordinary compaction may continue; record why it no longer detaches.
+		const ownedIdentity = dependencies.contextWindows.currentIdentity();
+		if (ownedIdentity) {
+			writeDebugArtifact(
+				"compaction-event",
+				{
+					event: "session_before_compact.detached-already-owned",
+					windowId: ownedIdentity.currentWindowId,
+					superseded: dependencies.contextWindows.hasSupersededWindow(),
+				},
+				config,
+				ctx,
+			);
+		}
 	} catch {
 		notifyRemoteContextFailure(ctx, "malformed-window-state");
 		return { cancel: true };
