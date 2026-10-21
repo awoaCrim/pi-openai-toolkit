@@ -1,9 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { buildSessionContext, estimateTokens, type ExtensionAPI, type ExtensionContext, type SessionBeforeCompactEvent, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import { buildSessionContext, estimateTokens, type CompactionResult, type ExtensionAPI, type ExtensionContext, type SessionBeforeCompactEvent, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { resolveToolkitConfig, type ResolvedToolkitConfig } from "../config";
 import { parseModelSpec } from "../runtime";
-import { THINKING_LEVELS } from "../types";
+import { THINKING_LEVELS, type NativeCompactionDetails } from "../types";
 import { resolveCodexContextProvider } from "./codex-provider";
 import { findLatestNotesCheckpointSinceBoundary, findLatestWindowBoundaryEntry, type CodexContextWindowManager } from "./window-manager";
 import { isNonEmptyString, isRecord, type CodexContextProvider, type ContextWindowIdentity } from "./types";
@@ -79,7 +80,183 @@ function freshCheckpoint(entries: readonly SessionEntry[], record: ManualCompact
 	return findLatestNotesCheckpointSinceBoundary(entries, record.sessionId, afterId);
 }
 
-/** Owns only manual managed handoffs, not normal window rollovers or Remote V2. */
+function branchFingerprint(entries: readonly SessionEntry[]): string {
+	return createHash("sha256").update(JSON.stringify(entries)).digest("hex");
+}
+
+export type RemoteManualCompactOperation = {
+	generation: number;
+	sessionId: string;
+	sessionFile: string | undefined;
+	anchorId: string;
+	branchLength: number;
+	branchFingerprint: string;
+	windowId: string;
+	model: string;
+	api: string;
+	baseUrl: string;
+	thinking: ThinkingLevel;
+	controller: AbortController;
+	signal: AbortSignal;
+	removeAbortListeners: () => void;
+	policy: ResolvedToolkitConfig;
+	candidate?: CompactionResult<NativeCompactionDetails>;
+	persistedId?: string;
+	deadline?: number;
+};
+
+/**
+ * One transient Remote V2 operation. It never selects a model, writes recovery
+ * records, takes host queues, or resumes from reload. Legacy duty recovery below
+ * remains independent.
+ */
+export class RemoteManualCompact {
+	private generation = 0;
+	private operation: RemoteManualCompactOperation | undefined;
+	private timer: ReturnType<typeof setTimeout> | undefined;
+
+	constructor(private readonly pi: ExtensionAPI, private readonly windows: CodexContextWindowManager,
+		private readonly idleTimeoutMs = 10_000) {}
+
+	get snapshot() { return this.operation?.policy.snapshot; }
+
+	invalidate(): void {
+		++this.generation;
+		clearTimeout(this.timer);
+		this.timer = undefined;
+		const operation = this.operation;
+		this.operation = undefined;
+		operation?.removeAbortListeners();
+		operation?.controller.abort();
+	}
+
+	cancel(operation: RemoteManualCompactOperation | undefined): void {
+		if (operation && this.operation === operation) this.invalidate();
+	}
+
+	begin(event: SessionBeforeCompactEvent, ctx: ExtensionContext, policy: ResolvedToolkitConfig): RemoteManualCompactOperation | undefined {
+		this.invalidate();
+		const model = ctx.model;
+		const anchorId = ctx.sessionManager.getLeafId();
+		const windowId = this.windows.currentIdentity()?.currentWindowId;
+		if (!model || !anchorId || !windowId || event.signal.aborted) return undefined;
+		const branch = ctx.sessionManager.getBranch();
+		if (!isDeepStrictEqual(event.branchEntries, branch)) return undefined;
+		const controller = new AbortController();
+		const onAbort = () => { if (this.operation === operation) this.invalidate(); };
+		// Manual compact has already aborted the preceding agent run. Its old,
+		// aborted ctx.signal is not cancellation of this newly initiated operation.
+		const signals = [event.signal, ...(ctx.signal && !ctx.signal.aborted && ctx.signal !== event.signal ? [ctx.signal] : [])];
+		const operation: RemoteManualCompactOperation = {
+			generation: this.generation, sessionId: ctx.sessionManager.getSessionId(),
+			sessionFile: ctx.sessionManager.getSessionFile(), anchorId,
+			branchLength: branch.length, branchFingerprint: branchFingerprint(branch), windowId,
+			model: modelKey(model)!, api: model.api, baseUrl: model.baseUrl, thinking: this.pi.getThinkingLevel(),
+			controller, signal: controller.signal, policy,
+			removeAbortListeners: () => { for (const signal of signals) signal.removeEventListener("abort", onAbort); },
+		};
+		this.operation = operation;
+		for (const signal of signals) signal.addEventListener("abort", onAbort, { once: true });
+		return operation;
+	}
+
+	private owns(operation: RemoteManualCompactOperation, ctx: ExtensionContext): boolean {
+		if (this.operation !== operation || operation.generation !== this.generation || operation.signal.aborted
+			|| ctx.sessionManager.getSessionId() !== operation.sessionId || ctx.sessionManager.getSessionFile() !== operation.sessionFile
+			|| modelKey(ctx.model) !== operation.model || ctx.model?.api !== operation.api || ctx.model?.baseUrl !== operation.baseUrl
+			|| this.pi.getThinkingLevel() !== operation.thinking || ctx.hasPendingMessages()) return false;
+		this.windows.synchronize(ctx);
+		return this.windows.currentIdentity()?.currentWindowId === operation.windowId && !this.windows.hasPendingRollover(ctx);
+	}
+
+	current(operation: RemoteManualCompactOperation, ctx: ExtensionContext): boolean {
+		try {
+			const branch = ctx.sessionManager.getBranch();
+			return this.owns(operation, ctx) && ctx.sessionManager.getLeafId() === operation.anchorId
+				&& branch.length === operation.branchLength && branchFingerprint(branch) === operation.branchFingerprint;
+		} catch { return false; }
+	}
+
+	arm(
+		operation: RemoteManualCompactOperation,
+		ctx: ExtensionContext,
+		candidate: CompactionResult<NativeCompactionDetails>,
+	): { readonly cancel: boolean; compaction: CompactionResult<NativeCompactionDetails> } | undefined {
+		if (!this.current(operation, ctx)) return undefined;
+		operation.candidate = structuredClone(candidate);
+		const owner = this;
+		return {
+			compaction: candidate,
+			// Pi reads this public result again after later before-compact observers.
+			// Revalidate at consumption, not just at return: newer work must revoke
+			// the candidate before persistence, without ctx.abort() draining TUI queues.
+			get cancel() { return !owner.current(operation, ctx); },
+		};
+	}
+
+	private durableCandidate(operation: RemoteManualCompactOperation, ctx: ExtensionContext): string | undefined {
+		if (!this.owns(operation, ctx) || !operation.candidate) return undefined;
+		const branch = ctx.sessionManager.getBranch();
+		// The event's ID can refer to an OLD equal-summary checkpoint in Pi 1.0.
+		// Only the new actual branch child and its complete candidate are proof.
+		if (branch.length !== operation.branchLength + 1
+			|| branchFingerprint(branch.slice(0, operation.branchLength)) !== operation.branchFingerprint) return undefined;
+		const entry = branch[operation.branchLength];
+		const candidate = operation.candidate;
+		if (!entry || entry.type !== "compaction" || entry.parentId !== operation.anchorId
+			|| entry.id === operation.anchorId || ctx.sessionManager.getLeafId() !== entry.id || entry.fromHook !== true
+			|| entry.summary !== candidate.summary || entry.firstKeptEntryId !== candidate.firstKeptEntryId
+			|| entry.tokensBefore !== candidate.tokensBefore
+			// Persistence omits undefined optional fields; compare the actual JSON
+			// data, not object identity, summary text, or provider response ID alone.
+			|| !isDeepStrictEqual(JSON.parse(JSON.stringify(entry.details)), JSON.parse(JSON.stringify(candidate.details)))) return undefined;
+		return entry.id;
+	}
+
+	private requestManualResume(ctx: ExtensionContext, message = "Remote /compact saved its checkpoint; resume manually."): void {
+		try { if (ctx.hasUI) ctx.ui.notify(message, "warning"); } catch { /* stale UI must not escape a deferred callback */ }
+	}
+
+	/** Observer only: never await idle or submit a prompt inside session_compact. */
+	persisted(ctx: ExtensionContext): void {
+		const operation = this.operation;
+		if (!operation?.candidate || operation.persistedId) return;
+		try { operation.persistedId = this.durableCandidate(operation, ctx); } catch { /* fail closed */ }
+		if (!operation.persistedId) {
+			this.invalidate();
+			this.requestManualResume(ctx, "Remote /compact could not verify its exact saved checkpoint; resume manually.");
+			return;
+		}
+		operation.deadline = Date.now() + this.idleTimeoutMs;
+		this.schedule(operation, ctx, 0);
+	}
+
+	private schedule(operation: RemoteManualCompactOperation, ctx: ExtensionContext, delay: number): void {
+		this.timer = setTimeout(() => {
+			this.timer = undefined;
+			if (this.operation !== operation) return;
+			try {
+				if (this.durableCandidate(operation, ctx) !== operation.persistedId) { this.invalidate(); return; }
+				if (Date.now() >= operation.deadline!) {
+					this.invalidate();
+					this.requestManualResume(ctx, "Remote /compact saved its checkpoint; automatic continuation could not safely reach idle. Resume manually.");
+					return;
+				}
+				if (!ctx.isIdle()) { this.schedule(operation, ctx, 25); return; }
+				// No await between final public ownership/queue/idle proof and send.
+				// Disarm first, so our own input/run events cannot invalidate a newer operation.
+				this.invalidate();
+				this.pi.sendUserMessage("Context compressed. Resume the active user task.");
+			} catch {
+				this.invalidate();
+				this.requestManualResume(ctx);
+			}
+		}, delay);
+		this.timer.unref?.();
+	}
+}
+
+/** Owns only legacy managed handoffs, not normal window rollovers or Remote V2. */
 export class ManagedManualCompact implements ContextRolloverHandoff {
 	private record: ManualCompactRecord | undefined;
 	private generation = 0;

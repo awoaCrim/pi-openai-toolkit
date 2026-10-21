@@ -1,4 +1,7 @@
+import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { declarationsEqual, getCurrentSystemMessage, getCurrentTools } from "@earendil-works/pi-ai";
+import { convertResponsesTools } from "@earendil-works/pi-ai/api/openai-responses-shared";
 import type {
 	BeforeProviderRequestEvent,
 	ContextWithSystemEvent,
@@ -16,10 +19,13 @@ import {
 	isCodexGatewayModel,
 	isNativeCodexModel,
 } from "./context-management/codex-provider";
-import { routeContextNamespaceToolMessage } from "./context-management/namespace-tools";
+import { rewriteContextNamespaceCalls, rewriteContextNamespaceTools, routeContextNamespaceToolMessage } from "./context-management/namespace-tools";
+import { rewriteEncryptedToolOutputs } from "./context-management/window-request";
 import { loadHistoryNotesThreadHint } from "./context-management/history-notes";
 import { CodexContextWindowManager } from "./context-management/window-manager";
-import { ManagedManualCompact } from "./context-management/manual-compact";
+import { ManagedManualCompact, RemoteManualCompact, type RemoteManualCompactOperation } from "./context-management/manual-compact";
+import { isSystemTranscriptMessage } from "./context-management/messages";
+import { isRecord } from "./context-management/types";
 import {
 	registerContextManagementTools,
 	type ContextToolRegistrationState,
@@ -79,7 +85,9 @@ import {
 	getRemoteV2InputProvenance,
 	isNativeCompactionDetails,
 	type CompactionConfig,
+	type DeferredToolCarryoverV1,
 	type NativeCompactionDetails,
+	type NativeCompactionEntry,
 	type NativeCompactionRequestMeta,
 } from "./types";
 
@@ -116,6 +124,7 @@ type CompactionDependencies = {
 	nativeFallback: typeof runNativeFallbackCompaction;
 	contextWindows: CodexContextWindowManager;
 	manualCompact?: ManagedManualCompact;
+	remoteManualCompact: RemoteManualCompact;
 	/** Test seam for the same ordered projection exposed by the Pi host patch. */
 	projectCompactionContext?: CompactionContextProjection;
 	piContextHookPatch: PiContextHookPatchResult;
@@ -311,8 +320,9 @@ type CompactionProjectionResult =
 async function projectSessionContextForCompaction(
 	ctx: ExtensionContext,
 	projectCompactionContext: CompactionContextProjection | undefined,
+	canonicalMessages?: readonly AgentMessage[],
 ): Promise<CompactionProjectionResult> {
-	const messages = readSessionContextMessages(ctx);
+	const messages = canonicalMessages ? structuredClone([...canonicalMessages]) : readSessionContextMessages(ctx);
 	if (!messages) {
 		return { ok: false, reason: COMPACTION_SESSION_CONTEXT_UNAVAILABLE };
 	}
@@ -342,6 +352,187 @@ function getLegacySessionContextMessages(
 	];
 }
 
+type ScopedResponsesCompactInput = {
+	request: NativeCompactionRequestBody;
+	firstKeptEntryId: string;
+	deferredToolCarryover?: DeferredToolCarryoverV1;
+	requestSource: "session-context" | "non-native-session-context" | "latest-native-replay";
+	isCurrent: () => boolean;
+};
+
+/** Reject incomplete/ambiguous tool batches rather than let serialization invent results. */
+function requireCompleteCompactionToolPairs(messages: readonly AgentMessage[]): ReadonlyMap<string, string | undefined> {
+	const calls = new Map<string, string | undefined>();
+	const pending = new Set<string>();
+	for (const message of messages) {
+		if (message.role === "assistant") {
+			if (pending.size) throw new Error("compaction-tool-pair-mismatch");
+			for (const block of message.content) {
+				if (block.type !== "toolCall") continue;
+				const callId = block.id.split("|")[0];
+				if (!callId || calls.has(callId)) throw new Error("compaction-tool-pair-mismatch");
+				calls.set(callId, block.namespace);
+				pending.add(block.id);
+			}
+		} else if (message.role === "toolResult") {
+			if (!pending.delete(message.toolCallId)) throw new Error("compaction-tool-pair-mismatch");
+		} else if (pending.size && !isSystemTranscriptMessage(message)) {
+			throw new Error("compaction-tool-pair-mismatch");
+		}
+	}
+	if (pending.size) throw new Error("compaction-tool-pair-mismatch");
+	return calls;
+}
+
+/** Serialization must preserve every verified pair, with unique provider call IDs. */
+function requireCompactionWireToolPairs(input: readonly unknown[], namespaces: ReadonlyMap<string, string | undefined>): void {
+	const calls = new Set<string>();
+	const pending = new Set<string>();
+	for (const item of input) {
+		if (!isRecord(item)) throw new Error("compaction-tool-pair-mismatch");
+		if (item.type === "function_call") {
+			if (typeof item.call_id !== "string" || !namespaces.has(item.call_id) || calls.has(item.call_id)) {
+				throw new Error("compaction-tool-pair-mismatch");
+			}
+			calls.add(item.call_id);
+			pending.add(item.call_id);
+		} else if (item.type === "function_call_output") {
+			if (typeof item.call_id !== "string" || !pending.delete(item.call_id)) throw new Error("compaction-tool-pair-mismatch");
+		}
+	}
+	if (pending.size || calls.size !== namespaces.size) throw new Error("compaction-tool-pair-mismatch");
+}
+
+function requireCompactionHeadAndRetention(
+	canonical: readonly AgentMessage[],
+	projected: readonly AgentMessage[],
+	retained: readonly AgentMessage[],
+): void {
+	const before = getCurrentTools(canonical);
+	const after = getCurrentTools(projected);
+	if (!getCurrentSystemMessage(projected) || before.length !== after.length
+		|| before.some((tool, index) => !after[index] || !declarationsEqual(tool, after[index]!))) {
+		throw new Error("compaction-system-tool-head-lost");
+	}
+	// These exact source contributions will accompany the new summary in Pi.
+	// If a hook rewrites/omits one, future strict retained-copy removal cannot be proven.
+	let cursor = 0;
+	for (const message of retained) {
+		if (message.role === "custom" || message.role === "compactionSummary" || isSystemTranscriptMessage(message)) continue;
+		const index = projected.findIndex((candidate, index) => index >= cursor && isDeepStrictEqual(candidate, message));
+		if (index < 0) throw new Error("compaction-retained-context-mismatch");
+		cursor = index + 1;
+	}
+}
+
+/** Apply only pure wire adapters, never ordinary turn/history-ingest hooks. */
+function adaptCompactionWireInput(input: ResponsesInputItem[], namespaces: ReadonlyMap<string, string | undefined>): ResponsesInputItem[] {
+	// The shared legacy serializer omits namespace. Restore it from the verified
+	// canonical call before applying the existing context-router wire adapter.
+	const namespaced = input.map((item: unknown) => {
+		if (!isRecord(item) || item.type !== "function_call" || typeof item.call_id !== "string") return item;
+		const namespace = namespaces.get(item.call_id);
+		return namespace ? { ...item, namespace } : item;
+	});
+	const adapted = rewriteEncryptedToolOutputs(rewriteContextNamespaceCalls({ input: namespaced }));
+	if (!isRecord(adapted) || !Array.isArray(adapted.input)) throw new Error("compaction-wire-adaptation-failed");
+	// The adapters preserve the validated array shape, with native encrypted outputs.
+	return adapted.input as ResponsesInputItem[];
+}
+
+async function prepareActiveRemoteCompaction(
+	event: SessionBeforeCompactEvent,
+	ctx: ExtensionContext,
+	config: CompactionConfig,
+	execution: RemoteCompactionExecution,
+	dependencies: CompactionDependencies,
+	isCurrent: () => boolean,
+): Promise<ScopedResponsesCompactInput> {
+	const windows = dependencies.contextWindows;
+	const prepared = windows.prepareRemoteCompaction(event, ctx);
+	const branch = ctx.sessionManager.getBranch();
+	const provenance = getRemoteV2InputProvenance(config.remoteV2ContextSource);
+	let checkpoint: NativeCompactionEntry | undefined;
+	let requestSource: ScopedResponsesCompactInput["requestSource"] = "session-context";
+	if (prepared.owningCompaction) {
+		const latest = resolveLatestNativeCompactionEntry(branch, { baseUrl: execution.consumer.baseUrl });
+		if (latest.ok) {
+			if (latest.entry.id !== prepared.owningCompaction.id) throw new Error("compaction-owner-mismatch");
+			if (hasInvalidatedCompactionContext(branch, latest.entry.id)) throw new Error(COMPACTION_CHECKPOINT_CONTEXT_EDITED);
+			if (!hasVerifiedCompactionInputProvenance(latest.entry.details, provenance)) throw new Error(COMPACTION_CHECKPOINT_PROVENANCE_UNAVAILABLE);
+			checkpoint = latest.entry;
+			requestSource = "latest-native-replay";
+		} else {
+			if (latest.reason !== "latest-compaction-not-native" || !config.allowCompactionContinuityBreak) throw new Error("compaction-continuity-unavailable");
+			requestSource = "non-native-session-context";
+		}
+	}
+	let messages = prepared.messages;
+	if (config.remoteV2ContextSource === "pi-context-hook") {
+		const projection = await windows.withCompactionProjection(() => projectSessionContextForCompaction(
+			ctx, dependencies.projectCompactionContext, messages,
+		));
+		if (!isCurrent()) throw new Error("compaction-operation-superseded");
+		if (!projection.ok) throw new Error(projection.reason);
+		messages = windows.projectCompactionContext(projection.messages);
+	}
+	if (!isCurrent()) throw new Error("compaction-operation-superseded");
+	requireCompactionHeadAndRetention(prepared.messages, messages, prepared.retainedMessages);
+	if (checkpoint) {
+		// The synthetic Toolkit hook deliberately leaves these copies alone. Match
+		// exactly once, BEFORE encrypted-output markers change the canonical values.
+		const pruned = removeNativeCompactionRetainedMessages({
+			messages, branchEntries: branch, compactionEntry: checkpoint, expectedInputProvenance: provenance,
+		});
+		if (!pruned.ok) throw new Error(pruned.reason);
+		messages = pruned.messages;
+	}
+	const namespaces = requireCompleteCompactionToolPairs(messages);
+	const tools = getCurrentTools(messages);
+	const model = execution.compactor.currentModel;
+	const compat = isRecord(model.compat) ? model.compat : {};
+	const nativeCodex = model.api === "openai-codex-responses";
+	const encoded = windows.projectCompactionContext(messages, true);
+	let input: ResponsesInputItem[];
+	if (checkpoint) {
+		const summaryIndex = findLatestProjectedCompactionSummaryIndex(encoded, checkpoint.summary);
+		if (summaryIndex < 0 || encoded.filter((message) => message.role === "compactionSummary").length !== 1) {
+			throw new Error(COMPACTION_PROJECTED_CONTEXT_UNAVAILABLE);
+		}
+		const leading = await serializeMessagesToResponsesInputWithLimits(model, encoded.slice(0, summaryIndex));
+		if (!isCurrent()) throw new Error("compaction-operation-superseded");
+		const tail = await serializeMessagesToResponsesInputWithLimits(model, encoded.slice(summaryIndex + 1), { firstSystemMessageIsUpdate: true });
+		requireCompactionWireToolPairs([...leading, ...tail], namespaces);
+		const details = checkpoint.details;
+		if (!details) throw new Error("compaction-owner-mismatch");
+		input = [...adaptCompactionWireInput(leading, namespaces), ...(cloneOpaqueWindow(details.compactedWindow) as ResponsesInputItem[]), ...adaptCompactionWireInput(tail, namespaces)];
+	} else {
+		const serialized = await serializeMessagesToResponsesInputWithLimits(model, encoded);
+		requireCompactionWireToolPairs(serialized, namespaces);
+		input = adaptCompactionWireInput(serialized, namespaces);
+	}
+	if (!isCurrent()) throw new Error("compaction-operation-superseded");
+	const toolPayload = rewriteContextNamespaceTools({ tools: convertResponsesTools(tools, {
+		...(nativeCodex ? { strict: null } : {}),
+		supportsStrictMode: typeof compat.supportsStrictMode === "boolean" ? compat.supportsStrictMode : nativeCodex,
+		supportsOpenAIGrammarTools: compat.supportsOpenAIGrammarTools === true,
+	}) }, { encrypted: true });
+	if (!isRecord(toolPayload) || !Array.isArray(toolPayload.tools)) throw new Error("compaction-wire-adaptation-failed");
+	// Current cache-stack state is authoritative; never borrow deferred metadata
+	// from an unrelated pre-window checkpoint. The canonical head proves which
+	// of those schemas are still live, including tools activated before rollover.
+	const activation = getLatestDeferredToolCarryover(branch) ?? checkpoint?.details?.deferredToolCarryover;
+	const names = new Set(tools.map((tool) => tool.name));
+	const deferredToolCarryover = activation ? { ...activation, toolNames: activation.toolNames.filter((name) => names.has(name)) } : undefined;
+	return {
+		request: { model: execution.compactor.requestModel ?? execution.compactor.model, input,
+			instructions: buildCompactionInstructions(ctx.getSystemPrompt(), event.customInstructions), tools: toolPayload.tools },
+		firstKeptEntryId: prepared.firstKeptEntryId,
+		deferredToolCarryover: deferredToolCarryover?.toolNames.length ? deferredToolCarryover : undefined,
+		requestSource, isCurrent,
+	};
+}
+
 async function runResponsesNativeCompact(
 	event: SessionBeforeCompactEvent,
 	ctx: ExtensionContext,
@@ -351,11 +542,13 @@ async function runResponsesNativeCompact(
 	projectCompactionContext: CompactionContextProjection | undefined,
 	/** Only ordinary compaction supplies this; managed recovery remains V2-only. */
 	standaloneCompact?: typeof executeNativeCompaction,
+	/** Active Remote manual input is strict/current-window-only and has no fallback. */
+	scopedInput?: ScopedResponsesCompactInput,
 ): Promise<ResponsesCompactOutcome> {
 	const { consumer, compactor } = execution;
 	const instructions = buildCompactionInstructions(ctx.getSystemPrompt(), event.customInstructions);
 	const branchEntries = event.branchEntries ?? ctx.sessionManager.getBranch();
-	const deferredToolCarryover = getLatestDeferredToolCarryover(branchEntries);
+	const deferredToolCarryover = scopedInput ? scopedInput.deferredToolCarryover : getLatestDeferredToolCarryover(branchEntries);
 	const latestNativeCompaction = resolveLatestNativeCompactionEntry(branchEntries, {
 		baseUrl: consumer.baseUrl,
 	});
@@ -363,7 +556,10 @@ async function runResponsesNativeCompact(
 	const inputProvenance = getRemoteV2InputProvenance(config.remoteV2ContextSource);
 	let requestSource: "session-context" | "non-native-session-context" | "latest-native-replay";
 	let request: NativeCompactionRequestBody;
-	if (latestNativeCompaction.ok) {
+	if (scopedInput) {
+		request = scopedInput.request;
+		requestSource = scopedInput.requestSource;
+	} else if (latestNativeCompaction.ok) {
 		if (hasInvalidatedCompactionContext(branchEntries, latestNativeCompaction.entry.id)) {
 			return { outcome: "unprojected-input", reason: COMPACTION_CHECKPOINT_CONTEXT_EDITED };
 		}
@@ -482,10 +678,10 @@ async function runResponsesNativeCompact(
 		sessionId: getSessionId(ctx),
 	}, compactor.currentModel);
 	if (extras) {
-		request = { ...request, ...extras };
+		request = { ...request, ...extras, ...(scopedInput ? { tools: scopedInput.request.tools } : {}) };
 	}
 
-	if (event.signal?.aborted) return { outcome: "aborted" };
+	if (event.signal?.aborted || (scopedInput && !scopedInput.isCurrent())) return { outcome: "aborted" };
 	let protocol: "remote-v2" | "standalone-compact" = "remote-v2";
 	let compactResult: Awaited<ReturnType<typeof executeRemoteV2Compaction>> | NativeCompactionClientResult = await remoteCompact({
 		runtime: compactor,
@@ -495,6 +691,7 @@ async function runResponsesNativeCompact(
 		context: ctx,
 	});
 
+	if (scopedInput && !scopedInput.isCurrent()) return { outcome: "aborted" };
 	if (!compactResult.ok) {
 		if (compactResult.reason === "aborted" || event.signal?.aborted) return { outcome: "aborted" };
 		const tryStandalone = !!standaloneCompact && isStandaloneCompactionEligible(compactor) && qualifiesForStandaloneCompaction(compactResult);
@@ -507,7 +704,7 @@ async function runResponsesNativeCompact(
 			errorType: compactResult.errorType,
 			errorParam: compactResult.errorParam,
 			errorMessage: compactResult.errorMessage,
-			nextStep: tryStandalone ? "standalone-compact" : "native-summary",
+			nextStep: tryStandalone ? "standalone-compact" : scopedInput ? "stop-and-preserve" : "native-summary",
 		}, config, ctx);
 		if (tryStandalone && standaloneCompact) {
 			if (event.signal?.aborted) return { outcome: "aborted" };
@@ -578,7 +775,7 @@ async function runResponsesNativeCompact(
 	}
 
 	const compaction = createNativeCompactionResult({
-		firstKeptEntryId: event.preparation.firstKeptEntryId,
+		firstKeptEntryId: scopedInput?.firstKeptEntryId ?? event.preparation.firstKeptEntryId,
 		tokensBefore: event.preparation.tokensBefore,
 		details,
 	});
@@ -607,12 +804,13 @@ async function runResponsesNativeCompact(
 			requestExtras: extras ? Object.keys(extras) : [],
 			compactResponseId: compactResult.compactResponseId,
 			compactedItems: compactResult.compactedWindow.length,
-			firstKeptEntryId: event.preparation.firstKeptEntryId,
+			firstKeptEntryId: compaction.firstKeptEntryId,
 		},
 		config,
 		ctx,
 	);
 
+	if (scopedInput && !scopedInput.isCurrent()) return { outcome: "aborted" };
 	return { outcome: "success", compaction };
 }
 
@@ -744,6 +942,68 @@ async function runUnavailableContextCompaction(
 	return { cancel: true };
 }
 
+const ACTIVE_REMOTE_PREPARATION_REASONS = new Set([
+	"unsafe-compaction-window-boundary", "compaction-window-boundary-missing", "compaction-system-tool-head-lost",
+	"compaction-branch-changed", "compaction-source-projection-unavailable", "unverified-window-cleanup",
+	"compaction-owner-missing", "unsafe-compaction-retained-start", "compaction-owner-mismatch",
+	"compaction-continuity-unavailable", "compaction-operation-superseded", "compaction-tool-pair-mismatch",
+	"compaction-retained-context-mismatch", "compaction-wire-adaptation-failed", "compaction-boundary-not-found",
+	"first-kept-entry-not-found", "compaction-summary-not-found", "retained-context-mismatch", "unverified-compaction-input",
+	COMPACTION_CHECKPOINT_CONTEXT_EDITED, COMPACTION_CHECKPOINT_PROVENANCE_UNAVAILABLE,
+	COMPACTION_PROJECTED_CONTEXT_UNAVAILABLE, COMPACTION_PROJECTION_UNAVAILABLE, COMPACTION_SESSION_CONTEXT_UNAVAILABLE,
+]);
+
+async function runActiveRemoteManualCompact(
+	event: SessionBeforeCompactEvent,
+	ctx: ExtensionContext,
+	dependencies: CompactionDependencies,
+	resolved: ResolvedToolkitConfig,
+	operation: RemoteManualCompactOperation | undefined,
+): Promise<{ cancel: true } | { compaction: CompactionResult<NativeCompactionDetails> }> {
+	const lifecycle = dependencies.remoteManualCompact;
+	const config = resolved.config.compaction;
+	const stop = (reason: string): { cancel: true } => {
+		// No exception text, provider body, auth or opaque content crosses this boundary.
+		lifecycle.cancel(operation);
+		writeDebugArtifact("compaction-event", {
+			event: "session_before_compact.remote-window-manual-stopped", reason, nextStep: "stop-and-preserve",
+		}, config, ctx);
+		notifyWarning(ctx, `Remote /compact stopped (${reason}); existing context preserved. No summary fallback or automatic continuation was started.`);
+		return { cancel: true };
+	};
+	const isCurrent = () => !!operation && lifecycle.current(operation, ctx);
+	try {
+		if (!operation || dependencies.manualCompact?.busy || !isCurrent()) return stop("compaction-operation-superseded");
+		// Producer policy and auth are resolved once from the initiating document.
+		if (resolved.format === "v2" && config.remoteCompactModel) {
+			const spec = parseModelSpec(config.remoteCompactModel);
+			if (spec) {
+				const producerPolicy = resolveToolkitConfig(resolved.snapshot, { provider: spec.provider, id: spec.modelId });
+				notifyConfigIssues(ctx, producerPolicy);
+				if (producerPolicy.invalidFeatures.includes("compatibility")) return stop("invalid-producer-compatibility");
+			}
+		}
+		const resolution = await resolveRemoteCompactionExecution(ctx, {
+			enabled: config.enabled, responsesApis: config.responsesApis, codexGatewayModels: compactGatewayModels(resolved),
+		}, config.remoteCompactModel);
+		if (!isCurrent()) return stop("compaction-operation-superseded");
+		if (!resolution.ok) return stop(resolution.reason);
+		const scopedEvent = { ...event, signal: operation.signal };
+		const input = await prepareActiveRemoteCompaction(scopedEvent, ctx, config, resolution.execution, dependencies, isCurrent);
+		if (!isCurrent()) return stop("compaction-operation-superseded");
+		const outcome = await runResponsesNativeCompact(scopedEvent, ctx, config, resolution.execution,
+			dependencies.remoteCompact, dependencies.projectCompactionContext, undefined, input);
+		if (!isCurrent()) return stop("compaction-operation-superseded");
+		if (outcome.outcome !== "success") return stop(outcome.outcome === "unprojected-input" ? outcome.reason
+			: outcome.outcome === "failed" ? outcome.remoteFailure?.reason ?? "remote-compaction-failed" : "aborted");
+		const result = lifecycle.arm(operation, ctx, outcome.compaction);
+		return result ?? stop("compaction-operation-superseded");
+	} catch (error) {
+		return stop(error instanceof Error && ACTIVE_REMOTE_PREPARATION_REASONS.has(error.message)
+			? error.message : "remote-compaction-failed");
+	}
+}
+
 async function handleSessionBeforeCompact(
 	event: SessionBeforeCompactEvent,
 	ctx: ExtensionContext,
@@ -786,16 +1046,33 @@ async function handleSessionBeforeCompact(
 		return { cancel: true };
 	}
 
+	// Capture intent BEFORE capability/auth awaits so selection/navigation/work
+	// during resolution cannot silently become the owner of an older /compact.
+	let manualOperation: RemoteManualCompactOperation | undefined;
+	if (event.reason === "manual" && !dependencies.manualCompact?.isMaintenance && config.enabled && config.contextManagement === "remote") {
+		try { manualOperation = dependencies.remoteManualCompact.begin(event, ctx, resolved); } catch { /* active route stops below */ }
+	}
+
 	// Active and inactive covered Codex consumers retain their existing routing.
 	const contextModel = config.enabled && config.contextManagement === "remote"
 		? await resolveContextCapabilityModel(ctx)
 		: undefined;
+	if (manualOperation && !dependencies.remoteManualCompact.current(manualOperation, ctx)) {
+		dependencies.remoteManualCompact.cancel(manualOperation);
+		return { cancel: true };
+	}
 	if (isCodexContextModel(contextModel, config)) {
-		if (await remoteContextActive(ctx, config, contextModel)) {
+		const active = await remoteContextActive(ctx, config, contextModel);
+		// New work may make a formerly active runtime look unavailable. That is
+		// supersession, not permission to start the inactive-runtime fallback.
+		if (manualOperation && !dependencies.remoteManualCompact.current(manualOperation, ctx)) {
+			dependencies.remoteManualCompact.cancel(manualOperation);
+			return { cancel: true };
+		}
+		if (active) {
 			try {
-				if (event.reason === "manual" && dependencies.manualCompact && !dependencies.manualCompact.isMaintenance) {
-					await dependencies.manualCompact.request(event, ctx, resolved);
-					return { cancel: true };
+				if (event.reason === "manual" && !dependencies.manualCompact?.isMaintenance) {
+					return await runActiveRemoteManualCompact(event, ctx, dependencies, resolved, manualOperation);
 				}
 				return dependencies.contextWindows.prepareCompaction(event);
 			} catch {
@@ -804,6 +1081,7 @@ async function handleSessionBeforeCompact(
 			}
 		}
 
+		dependencies.remoteManualCompact.cancel(manualOperation);
 		const registrationState = getContextToolRegistrationState();
 		const failureReason = contextManagementFailureReason(registrationState);
 		if (failureReason !== "context-tools-excluded") {
@@ -819,6 +1097,7 @@ async function handleSessionBeforeCompact(
 		);
 	}
 
+	dependencies.remoteManualCompact.cancel(manualOperation);
 	try {
 		const detached = dependencies.contextWindows.prepareDetachedCompaction(event);
 		// A local consumer cannot summarize history owned by a Remote window,
@@ -1056,6 +1335,11 @@ async function handleContextInternal(
 				// The latter still contains retired remote windows and can be inflated by
 				// an upstream error even though this request only carries the live window.
 				let projected = contextWindows.project(event.messages, "remote", false);
+				if (contextWindows.isPreparingCompaction) {
+					// Synthetic preparation is read-only. The caller owns the one strict
+					// retained-copy match, then encrypted wire adaptation after all hooks.
+					return { messages: projected };
+				}
 				// Projection may observe the exact queued rollover before Pi persists
 				// it. Decide replay ownership from this request, not the old branch.
 				const ownsWindow = contextWindows.hasEffectiveWindow() || !contextWindows.currentIdentity();
@@ -1216,10 +1500,11 @@ async function handleBeforeProviderRequest(
 		: undefined;
 	const remoteActive = config.contextManagement === "remote" && await remoteContextActive(ctx, config, contextModel);
 	let remotePayload: unknown;
+	let activeWindowPayload = false;
 	if (remoteActive) {
 		try {
 			remotePayload = contextWindows.rewritePayload(event.payload, ctx);
-			if (contextWindows.hasEffectiveWindow() || !contextWindows.currentIdentity()) return remotePayload;
+			activeWindowPayload = contextWindows.hasEffectiveWindow() || !contextWindows.currentIdentity();
 			event = { ...event, payload: remotePayload };
 		} catch {
 			notifyRemoteContextFailure(ctx, "malformed-request-state");
@@ -1246,10 +1531,10 @@ async function handleBeforeProviderRequest(
 
 	// Do not reintroduce a pre-window opaque checkpoint after local projection.
 	// Request affinity/encrypted-output rewriting is reserved for active Remote.
-	if (contextWindows.hasEffectiveWindow()) return undefined;
+	if (contextWindows.hasEffectiveWindow() && !activeWindowPayload) return undefined;
 
 	const branchEntries = ctx.sessionManager.getBranch();
-	const inherited = config.contextManagement === "remote" && contextWindows.hasSupersededWindow()
+	const inherited = !activeWindowPayload && config.contextManagement === "remote" && contextWindows.hasSupersededWindow()
 		? resolveLatestNativeCompactionEntry(branchEntries) : undefined;
 	const inheritedCheckpoint = inherited?.ok ? inherited.entry : undefined;
 	const resolution = await resolveNativeCompactionEnvironment(
@@ -1306,6 +1591,10 @@ async function handleBeforeProviderRequest(
 			excludeWebSearchTools: webSearchRoute.route === "standalone-alpha",
 		},
 	);
+
+	// Capture is pre-Web-Search metadata only. An effective Remote window still
+	// owns this live payload and must NEVER enter ordinary opaque replay below.
+	if (activeWindowPayload) return remotePayload;
 
 	const latestNativeCompaction = resolveLatestNativeCompactionEntry(branchEntries, {
 		baseUrl: runtime.baseUrl,
@@ -1422,6 +1711,7 @@ export default function registerCompactionExtension(
 		loadHistoryNotesThreadHint(ctx, signal, gatewayModels)
 	);
 	const manualCompact = new ManagedManualCompact(pi, contextWindows);
+	const remoteManualCompact = new RemoteManualCompact(pi, contextWindows);
 	const dependencies: CompactionDependencies = {
 		remoteCompact: executeRemoteV2Compaction,
 		standaloneCompact: executeNativeCompaction,
@@ -1429,7 +1719,8 @@ export default function registerCompactionExtension(
 		contextWindows,
 		...overrides,
 		manualCompact,
-		loadConfig: () => manualCompact.snapshot ?? loadConfig(),
+		remoteManualCompact,
+		loadConfig: () => remoteManualCompact.snapshot ?? manualCompact.snapshot ?? loadConfig(),
 		piContextHookPatch: overrides.piContextHookPatch ?? piContextHookPatch,
 	};
 	let tools!: ReturnType<typeof registerContextManagementTools>;
@@ -1488,6 +1779,7 @@ export default function registerCompactionExtension(
 		}
 	};
 	pi.on("session_start", async (_event, ctx) => {
+		remoteManualCompact.invalidate();
 		const resolved = contextOperation(dependencies.loadConfig, ctx);
 		const syncOutcome = await syncTools(ctx, ctx.model, { notifyWindowFailure: true }, resolved);
 		await manualCompact.recover(ctx);
@@ -1557,12 +1849,28 @@ export default function registerCompactionExtension(
 		manualCompact.guardRequest(ctx);
 		return handleContext(event, ctx, pi, dependencies.loadConfig, contextWindows, remoteContextActive, getContextToolRegistrationState);
 	});
-	pi.on("session_before_compact", (event, ctx) => handleSessionBeforeCompact(event, ctx, dependencies, remoteContextActive, getContextToolRegistrationState));
-	pi.on("session_compact", (_event, ctx) => contextWindows.synchronize(ctx));
+	pi.on("session_before_compact", async (event, ctx) => {
+		remoteManualCompact.invalidate();
+		try {
+			return await handleSessionBeforeCompact(event, ctx, dependencies, remoteContextActive, getContextToolRegistrationState);
+		} catch {
+			// Pi treats a rejected hook as absent and can invoke its implicit summary.
+			// Unexpected preparation/service failures must never authorize that work.
+			try { notifyWarning(ctx, "Compaction stopped; existing context preserved. Resume manually."); } catch { /* stale UI */ }
+			return { cancel: true };
+		}
+	});
+	pi.on("session_compact", (event, ctx) => {
+		contextWindows.synchronize(ctx);
+		if (event.reason === "manual" && event.fromExtension) remoteManualCompact.persisted(ctx);
+		else remoteManualCompact.invalidate();
+	});
 	pi.on("session_compact_failed", async (event, ctx) => {
+		remoteManualCompact.invalidate();
 		if (event.reason === "manual" && !manualCompact.isMaintenance) await manualCompact.compactFailed(ctx);
 	});
 	pi.on("session_shutdown", async (_event, ctx) => {
+		remoteManualCompact.invalidate();
 		await manualCompact.shutdown(ctx);
 		contextWindowReady = false;
 		contextWindows.reset();
@@ -1574,6 +1882,7 @@ export default function registerCompactionExtension(
 		await manualCompact.settled(ctx);
 	});
 	pi.on("model_select", async (event, ctx) => {
+		remoteManualCompact.invalidate();
 		manualCompact.modelSelected(event.model, ctx);
 		// Switching into a covered model mid-session must open the window
 		// lifecycle immediately: without an identity the request rewrite skips
@@ -1584,13 +1893,29 @@ export default function registerCompactionExtension(
 		await syncTools(ctx, event.model, { notifyWindowFailure: true }, resolved);
 	});
 	pi.on("before_agent_start", async (_event, ctx) => {
+		remoteManualCompact.invalidate();
 		await syncTools(ctx, ctx.model, { notifyWindowFailure: true });
 	});
-	pi.on("thinking_level_select", (event, ctx) => manualCompact.thinkingSelected(event.level, ctx));
-	pi.on("message_start", (event) => manualCompact.messageStarted(event.message));
+	pi.on("agent_start", () => remoteManualCompact.invalidate());
+	pi.on("input", () => { remoteManualCompact.invalidate(); });
+	pi.on("thinking_level_select", (event, ctx) => {
+		remoteManualCompact.invalidate();
+		manualCompact.thinkingSelected(event.level, ctx);
+	});
+	pi.on("message_start", (event) => {
+		remoteManualCompact.invalidate();
+		manualCompact.messageStarted(event.message);
+	});
 	pi.on("turn_end", (_event, ctx) => manualCompact.turnEnded(ctx));
-	pi.on("tool_call", (event) => manualCompact.guardTool(event.toolName));
+	pi.on("tool_call", (event) => {
+		remoteManualCompact.invalidate();
+		return manualCompact.guardTool(event.toolName);
+	});
+	pi.on("session_before_switch", () => remoteManualCompact.invalidate());
+	pi.on("session_before_fork", () => remoteManualCompact.invalidate());
+	pi.on("session_before_tree", () => remoteManualCompact.invalidate());
 	pi.on("session_tree", async (_event, ctx) => {
+		remoteManualCompact.invalidate();
 		contextWindows.synchronize(ctx);
 		await manualCompact.recover(ctx);
 		await syncTools(ctx);

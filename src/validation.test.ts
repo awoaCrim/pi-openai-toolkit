@@ -425,9 +425,9 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 			? undefined
 			: (messages) => messages,
 	});
-	// Pi owns scheduling. Managed manual handoffs use its public cancellation,
-	// delivery and settled boundaries; ordinary compaction still supplies/replays
-	// results without patching the scheduler.
+	// Pi owns scheduling. Active manual Remote compression uses public lifecycle
+	// hooks to fence newer work and resumes only after exact persistence and idle;
+	// ordinary compaction still supplies/replays results without scheduler patches.
 	expect([...handlers.keys()]).toEqual([
 		"session_start",
 		"context_with_system",
@@ -438,10 +438,15 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 		"agent_settled",
 		"model_select",
 		"before_agent_start",
+		"agent_start",
+		"input",
 		"thinking_level_select",
 		"message_start",
 		"turn_end",
 		"tool_call",
+		"session_before_switch",
+		"session_before_fork",
+		"session_before_tree",
 		"session_tree",
 		"before_provider_request",
 		"before_provider_headers",

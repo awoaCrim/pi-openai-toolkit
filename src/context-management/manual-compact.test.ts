@@ -5,8 +5,8 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { resolveToolkitConfig } from "../config";
 import { v2Fixture } from "../config/test-helpers";
-import { THINKING_LEVELS } from "../types";
-import { ManagedManualCompact, MANUAL_COMPACT_ENTRY_TYPE, decodeManualCompactRecord, sameContextScope } from "./manual-compact";
+import { THINKING_LEVELS, createNativeCompactionDetails, createNativeCompactionResult, LEGACY_REMOTE_V2_INPUT_PROVENANCE } from "../types";
+import { ManagedManualCompact, RemoteManualCompact, MANUAL_COMPACT_ENTRY_TYPE, decodeManualCompactRecord, sameContextScope } from "./manual-compact";
 import { CodexContextWindowManager } from "./window-manager";
 import { createContextManagementTools } from "./tools";
 
@@ -296,4 +296,120 @@ test("failure to reapply a newer user choice stays blocked and recoverable", asy
 	expect(h.records().at(-1)?.phase).toBe("restore-needed");
 	expect(() => h.manual.guardRequest(h.ctx)).toThrow(); expect(h.prompts).toHaveLength(0);
 	h.setSelection(() => true); await h.reload(); expect(h.selected.id).toBe("user-choice"); expect(h.thinking).toBe("medium");
+});
+
+function remoteHarness(timeoutMs = 1000) {
+	const h = harness();
+	let idle = false, pending = false;
+	const ctx = { ...h.ctx, get model() { return h.ctx.model; },
+		isIdle: () => idle, hasPendingMessages: () => pending } as ExtensionContext;
+	const remote = new RemoteManualCompact(h.pi, h.windows, timeoutMs);
+	const begin = () => {
+		const controller = new AbortController();
+		const operation = remote.begin({ signal: controller.signal, reason: "manual", branchEntries: h.sm.getBranch() } as never, ctx, h.policy());
+		expect(operation).toBeDefined();
+		return { operation: operation!, controller };
+	};
+	const candidate = (opaque = "remote-opaque") => createNativeCompactionResult({
+		firstKeptEntryId: h.sm.getLeafId()!, tokensBefore: 200,
+		details: createNativeCompactionDetails({ provider: "managed", api: "openai-responses", model: "original", baseUrl: h.models[0]!.baseUrl,
+			inputProvenance: LEGACY_REMOTE_V2_INPUT_PROVENANCE, compactedWindow: [{ type: "compaction", encrypted_content: opaque }] }),
+	});
+	const save = (value: ReturnType<typeof candidate>) => h.sm.appendCompaction(value.summary, value.firstKeptEntryId, value.tokensBefore, value.details, true);
+	return { ...h, ctx, remote, begin, candidate, save, setIdle: (value: boolean) => { idle = value; },
+		setPending: (value: boolean) => { pending = value; }, stop: () => remote.invalidate() };
+}
+
+const defer = (ms = 35) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+test("remote manual continuation waits outside the success callback for public idle, then sends once", async () => {
+	const h = remoteHarness();
+	try {
+		const { operation } = h.begin(); const candidate = h.candidate();
+		expect(h.remote.arm(operation, h.ctx, candidate)).toBeDefined();
+		h.save(candidate); h.remote.persisted(h.ctx);
+		await defer(); expect(h.prompts).toEqual([]);
+		h.setIdle(true); await defer(); expect(h.prompts).toEqual(["Context compressed. Resume the active user task."]);
+		h.remote.persisted(h.ctx); await defer(); expect(h.prompts).toHaveLength(1);
+		expect(h.changes).toEqual([]); expect(h.thinking).toBe("high"); expect(h.records()).toEqual([]);
+	} finally { h.stop(); }
+});
+
+test("remote manual continuation requires the full exact persisted candidate, not an equal summary", async () => {
+	const h = remoteHarness();
+	try {
+		const { operation } = h.begin(); const candidate = h.candidate();
+		expect(h.remote.arm(operation, h.ctx, candidate)).toBeDefined();
+		h.save({ ...candidate, details: { ...candidate.details!, compactedWindow: [{ type: "compaction", encrypted_content: "different-checkpoint" }] } });
+		h.setIdle(true); h.remote.persisted(h.ctx); await defer();
+		expect(h.prompts).toEqual([]);
+		expect(h.notices.some((notice) => notice.includes("exact saved checkpoint"))).toBe(true);
+		expect(h.sm.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+	} finally { h.stop(); }
+});
+
+test("an older remote operation cannot cancel a newer one or accept its late abort", () => {
+	const h = remoteHarness();
+	try {
+		const old = h.begin(); const newer = h.begin();
+		h.remote.cancel(old.operation); old.controller.abort();
+		expect(h.remote.current(newer.operation, h.ctx)).toBe(true);
+		expect(newer.operation.signal.aborted).toBe(false);
+		expect(h.remote.arm(old.operation, h.ctx, h.candidate())).toBeUndefined();
+	} finally { h.stop(); }
+});
+
+test("remote manual returned candidate rechecks ownership when Pi consumes it after later before observers", () => {
+	for (const change of ["abort", "queues", "model", "thinking", "branch", "shutdown", "newer-compact"] as const) {
+		const h = remoteHarness();
+		try {
+			const { operation, controller } = h.begin();
+			const result = h.remote.arm(operation, h.ctx, h.candidate());
+			expect(result?.cancel).toBe(false);
+			if (change === "abort") controller.abort();
+			else if (change === "queues") h.setPending(true);
+			else if (change === "model") h.userSelect("user-choice");
+			else if (change === "thinking") h.pi.setThinkingLevel("low");
+			else if (change === "branch") h.sm.appendMessage({ role: "user", content: "new external work", timestamp: 1000 });
+			else if (change === "newer-compact") h.begin();
+			else h.stop();
+			expect(result?.cancel).toBe(true);
+			expect(h.aborted).toBe(false); // Public TUI abort may drain queues; revocation must not call it.
+			expect(h.sm.getBranch().filter((entry) => entry.type === "compaction")).toEqual([]);
+			expect(h.prompts).toEqual([]);
+		} finally { h.stop(); }
+	}
+});
+
+for (const supersession of ["abort", "queues", "model", "thinking", "branch", "shutdown", "newer-compact"] as const) {
+	test(`remote manual ${supersession} suppresses continuation without removing the saved checkpoint`, async () => {
+		const h = remoteHarness();
+		try {
+			const anchor = h.sm.getLeafId()!;
+			const { operation, controller } = h.begin(); const candidate = h.candidate();
+			expect(h.remote.arm(operation, h.ctx, candidate)).toBeDefined();
+			h.save(candidate); h.remote.persisted(h.ctx);
+			if (supersession === "abort") controller.abort();
+			else if (supersession === "queues") h.setPending(true);
+			else if (supersession === "model") h.userSelect("user-choice");
+			else if (supersession === "thinking") h.pi.setThinkingLevel("low");
+			else if (supersession === "branch") h.sm.branch(anchor);
+			else if (supersession === "newer-compact") h.begin();
+			else h.stop();
+			h.setIdle(true); await defer(); expect(h.prompts).toEqual([]);
+			expect(h.sm.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+		} finally { h.stop(); }
+	});
+}
+
+test("remote manual idle wait is bounded and never resumes later on a stale timer", async () => {
+	const h = remoteHarness(10);
+	try {
+		const { operation } = h.begin(); const candidate = h.candidate();
+		expect(h.remote.arm(operation, h.ctx, candidate)).toBeDefined();
+		h.save(candidate); h.remote.persisted(h.ctx); await defer(60);
+		expect(h.prompts).toEqual([]);
+		expect(h.notices.some((notice) => notice.includes("could not safely reach idle"))).toBe(true);
+		h.setIdle(true); await defer(); expect(h.prompts).toEqual([]);
+	} finally { h.stop(); }
 });

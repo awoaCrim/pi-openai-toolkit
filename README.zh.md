@@ -52,11 +52,13 @@ Toolkit 只读取一个全局配置文件，即使扩展安装在项目内也一
 
 **远程压缩**支持 `openai-responses`、`openai-codex-responses` 和 `azure-openai-responses`，先尝试 V2。官方 OpenAI API-key 路由遇到符合条件的协议失败时，可再尝试一次独立的 `/v1/responses/compact`，并完整保存返回的加密替换窗口用于重放。OpenAI OAuth、原生 Codex、Azure 和网关保持原有 V2 路由。OpenAI subscription-sharing OAuth 与原生 Codex 登录是两种独立授权，凭据不能互换；模型和后端仍须具备相应权限。
 
-可用 `context.remoteCompaction.model` 指定同一有效 base URL 下的独立压缩模型，不改变当前模型。远程尝试全部失败后，会明确提示并继续普通文本摘要。`nativeFallback.enabled: false` 只关闭 Toolkit 的指定模型回退层，不关闭 Pi 默认摘要。取消操作、来源不匹配或已封存历史被修改时，仍会取消，不能绕过检查点安全检查。详见[上下文配置](docs/configuration.md#context)和[检查点规则](docs/internals.md#remote-compaction-v2-wire-contract)。
+可用 `context.remoteCompaction.model` 指定同一有效 base URL 下的独立压缩模型，不改变当前模型。普通远程压缩的远程尝试全部失败后，会明确提示并继续文本摘要。`nativeFallback.enabled: false` 只关闭 Toolkit 的指定模型回退层，不关闭 Pi 默认摘要。取消操作、来源不匹配或已封存历史被修改时，仍会取消，不能绕过检查点安全检查。详见[上下文配置](docs/configuration.md#context)和[检查点规则](docs/internals.md#remote-compaction-v2-wire-contract)。
 
 **远程窗口**需要原生 `openai-codex` 提供商的 `openai-codex-responses` API，或支持相应协议的 `openai-responses` 网关。网关必须在精确模型下设置 `compatibility.transport: "codex-gateway"`；这一设置不会让普通兼容端点自动获得该能力。
 
-将上例的 `mode` 改为 `remote-windows` 后，符合条件的会话会提供 `new_context`、`get_context_remaining`、`history` 和 `notes`。手动 `/compact [instructions]` 会发起检查点交接：先成功写入 notes，再切换窗口。切换模型或改用 `remote-compaction`、`pi` 模式后，已有的有效窗口边界仍然生效：只使用当前本地窗口，旧窗口历史不会发送给新模型或 compaction 模型。扩展会用一个不生成摘要的本地边界保留已持久化的 Remote Window / Context Session；切回支持窗口的模型时会复用同一个窗口，不会重复创建。该边界只写一次：之后在非窗口模型下的压缩会继续走普通 producer、native fallback 或 Pi 默认链路，而不再被取消。旧配置中的 `leaveManagedMode` 仍会解析，但不再触发批量 close-out 压缩。
+将上例的 `mode` 改为 `remote-windows` 后，符合条件的会话会提供 `new_context`、`get_context_remaining`、`history` 和 `notes`。手动 `/compact [instructions]` 会远程压缩当前窗口，不切换当前模型，也不打开新窗口。检查点保存成功后由原模型继续；失败则停止并保留现有上下文，不回退到文本摘要。它沿用 `context.remoteCompaction.model` 设置；`null` 仍使用当前模型。
+
+切换模型或改用 `remote-compaction`、`pi` 模式后，已有的有效窗口边界仍然生效：只使用当前本地窗口，旧窗口历史不会发送给新模型或 compaction 模型。扩展会用一个不生成摘要的本地边界保留已持久化的 Remote Window / Context Session；切回支持窗口的模型时会复用同一个窗口，不会重复创建。该边界只写一次：之后在非窗口模型下的压缩会继续走普通 producer、native fallback 或 Pi 默认链路，而不再被取消。旧配置中的 `leaveManagedMode` 仍会解析，但不再触发批量 close-out 压缩。
 
 远程窗口依赖 alpha 接口，上游可能随时调整。切换模型时远程窗口状态仍会持久化并可复用，详见[窗口生命周期](docs/internals.md#rollover-lifecycle)。
 

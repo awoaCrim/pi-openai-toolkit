@@ -1,4 +1,6 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ProviderHeaders } from "@earendil-works/pi-ai";
 import {
@@ -65,6 +67,17 @@ type WindowBoundaryEntry = Extract<SessionEntry, { type: "custom_message" }> & {
 	details: CodexContextManagementMessageDetails;
 };
 
+/** Canonical input and real source anchors for one read-only manual compression. */
+export type RemoteWindowCompactionInput = {
+	messages: AgentMessage[];
+	firstKeptEntryId: string;
+	/** Only a newer compaction can own this window; pre-window checkpoints are retired. */
+	owningCompaction?: Extract<SessionEntry, { type: "compaction" }>;
+	/** Entries whose visible contributions Pi will retain alongside the new checkpoint. */
+	retainedMessages: AgentMessage[];
+	windowBoundaryIndex: number;
+};
+
 /**
  * In-process duplicate guard for one scheduled rollover. It is anchored to the
  * session that scheduled it and to the exact target window id, so it can never
@@ -88,6 +101,14 @@ export class CodexContextWindowManager {
 	private pendingRollover: PendingRollover | undefined;
 	private readonly projectionDiagnostics = new Set<string>();
 	private lastKnownSystemHead: AgentMessage | undefined;
+	private readonly compactionProjection = new AsyncLocalStorage<boolean>();
+
+	get isPreparingCompaction(): boolean { return this.compactionProjection.getStore() === true; }
+
+	/** Keep read-only preparation scoped across awaits without affecting other live requests. */
+	withCompactionProjection<T>(prepare: () => Promise<T>): Promise<T> {
+		return this.compactionProjection.run(true, prepare);
+	}
 	/**
 	 * Pi's getContextUsage() measures the durable transcript. Remote windows are
 	 * projected only by this extension, so remember the last provider-visible
@@ -225,6 +246,7 @@ export class CodexContextWindowManager {
 		/** Delay encoding until verified retained copies have been removed. */
 		encodeEncryptedOutputs = true,
 	): AgentMessage[] {
+		if (this.isPreparingCompaction) return this.projectCompactionContext(messages);
 		// Recompute the request-only preview on every projection. Observing a
 		// queued marker must not authorize maintenance or retire the duplicate guard.
 		if (this.pendingRollover) this.pendingRollover.projected = false;
@@ -276,6 +298,78 @@ export class CodexContextWindowManager {
 			? estimateProjectedWindowTokens(projected)
 			: undefined;
 		return projected;
+	}
+
+	/**
+	 * Strict, read-only projection. Unlike live Remote projection, an unsafe head
+	 * never falls back to the full transcript, updates identity, or records budget.
+	 */
+	projectCompactionContext(messages: readonly AgentMessage[], encodeEncryptedOutputs = false): AgentMessage[] {
+		if (this.pendingRollover || (this.boundary.kind !== "effective" && this.boundary.kind !== "superseded")) {
+			throw new Error("unsafe-compaction-window-boundary");
+		}
+		let boundaryIndex = 0;
+		if (this.boundary.kind === "effective") {
+			const boundary = this.boundary.entry;
+			boundaryIndex = messages.findIndex((message) => isContextWindowBoundary(message)
+				&& isDeepStrictEqual(message.details, boundary.details)
+				&& isDeepStrictEqual(message.content, boundary.content));
+			if (boundaryIndex < 0) throw new Error("compaction-window-boundary-missing");
+		}
+		const repair = preserveSystemHead({ messages, boundaryIndex });
+		if (!repair.head || repair.shrinkRejected) throw new Error("compaction-system-tool-head-lost");
+		return encodeEncryptedOutputs ? projectEncryptedToolResults(repair.messages) : [...repair.messages];
+	}
+
+	prepareRemoteCompaction(event: SessionBeforeCompactEvent, ctx: ExtensionContext): RemoteWindowCompactionInput {
+		this.synchronize(ctx);
+		if (this.hasPendingRollover(ctx) || (this.boundary.kind !== "effective" && this.boundary.kind !== "superseded")) {
+			throw new Error("unsafe-compaction-window-boundary");
+		}
+		const branch = ctx.sessionManager.getBranch();
+		if (!isDeepStrictEqual(event.branchEntries, branch)) throw new Error("compaction-branch-changed");
+		const projection = ctx.sessionManager.buildSessionProjection();
+		// Never manufacture source IDs or substitute a raw-history reconstruction.
+		if (!projection || !Array.isArray(projection.entries) || !Array.isArray(projection.messages)
+			|| !isDeepStrictEqual(projection.messages, projection.entries.flatMap((entry) => entry.messages))
+			|| new Set(projection.entries.map((entry) => entry.sourceEntry.id)).size !== projection.entries.length
+			|| projection.entries.some((entry) => !branch.some((raw) => raw.id === entry.sourceEntry.id && isDeepStrictEqual(raw, entry.sourceEntry)))) {
+			throw new Error("compaction-source-projection-unavailable");
+		}
+		const windowBoundaryIndex = branch.findIndex((entry) => entry.id === this.boundaryEntryId());
+		if (windowBoundaryIndex < 0) throw new Error("compaction-window-boundary-missing");
+		const latest = [...branch].reverse().find((entry) => entry.type === "compaction");
+		if (this.boundary.kind === "effective" && this.boundary.cleaned) {
+			// Details alone do not turn an arbitrary summary into Toolkit cleanup.
+			if (!latest || latest.type !== "compaction" || latest.fromHook !== true
+				|| latest.summary !== CONTEXT_WINDOW_COMPACTION_SUMMARY
+				|| !isContextWindowCompactionDetails(latest.details)
+				|| latest.details.windowId !== this.boundary.entry.details.contextManagement.currentWindowId
+				|| latest.firstKeptEntryId !== this.boundary.entry.id) throw new Error("unverified-window-cleanup");
+		}
+		const owningCompaction = this.boundary.kind === "superseded" && latest?.type === "compaction" ? latest : undefined;
+		if (this.boundary.kind === "superseded" && !owningCompaction) throw new Error("compaction-owner-missing");
+		const lowerId = owningCompaction?.id ?? this.boundary.entry.id;
+		const lowerIndex = branch.findIndex((entry) => entry.id === lowerId);
+		const requestedIndex = branch.findIndex((entry) => entry.id === event.preparation.firstKeptEntryId);
+		if (requestedIndex < 0 || lowerIndex < windowBoundaryIndex) throw new Error("unsafe-compaction-retained-start");
+		const firstKeptEntryId = requestedIndex < lowerIndex ? lowerId : event.preparation.firstKeptEntryId;
+		const keptIndex = Math.max(requestedIndex, lowerIndex);
+		const safeSources = new Set(projection.entries.filter((entry) => entry.messages.length > 0).map((entry) => entry.sourceEntry.id));
+		if (!safeSources.has(firstKeptEntryId)) throw new Error("unsafe-compaction-retained-start");
+		const retainedIds = new Set(branch.slice(keptIndex).map((entry) => entry.id));
+		return {
+			messages: this.projectCompactionContext(structuredClone(projection.messages)),
+			firstKeptEntryId,
+			owningCompaction,
+			retainedMessages: structuredClone(projection.entries.filter((entry) => retainedIds.has(entry.sourceEntry.id)
+				&& entry.sourceEntry.type !== "compaction").flatMap((entry) => entry.messages)),
+			windowBoundaryIndex,
+		};
+	}
+
+	private boundaryEntryId(): string | undefined {
+		return this.boundary.kind === "effective" || this.boundary.kind === "superseded" ? this.boundary.entry.id : undefined;
 	}
 
 	/**

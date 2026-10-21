@@ -10,10 +10,12 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, CONTEXT_WINDOW_COMPACTION_SUMMARY, declaredToolNames } from "./messages";
 import { CodexContextWindowManager } from "./window-manager";
 import type { ContextWindowCompactionDetails } from "./types";
-import { createNativeCompactionDetails, DEFAULT_COMPACTION_CONFIG, DEFAULT_TOOLKIT_CONFIG, LEGACY_REMOTE_V2_INPUT_PROVENANCE } from "../types";
+import { createNativeCompactionDetails, DEFAULT_COMPACTION_CONFIG, DEFAULT_TOOLKIT_CONFIG, LEGACY_REMOTE_V2_INPUT_PROVENANCE, CACHE_STACK_ACTIVATION_ENTRY_TYPE } from "../types";
 import extension from "../extension-runtime";
 import { createNativeCompactionResult } from "../types";
 import { serializeMessagesToResponsesInput } from "../serializer";
+import type { ExecuteRemoteV2CompactionOptions, RemoteV2CompactionClientResult } from "../remote-v2-client";
+import { clearRequestContextCache } from "../request-context-cache";
 
 const model = {
 	provider: "openai-codex",
@@ -336,9 +338,9 @@ test("remote context owns Codex compaction and activates only its four tools", a
 			turnPrefixMessages: [],
 		},
 	} as never, makeContext());
-	// A manual /compact without a scheduled rollover must never write a
-	// boundary: no-op compactions become Pi's latest-compaction anchor and
-	// blind the budget fallback until the next assistant usage lands.
+	// This tool-registration fixture has no canonical branch/projection. A manual
+	// request must fail closed rather than fabricate a window or send raw history.
+	// Valid current-window production is covered below and by the real SDK runner.
 	expect(result).toEqual({ cancel: true });
 	expect(compactCalls).toBe(0);
 
@@ -1172,5 +1174,356 @@ for (const reason of ["manual", "threshold", "overflow"] as const) {
 		expect(active).toEqual(["read", "new_context", "get_context_remaining", "history", "notes"]);
 		expect(windows.currentIdentity()).toEqual(identity);
 		expect(sent).toEqual([]);
+	});
+}
+
+function activeManualHarness(options: {
+	result?: RemoteV2CompactionClientResult;
+	producer?: "missing" | "auth-failed" | "incompatible";
+	inputSource?: "legacy" | "pi-context-hook";
+	projectCompactionContext?: (messages: readonly AgentMessage[]) => readonly AgentMessage[];
+	beforeAuth?: () => Promise<void>;
+	beforeReturn?: (sm: SessionManager) => void;
+} = {}) {
+	const sm = SessionManager.inMemory("/synthetic-project");
+	const sessionId = sm.getSessionId();
+	const headId = sm.appendMessage({ role: "system", content: "", sections: { preamble: "CURRENT-PROMPT-HEAD" },
+		toolsAdded: [{ name: "read", description: "read", parameters: {} }], timestamp: 1 } as AgentMessage);
+	sm.appendMessage({ role: "user", content: "RETIRED-BEFORE-WINDOW", timestamp: 2 });
+	const addMarker = (windowId: string, windowNumber: number) => sm.appendCustomMessageEntry(
+		CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, `window ${windowId}`, true, {
+			protocol: 1, id: `marker-${windowId}`, sessionId,
+			contextManagement: { protocol: 1, kind: "window", firstWindowId: "w0", currentWindowId: windowId,
+				windowNumber, ...(windowNumber ? { previousWindowId: "w0", trimPreviousWindow: true } : {}) },
+		},
+	);
+	addMarker("w0", 0);
+	sm.appendMessage({ role: "user", content: "RETIRED-WINDOW-ZERO", timestamp: 3 });
+	const boundaryId = addMarker("w1", 1);
+	sm.appendMessage({ role: "user", content: "CURRENT-WINDOW-INPUT", timestamp: 4 });
+	sm.appendMessage(fauxAssistantMessage("current answer"));
+	const handlers = new Map<string, (event: never, ctx: never) => unknown>();
+	const registered: Array<{ name: string }> = [];
+	const requests: ExecuteRemoteV2CompactionOptions[] = [];
+	const prompts: string[] = [];
+	const notices: string[] = [];
+	const forbidden: string[] = [];
+	let active = ["read"];
+	const pi = {
+		on: (name: string, handler: (event: never, ctx: never) => unknown) => handlers.set(name, handler),
+		registerTool: (tool: { name: string }) => registered.push(tool),
+		getAllTools: () => registered,
+		getActiveTools: () => active,
+		setActiveTools: (names: string[]) => { active = names; },
+		getThinkingLevel: () => "high",
+		setThinkingLevel: () => { forbidden.push("thinking"); },
+		setModel: async () => { forbidden.push("model"); return true; },
+		sendUserMessage: (message: string) => { prompts.push(message); },
+		sendMessage: () => { forbidden.push("window-message"); return false; },
+	} as unknown as ExtensionAPI;
+	const producer = { ...model, id: "producer",
+		baseUrl: options.producer === "incompatible" ? "https://other.invalid/backend-api" : model.baseUrl };
+	let selected = model;
+	const ctx = {
+		get model() { return selected; }, thinkingLevel: "high", sessionManager: sm, hasUI: true,
+		ui: { notify: (message: string) => notices.push(message) },
+		isIdle: () => true, hasPendingMessages: () => false,
+		getContextUsage: () => undefined, getSystemPrompt: () => "CURRENT-PROMPT-HEAD",
+		modelRegistry: {
+			find: (provider: string, id: string) => options.producer !== "missing" && provider === model.provider && id === "producer" ? producer : undefined,
+			getApiKeyAndHeaders: async (requested: typeof model) => {
+				await options.beforeAuth?.();
+				return requested.id === "producer" && options.producer === "auth-failed"
+					? { ok: false, error: "fixture auth unavailable" }
+					: { ok: true, apiKey: `token-${requested.id}`, headers: { "chatgpt-account-id": "account" }, baseUrl: requested.baseUrl };
+			},
+		},
+	} as never;
+	const windows = new CodexContextWindowManager(async () => undefined);
+	extension(pi, {
+		loadConfig: () => ({ config: { ...DEFAULT_TOOLKIT_CONFIG, compaction: {
+			...DEFAULT_COMPACTION_CONFIG, contextManagement: "remote", remoteCompactModel: `${model.provider}/producer`,
+			remoteV2ContextSource: options.inputSource ?? "legacy",
+			nativeFallback: { enabled: true, model: `${model.provider}/producer`, thinkingLevel: "off" },
+		} }, warnings: [] }),
+		contextWindows: windows,
+		projectCompactionContext: options.projectCompactionContext,
+		remoteCompact: async (args) => {
+			requests.push(args);
+			options.beforeReturn?.(sm);
+			return options.result ?? { ok: true, status: 200,
+				compactedWindow: [{ type: "compaction", encrypted_content: "current-opaque" }],
+				response: { status: "completed", output: [{ type: "compaction", encrypted_content: "current-opaque" }] } };
+		},
+		standaloneCompact: async () => { forbidden.push("standalone"); return { ok: false, reason: "network-error" }; },
+		nativeFallback: async () => { forbidden.push("native-summary"); return { ok: false, reason: "no-model-configured" }; },
+	});
+	return {
+		sm, boundaryId, headId, windows, requests, prompts, forbidden, notices,
+		get selected() { return selected; },
+		selectModel: (next: typeof model) => {
+			const previousModel = selected; selected = next;
+			sm.appendModelChange(next.provider, next.id);
+			return handlers.get("model_select")!({ model: next, previousModel, source: "set" } as never, ctx);
+		},
+		start: () => handlers.get("session_start")!({} as never, ctx),
+		stop: () => handlers.get("session_shutdown")!({} as never, ctx),
+		beforeRequest: (payload: unknown) => handlers.get("before_provider_request")!({ payload } as never, ctx),
+		compact: (reason = "manual", signal = new AbortController().signal) => handlers.get("session_before_compact")!({
+			signal, reason, branchEntries: sm.getBranch(), customInstructions: "USER-COMPACT-GUIDANCE",
+			preparation: { firstKeptEntryId: headId, tokensBefore: 1234, messagesToSummarize: [], turnPrefixMessages: [] },
+		} as never, ctx),
+	};
+}
+
+test("active Remote captures live extras without entering ordinary replay and keeps the current synthetic tool head", async () => {
+	clearRequestContextCache();
+	const h = activeManualHarness();
+	try {
+		await h.start();
+		const payload = { model: model.id, input: [{ role: "user", content: "CURRENT-PROVIDER-REQUEST" }],
+			tools: [{ type: "function", name: "STALE-CACHED-TOOL" }], parallel_tool_calls: false,
+			prompt_cache_key: "current-cache-key", prompt_cache_retention: "24h", prompt_cache_options: { mode: "ephemeral" },
+			reasoning: { effort: "high" }, service_tier: "flex", text: { verbosity: "low" } };
+		const before = structuredClone(payload);
+		const live = await h.beforeRequest(payload) as { client_metadata: Record<string, string> };
+		expect(JSON.parse(live.client_metadata["x-codex-turn-metadata"]!).context_window_id).toBe("w1");
+		expect(payload).toEqual(before);
+		await h.compact();
+		const request = h.requests[0]!.request;
+		expect(request).toMatchObject({ parallel_tool_calls: false, prompt_cache_key: "current-cache-key",
+			reasoning: { effort: "high" }, service_tier: "flex", text: { verbosity: "low" } });
+		expect(request.prompt_cache_retention).toBeUndefined(); // Native Codex producer compatibility.
+		expect(request.prompt_cache_options).toBeUndefined();
+		expect(JSON.stringify(request.tools)).toContain("read");
+		expect(JSON.stringify(request.tools)).not.toContain("STALE-CACHED-TOOL");
+		expect(JSON.stringify(request)).not.toContain("history_ingest_requested");
+	} finally { await h.stop(); clearRequestContextCache(); }
+});
+
+test("active Remote manual keeps only current-head deferred tools from the current activation snapshot", async () => {
+	const h = activeManualHarness();
+	try {
+		await h.start();
+		h.sm.appendCustomEntry(CACHE_STACK_ACTIVATION_ENTRY_TYPE, { version: 1, catalogHash: "current-catalog", activatedTools: ["read", "retired-tool"] });
+		const result = await h.compact() as { compaction: CompactionResult };
+		expect(h.requests).toHaveLength(1);
+		expect(result.compaction.details).toMatchObject({ deferredToolCarryover: { version: 1, source: CACHE_STACK_ACTIVATION_ENTRY_TYPE,
+			catalogHash: "current-catalog", toolNames: ["read"] } });
+		expect(h.forbidden).toEqual([]);
+	} finally { await h.stop(); }
+});
+
+test("active Remote manual compact sends only the canonical current window to the separate producer", async () => {
+	const h = activeManualHarness();
+	try {
+		await h.start();
+		const before = structuredClone(h.sm.getBranch());
+		const result = await h.compact() as { compaction: CompactionResult };
+		expect(h.requests).toHaveLength(1);
+		const request = h.requests[0]!;
+		expect(request.runtime.model).toBe("producer");
+		expect(request.runtime.apiKey).toBe("token-producer");
+		expect(request.request.model).toBe("producer");
+		const wireInput = JSON.stringify(request.request.input);
+		expect(wireInput).toContain("CURRENT-WINDOW-INPUT");
+		expect(wireInput).not.toContain("RETIRED-BEFORE-WINDOW");
+		expect(wireInput).not.toContain("RETIRED-WINDOW-ZERO");
+		expect(request.request.instructions).toContain("CURRENT-PROMPT-HEAD");
+		expect(request.request.instructions).toContain("USER-COMPACT-GUIDANCE");
+		expect(result.compaction.firstKeptEntryId).toBe(h.boundaryId);
+		expect(result.compaction.tokensBefore).toBe(1234);
+		expect(result.compaction.details).toMatchObject({ model: model.id, compactionModel: { model: "producer" },
+			inputProvenance: LEGACY_REMOTE_V2_INPUT_PROVENANCE, compactedWindow: [{ type: "compaction", encrypted_content: "current-opaque" }] });
+		expect(h.sm.getBranch()).toEqual(before);
+		expect(h.prompts).toEqual([]); // Only the host's later durable event can arm continuation.
+		expect(h.forbidden).toEqual([]);
+	} finally { await h.stop(); }
+});
+
+test("manual superseded during runtime auth cannot borrow the inactive native fallback", async () => {
+	let blocked = false;
+	let entered!: () => void, release!: () => void;
+	const authEntered = new Promise<void>((done) => { entered = done; });
+	const authReleased = new Promise<void>((done) => { release = done; });
+	const h = activeManualHarness({ beforeAuth: async () => {
+		if (!blocked) return;
+		blocked = false; entered(); await authReleased;
+		throw new Error("fixture capability unavailable");
+	} });
+	try {
+		await h.start(); const before = structuredClone(h.sm.getBranch());
+		blocked = true; const pending = h.compact(); await authEntered;
+		await h.selectModel({ ...model, provider: "local", api: "anthropic-messages", id: "new-user-choice" });
+		release();
+		expect(await pending).toEqual({ cancel: true });
+		expect(h.requests).toEqual([]); expect(h.forbidden).toEqual([]); expect(h.prompts).toEqual([]);
+		expect(h.selected.id).toBe("new-user-choice"); expect(h.sm.getBranch().slice(0, before.length)).toEqual(before);
+	} finally { release(); await h.stop(); }
+});
+
+for (const api of ["anthropic-messages", "openai-responses"]) {
+	test(`manual superseded during capability resolution cannot enter the unavailable ${api} fallback`, async () => {
+		const h = activeManualHarness();
+		try {
+			await h.start(); const before = structuredClone(h.sm.getBranch());
+			const pending = h.compact(); // Capability resolution yields before active/inactive routing.
+			await h.selectModel({ ...model, provider: "local", api, id: "new-user-choice" });
+			expect(await pending).toEqual({ cancel: true });
+			expect(h.requests).toEqual([]); expect(h.forbidden).toEqual([]);
+			expect(h.prompts).toEqual([]); expect(h.selected.id).toBe("new-user-choice");
+			expect(h.sm.getBranch().slice(0, before.length)).toEqual(before);
+			expect(h.sm.getBranch().some((entry) => entry.type === "compaction")).toBe(false);
+		} finally { await h.stop(); }
+	});
+}
+
+for (const reason of ["threshold", "overflow"]) {
+	test(`active Remote ${reason} retains its automatic compaction contract`, async () => {
+		const h = activeManualHarness();
+		try {
+			await h.start();
+			const result = await h.compact(reason) as { compaction: CompactionResult };
+			expect(result.compaction.summary).toBe(CONTEXT_WINDOW_COMPACTION_SUMMARY);
+			expect(result.compaction.firstKeptEntryId).toBe(h.boundaryId);
+			expect(result.compaction.details).toEqual({ protocol: 1, strategy: "codex-context-window", windowId: "w1" });
+			h.sm.appendCompaction(result.compaction.summary, result.compaction.firstKeptEntryId,
+				result.compaction.tokensBefore, result.compaction.details, true);
+			expect(await h.compact(reason)).toEqual({ cancel: true }); // Cleanup stays one-shot.
+			expect(h.requests).toEqual([]);
+			expect(h.prompts).toEqual([]);
+			expect(h.forbidden).toEqual([]);
+		} finally { await h.stop(); }
+	});
+}
+
+for (const failure of ["non-2xx", "network-error", "invalid-sse", "malformed-compaction-item", "aborted"] as const) {
+	test(`active Remote manual ${failure} stops without any summary or standalone fallback`, async () => {
+		const h = activeManualHarness({ result: { ok: false, reason: failure, ...(failure === "non-2xx" ? { status: 500 } : {}) } });
+		try {
+			await h.start();
+			const before = structuredClone(h.sm.getBranch());
+			expect(await h.compact()).toEqual({ cancel: true });
+			expect(h.requests).toHaveLength(1);
+			expect(h.sm.getBranch()).toEqual(before);
+			expect(h.prompts).toEqual([]);
+			expect(h.forbidden).toEqual([]);
+			expect(h.notices.some((notice) => /continuing with native summary/i.test(notice))).toBe(false);
+		} finally { await h.stop(); }
+	});
+}
+
+for (const producer of ["missing", "auth-failed", "incompatible"] as const) {
+	test(`active Remote manual ${producer} producer does not retry with the consumer`, async () => {
+		const h = activeManualHarness({ producer });
+		try {
+			await h.start();
+			const before = structuredClone(h.sm.getBranch());
+			expect(await h.compact()).toEqual({ cancel: true });
+			expect(h.requests).toEqual([]);
+			expect(h.sm.getBranch()).toEqual(before);
+			expect(h.prompts).toEqual([]);
+			expect(h.forbidden).toEqual([]);
+		} finally { await h.stop(); }
+	});
+}
+
+test("active Remote manual compact rejects a removed current boundary without sending retired input", async () => {
+	const h = activeManualHarness();
+	try {
+		await h.start();
+		h.sm.appendContextEdit(h.boundaryId, null);
+		const before = structuredClone(h.sm.getBranch());
+		expect(await h.compact()).toEqual({ cancel: true });
+		expect(h.requests).toEqual([]);
+		expect(h.sm.getBranch()).toEqual(before);
+		expect(h.prompts).toEqual([]);
+		expect(h.forbidden).toEqual([]);
+	} finally { await h.stop(); }
+});
+
+test("active Remote manual compact ignores a stale result after newer branch work", async () => {
+	const h = activeManualHarness({ beforeReturn: (sm) => { sm.appendMessage({ role: "user", content: "NEWER-USER-WORK", timestamp: 20 }); } });
+	try {
+		await h.start();
+		expect(await h.compact()).toEqual({ cancel: true });
+		expect(h.requests).toHaveLength(1);
+		expect(h.sm.getBranch().some((entry) => entry.type === "compaction")).toBe(false);
+		expect(JSON.stringify(h.sm.getBranch())).toContain("NEWER-USER-WORK");
+		expect(h.prompts).toEqual([]);
+		expect(h.forbidden).toEqual([]);
+	} finally { await h.stop(); }
+});
+
+for (const pairing of ["missing-result", "orphan-result", "duplicate-result", "normalized-id-collision"] as const) {
+	test(`active Remote manual ${pairing} never sends incomplete or ambiguous tool pairs`, async () => {
+		const h = activeManualHarness();
+		try {
+			await h.start();
+			const addCall = (id: string) => h.sm.appendMessage(fauxAssistantMessage(fauxToolCall("read", { path: "/fixture.txt" }, { id })));
+			const addResult = (id: string) => h.sm.appendMessage({ role: "toolResult", toolCallId: id, toolName: "read",
+				content: [{ type: "text", text: "read result" }], isError: false, timestamp: 10 });
+			if (pairing === "orphan-result") addResult("orphan");
+			else {
+				addCall("fixture-call|fc-one");
+				if (pairing !== "missing-result") addResult("fixture-call|fc-one");
+				if (pairing === "duplicate-result") addResult("fixture-call|fc-one");
+				if (pairing === "normalized-id-collision") { addCall("fixture-call|fc-two"); addResult("fixture-call|fc-two"); }
+			}
+			const before = structuredClone(h.sm.getBranch());
+			expect(await h.compact()).toEqual({ cancel: true });
+			expect(h.requests).toEqual([]);
+			expect(h.sm.getBranch()).toEqual(before);
+			expect(h.prompts).toEqual([]); expect(h.forbidden).toEqual([]);
+		} finally { await h.stop(); }
+	});
+}
+
+for (const checkpoint of ["foreign-summary", "wrong-provenance", "wrong-endpoint"] as const) {
+	test(`active Remote manual ${checkpoint} does not bypass continuity safety`, async () => {
+		const h = activeManualHarness();
+		try {
+			await h.start();
+			h.sm.appendCompaction("newer checkpoint", h.boundaryId, 500, checkpoint === "foreign-summary" ? undefined : createNativeCompactionDetails({
+				provider: model.provider, api: model.api, model: model.id,
+				baseUrl: checkpoint === "wrong-endpoint" ? "https://other.invalid/backend-api" : model.baseUrl,
+				inputProvenance: checkpoint === "wrong-provenance" ? "pi-context-hook-v1" : LEGACY_REMOTE_V2_INPUT_PROVENANCE,
+				compactedWindow: [{ type: "compaction", encrypted_content: "newer-opaque" }],
+			}), true);
+			const before = structuredClone(h.sm.getBranch());
+			expect(await h.compact()).toEqual({ cancel: true });
+			expect(h.requests).toEqual([]); expect(h.sm.getBranch()).toEqual(before);
+			expect(h.prompts).toEqual([]); expect(h.forbidden).toEqual([]);
+		} finally { await h.stop(); }
+	});
+}
+
+test("active Remote manual unexpected service exceptions cancel rather than escape into Pi fallback", async () => {
+	const h = activeManualHarness({ beforeReturn: () => { throw new Error("provider-private-body"); } });
+	try {
+		await h.start(); const before = structuredClone(h.sm.getBranch());
+		expect(await h.compact()).toEqual({ cancel: true });
+		expect(h.requests).toHaveLength(1); expect(h.sm.getBranch()).toEqual(before);
+		expect(h.prompts).toEqual([]); expect(h.forbidden).toEqual([]);
+		expect(h.notices.join("\n")).not.toContain("provider-private-body");
+	} finally { await h.stop(); }
+});
+
+for (const projection of ["unavailable", "head-removed", "retained-removed"] as const) {
+	test(`active Remote manual ${projection} hook projection cannot fall back to raw history`, async () => {
+		let projections = 0;
+		const h = activeManualHarness({ inputSource: "pi-context-hook", ...(projection === "unavailable" ? {} : {
+			projectCompactionContext: (messages: readonly AgentMessage[]) => {
+				projections++;
+				return messages.filter((message) => projection === "head-removed" ? (message.role as string) !== "system" : message.role !== "user");
+			},
+		}) });
+		try {
+			await h.start(); const before = structuredClone(h.sm.getBranch());
+			expect(await h.compact()).toEqual({ cancel: true });
+			expect(projections).toBe(projection === "unavailable" ? 0 : 1);
+			expect(h.requests).toEqual([]); expect(h.sm.getBranch()).toEqual(before);
+			expect(h.prompts).toEqual([]); expect(h.forbidden).toEqual([]);
+		} finally { await h.stop(); }
 	});
 }

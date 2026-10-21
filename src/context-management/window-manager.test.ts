@@ -871,3 +871,79 @@ test("a consumed detached boundary yields to the ordinary chain instead of cance
 	expect(manager.prepareDetachedCompaction(event())).toBeUndefined();
 	expect(manager.currentIdentity()?.currentWindowId).toBe("w2");
 });
+
+function remoteCompactionWindow(includeHead = true) {
+	const sm = SessionManager.inMemory("/synthetic-project");
+	const headId = includeHead ? sm.appendMessage(headMessage(["read", "notes"])) : undefined;
+	sm.appendMessage({ role: "user", content: "RETIRED-COMPACTION-HISTORY", timestamp: 2 });
+	const boundaryId = sm.appendCustomMessageEntry(CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, "current window", true, {
+		protocol: 1, id: "marker-w2", sessionId: sm.getSessionId(),
+		contextManagement: { protocol: 1, kind: "window", firstWindowId: "w1", currentWindowId: "w2",
+			previousWindowId: "w1", windowNumber: 1, trimPreviousWindow: true },
+	});
+	sm.appendMessage({ role: "user", content: "CURRENT-COMPACTION-HISTORY", timestamp: 3 });
+	sm.appendMessage(fauxAssistantMessage("current answer", { timestamp: 4 }));
+	const ctx = { sessionManager: sm } as never;
+	const manager = new CodexContextWindowManager(async () => undefined);
+	manager.synchronize(ctx);
+	const event = () => ({ branchEntries: sm.getBranch(), preparation: { firstKeptEntryId: headId ?? boundaryId, tokensBefore: 1000 } }) as never;
+	return { sm, ctx, manager, headId, boundaryId, event };
+}
+
+test("strict remote compression uses canonical current-window messages and real safe source IDs", () => {
+	const h = remoteCompactionWindow();
+	const before = structuredClone(h.sm.getBranch());
+	const prepared = h.manager.prepareRemoteCompaction(h.event(), h.ctx);
+	expect(prepared.firstKeptEntryId).toBe(h.boundaryId);
+	expect(prepared.owningCompaction).toBeUndefined();
+	expect(declaredToolNames(prepared.messages)).toEqual(["read", "notes"]);
+	expect(JSON.stringify(prepared.messages)).toContain("CURRENT-COMPACTION-HISTORY");
+	expect(JSON.stringify(prepared.messages)).not.toContain("RETIRED-COMPACTION-HISTORY");
+	expect(h.sm.getBranch()).toEqual(before);
+	expect(h.manager.hasPendingTrim()).toBe(true); // Preparation did not consume maintenance.
+});
+
+test("strict remote compression cannot resurrect a remembered head missing from canonical input", () => {
+	const h = remoteCompactionWindow();
+	const messages = h.sm.buildSessionProjection().messages;
+	h.manager.project(messages, "remote"); // Populate the ordinary live fallback head.
+	expect(() => h.manager.projectCompactionContext(messages.filter((message) => (message.role as string) !== "system")))
+		.toThrow("compaction-system-tool-head-lost");
+	const missing = remoteCompactionWindow(false);
+	expect(() => missing.manager.prepareRemoteCompaction(missing.event(), missing.ctx)).toThrow("compaction-system-tool-head-lost");
+});
+
+for (const invalidCleanup of ["summary", "owner"] as const) {
+	test(`strict remote compression rejects a forged Toolkit cleanup (${invalidCleanup})`, () => {
+		const h = remoteCompactionWindow();
+		h.sm.appendCompaction(invalidCleanup === "summary" ? "unrelated foreign summary" : CONTEXT_WINDOW_COMPACTION_SUMMARY,
+			h.boundaryId, 100, { protocol: 1, strategy: "codex-context-window", windowId: "w2" }, invalidCleanup !== "owner");
+		expect(() => h.manager.prepareRemoteCompaction(h.event(), h.ctx)).toThrow("unverified-window-cleanup");
+	});
+}
+
+test("strict remote compression refuses an unpersisted rollover without consuming its duplicate guard", async () => {
+	const h = remoteCompactionWindow();
+	const sent: Array<Record<string, unknown>> = [];
+	await h.manager.startNewWindow(fakePi(sent), h.ctx, { triggerTurn: true, trimPreviousWindow: true });
+	expect(() => h.manager.prepareRemoteCompaction(h.event(), h.ctx)).toThrow("unsafe-compaction-window-boundary");
+	expect(h.manager.hasPendingRollover(h.ctx)).toBe(true);
+	expect(sent).toHaveLength(1);
+});
+
+test("read-only compression projection stays scoped across awaits without suppressing another live request", async () => {
+	const h = remoteCompactionWindow();
+	let release!: () => void;
+	const suspended = new Promise<void>((resolve) => { release = resolve; });
+	const preparing = h.manager.withCompactionProjection(async () => {
+		expect(h.manager.isPreparingCompaction).toBe(true);
+		await suspended;
+		expect(h.manager.isPreparingCompaction).toBe(true);
+		return h.manager.project(h.sm.buildSessionProjection().messages, "remote");
+	});
+	expect(h.manager.isPreparingCompaction).toBe(false);
+	h.manager.project(h.sm.buildSessionProjection().messages, "remote");
+	release();
+	expect(JSON.stringify(await preparing)).not.toContain("RETIRED-COMPACTION-HISTORY");
+	expect(h.manager.isPreparingCompaction).toBe(false);
+});
