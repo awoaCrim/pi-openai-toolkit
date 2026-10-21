@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { declarationsEqual, getCurrentSystemMessage, getCurrentTools } from "@earendil-works/pi-ai";
-import { convertResponsesTools } from "@earendil-works/pi-ai/api/openai-responses-shared";
+import { convertResponsesTools } from "./context-management/responses-tools";
 import type {
 	BeforeProviderRequestEvent,
 	ContextWithSystemEvent,

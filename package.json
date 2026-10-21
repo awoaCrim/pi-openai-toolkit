@@ -1,6 +1,6 @@
 {
   "name": "pi-openai-toolkit",
-  "version": "0.23.0",
+  "version": "0.23.1",
   "private": false,
   "type": "module",
   "engines": {
@@ -69,6 +69,7 @@
     "src/context-management/history-notes.ts",
     "src/context-management/tools.ts",
     "src/context-management/namespace-tools.ts",
+    "src/context-management/responses-tools.ts",
     "src/context-management/tool-contract.ts",
     "src/image-generation/artifacts.ts",
     "src/image-generation/client.ts",
