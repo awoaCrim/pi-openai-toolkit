@@ -46,6 +46,7 @@ function fixture(policy: LocalPolicy, options: { boundary?: boolean; olderOpaque
 	let aborted = false;
 	let remoteCalls = 0;
 	let nativeCalls = 0;
+	const nativeInputs: string[] = [];
 	const windows = new CodexContextWindowManager(async () => undefined);
 	const head = { role: "system", content: "", sections: { preamble: "MODE-SWITCH-SYSTEM" },
 		toolsAdded: [{ name: "read", description: "read", parameters: {} }], timestamp: 1 } as AgentMessage;
@@ -92,7 +93,14 @@ function fixture(policy: LocalPolicy, options: { boundary?: boolean; olderOpaque
 			}, diagnostics: { level: "error", notifyOnLoad: false, artifactRoot: root } });
 		},
 		remoteCompact: async () => { remoteCalls++; throw new Error("retired history reached Remote V2"); },
-		nativeFallback: async () => { nativeCalls++; return { ok: false, reason: "no-model-configured" }; },
+		nativeFallback: async (args) => {
+			nativeCalls++;
+			nativeInputs.push(JSON.stringify(args.event.preparation));
+			return args.scoped ? { ok: true, model: args.ctx.model!, modelSpec: "fixture/native",
+				result: { summary: `CURRENT-WINDOW-SUMMARY ${args.event.preparation.previousSummary ?? ""}`,
+					firstKeptEntryId: args.event.preparation.firstKeptEntryId, tokensBefore: args.event.preparation.tokensBefore } }
+				: { ok: false, reason: "no-model-configured" };
+		},
 	});
 	const context = (model = local) => ({
 		model, cwd: root, hasUI: false, ui: { notify: () => undefined }, sessionManager: sm,
@@ -106,7 +114,7 @@ function fixture(policy: LocalPolicy, options: { boundary?: boolean; olderOpaque
 	return {
 		sm, windows, local, remote, markerId, currentId, retiredId, retired, current, sent, auth, opaque, call, context,
 		get active() { return active; }, get aborted() { return aborted; },
-		get producerCalls() { return [remoteCalls, nativeCalls]; },
+		get producerCalls() { return [remoteCalls, nativeCalls]; }, nativeInputs,
 		async selectLocal(bootstrapRemote = true) {
 			if (bootstrapRemote) {
 				await call("session_start", {}, remote);
@@ -128,7 +136,8 @@ function fixture(policy: LocalPolicy, options: { boundary?: boolean; olderOpaque
 		},
 		compaction(reason = "threshold") {
 			return call("session_before_compact", { reason, signal: new AbortController().signal, branchEntries: sm.getBranch(),
-				preparation: { firstKeptEntryId: retiredId, tokensBefore: 700_000, messagesToSummarize: [retired, current], turnPrefixMessages: [] } });
+				preparation: { firstKeptEntryId: retiredId, tokensBefore: 700_000, messagesToSummarize: [retired, current], turnPrefixMessages: [],
+					settings: { enabled: false, keepRecentTokens: 1, reserveTokens: 2048 } } });
 		},
 	};
 }
@@ -186,23 +195,24 @@ for (const policy of policies) {
 	});
 
 	for (const reason of ["manual", "threshold", "overflow"]) {
-		test(`${policy} ${reason} detaches before disabled/producer paths and remains retryable`, async () => {
+		test(`${policy} ${reason} compresses the current window without a cleanup-only pass`, async () => {
 			const f = fixture(policy);
 			await f.selectLocal(false);
 			const before = structuredClone(f.sm.getBranch());
 			const result = await f.compaction(reason) as { compaction: CompactionResult<ContextWindowCompactionDetails> };
-			expect(result?.compaction?.summary).toBe(CONTEXT_WINDOW_COMPACTION_SUMMARY);
-			expect(result.compaction.firstKeptEntryId).toBe(f.markerId!);
+			expect(result?.compaction?.summary).toContain("CURRENT-WINDOW-SUMMARY");
+			expect(result.compaction.summary).not.toBe(CONTEXT_WINDOW_COMPACTION_SUMMARY);
+			expect(f.sm.getEntry(result.compaction.firstKeptEntryId)).toBeDefined();
+			expect(result.compaction.firstKeptEntryId).not.toBe(f.retiredId);
 			expect(result.compaction.tokensBefore).toBeLessThan(1000);
-			expect(await f.compaction(reason)).toEqual(result);
 			expect(f.sm.getBranch()).toEqual(before);
 			const { summary, firstKeptEntryId, tokensBefore, details } = result.compaction;
 			f.sm.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, true);
-			// A consumed boundary is no longer a dead end: the ordinary chain continues.
-			// Disabled/Pi selections exit before any producer; other local policies reach
-			// the native fallback tier, which this fixture reports as unconfigured.
-			expect(await f.compaction(reason)).toBeUndefined();
-			expect(f.producerCalls).toEqual([0, policy === "pi" || policy === "legacy-disabled" ? 0 : 1]);
+			f.sm.appendMessage({ role: "user", content: "FOLLOWUP-CURRENT-WINDOW", timestamp: 10 });
+			const followup = await f.compaction(reason) as { compaction: CompactionResult };
+			expect(followup.compaction.summary).toContain("CURRENT-WINDOW-SUMMARY");
+			expect(f.producerCalls).toEqual([0, 2]);
+			expect(f.nativeInputs.every((input) => !input.includes("RETIRED-MODE-SWITCH-HISTORY"))).toBe(true);
 			expect(f.auth).toEqual([]);
 			expect(f.windows.currentIdentity()?.currentWindowId).toBe("window-1");
 		});
@@ -261,8 +271,10 @@ for (const policy of policies) {
 			expect(messages.some((message) => message.role === "compactionSummary" && message.summary === "NEWER-NATIVE-SUMMARY")).toBe(true);
 			expect(JSON.stringify(messages).includes("NEWER-SUMMARY-TAIL")).toBe(true);
 			expect(f.sm.getBranch()).toEqual(raw);
-			expect(await f.compaction()).toBeUndefined();
-			expect(f.producerCalls).toEqual([0, policy === "pi" || policy === "legacy-disabled" ? 0 : 1]);
+			const result = await f.compaction() as { compaction: CompactionResult };
+			expect(result.compaction.summary).toContain("NEWER-NATIVE-SUMMARY");
+			expect(f.producerCalls).toEqual([0, 1]);
+			expect(f.nativeInputs[0]).not.toContain("RETIRED-MODE-SWITCH-HISTORY");
 			expect(f.aborted).toBe(false);
 		});
 	}

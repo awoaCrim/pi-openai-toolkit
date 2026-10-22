@@ -16,9 +16,9 @@ const oldOpaque = "PRE-WINDOW-OPAQUE-SENTINEL";
 // Pi's tools option is a host allowlist, including extension-owned tools.
 const allowedTools = ["read", "new_context", "get_context_remaining", "history", "notes"];
 
-function responseStream(index: number) {
+function responseStream(index: number, text = `ANSWER-${index}`) {
 	const output = [{ type: "message", id: `msg_${index}`, role: "assistant", status: "completed",
-		content: [{ type: "output_text", text: `ANSWER-${index}`, annotations: [] }] }];
+		content: [{ type: "output_text", text, annotations: [] }] }];
 	const events = [
 		{ type: "response.created", response: { id: `resp_${index}`, status: "in_progress", output: [] } },
 		{ type: "response.output_item.done", output_index: 0, item: output[0] },
@@ -29,10 +29,10 @@ function responseStream(index: number) {
 		headers: { "content-type": "text/event-stream" },
 	});
 }
-function completionStream(index: number) {
+function completionStream(index: number, text = `ANSWER-${index}`) {
 	const chunk = { id: `chat_${index}`, object: "chat.completion.chunk", created: 1, model: "local" };
 	const events = [
-		{ ...chunk, choices: [{ index: 0, delta: { role: "assistant", content: `ANSWER-${index}` }, finish_reason: null }] },
+		{ ...chunk, choices: [{ index: 0, delta: { role: "assistant", content: text }, finish_reason: null }] },
 		{ ...chunk, choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 } },
 	];
 	return new Response(`${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`, {
@@ -50,7 +50,7 @@ try {
 	await mkdir(configDir, { recursive: true });
 	await writeFile(join(configDir, "config.json"), JSON.stringify({
 		schemaVersion: 2,
-		defaults: { context: { mode: "remote-compaction", nativeFallback: { enabled: false } } },
+		defaults: { context: { mode: "remote-compaction", remoteCompaction: { apis: [] }, nativeFallback: { enabled: false } } },
 		models: {
 			"remote-gateway/remote": { compatibility: { transport: "codex-gateway" }, context: { mode: "remote-windows" } },
 			...(mode === "pi" ? { "local-provider/local": { context: { mode: "pi" } } } : {}),
@@ -89,7 +89,8 @@ try {
 	const requests: Array<{ body: Record<string, unknown>; headers: Headers }> = [];
 	let failure: unknown;
 	let persistedWindowId: string;
-	let detached = false;
+	let detached = false, summaryCalls = 0;
+	const currentSummary = "CURRENT-COMPACTED-MODE-SWITCH";
 	const markers = () => sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === CODEX_CONTEXT_WINDOW_MESSAGE_TYPE
 		&& isCodexContextManagementMessageDetails(entry.details) && entry.details.contextManagement.kind === "window");
 	const deniedFetch = globalThis.fetch;
@@ -99,8 +100,15 @@ try {
 			if (request.method !== "POST" || ![`${baseUrl}/responses`, `${baseUrl}/chat/completions`].includes(request.url)) return deniedFetch(input, init);
 			assert(!request.signal.aborted, "aborted mode-switch request reached the encoder transport");
 			const body = await request.json() as Record<string, unknown>;
+			assert(!JSON.stringify(body).includes("compaction_trigger"), "local compression called a remote producer");
+			if (JSON.stringify(body).includes("<conversation>")) {
+				summaryCalls++;
+				assert.equal(body.model, "local");
+				assert(!JSON.stringify(body).includes(retired) && !JSON.stringify(body).includes(oldOpaque));
+				assert(!JSON.stringify(body).includes(CONTEXT_WINDOW_COMPACTION_SUMMARY));
+				return localApi === "openai-completions" ? completionStream(summaryCalls, currentSummary) : responseStream(summaryCalls, currentSummary);
+			}
 			requests.push({ body, headers: request.headers });
-			assert(!JSON.stringify(body).includes("compaction_trigger"), "local detachment called a remote producer");
 			const isRemote = body.model === "remote";
 			assert(isRemote || body.model === "local");
 			assert.equal(request.url, `${baseUrl}/${isRemote || localApi === "openai-responses" ? "responses" : "chat/completions"}`);
@@ -133,8 +141,8 @@ try {
 			}
 			if (detached) {
 				const entries = (await readFile(sm.getSessionFile()!, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-				assert.equal(entries.filter((entry) => entry.type === "compaction").at(-1)?.summary, CONTEXT_WINDOW_COMPACTION_SUMMARY,
-					"continuation preceded durable no-summary detachment");
+				assert(entries.filter((entry) => entry.type === "compaction").at(-1)?.summary.includes(currentSummary),
+					"consumer preceded durable native compression");
 			}
 			return !isRemote && localApi === "openai-completions" ? completionStream(requests.length) : responseStream(requests.length);
 		} catch (error) { failure ??= error; throw error; }
@@ -161,20 +169,23 @@ try {
 				previousWindowId: initial.details.contextManagement.currentWindowId, currentWindowId: persistedWindowId,
 				windowNumber: 1, trimPreviousWindow: true },
 		});
-		sm.appendMessage({ role: "user", content: current, timestamp: 3 });
-		sm.appendMessage({ ...fauxAssistantMessage("current work", { timestamp: 4 }), provider: remote.provider, api: remote.api, model: remote.id });
+		for (let i = 0; i < 4; i++) {
+			sm.appendMessage({ role: "user", content: `${current} ${"current work ".repeat(200)}`, timestamp: 3 + 2 * i });
+			sm.appendMessage({ ...fauxAssistantMessage("current work", { timestamp: 4 + 2 * i }), provider: remote.provider, api: remote.api, model: remote.id });
+		}
 		session.refreshContext();
 		const rawBeforeSwitch = structuredClone(sm.getBranch());
 		await session.setModel(local);
 		assert.deepEqual(session.getActiveToolNames(), ["read"], "model_select kept Remote tools active");
 		await prompt("After selecting the local model", 2);
 		try { await session.compact(); } catch (error) { throw failure ?? error; }
-		assert.equal(requests.length, 2, "local compaction made an inference/producer call");
+		assert.equal(requests.length, 2, "local compression launched a user continuation");
+		assert(summaryCalls > 0, "local mode skipped actual native compression");
 		const compactions = sm.getBranch().filter((entry) => entry.type === "compaction");
 		assert.equal(compactions.length, 2);
-		assert.equal(compactions.at(-1)?.summary, CONTEXT_WINDOW_COMPACTION_SUMMARY);
-		assert.equal(compactions.at(-1)?.firstKeptEntryId, boundary);
-		assert.equal(compactions.at(-1)?.details?.strategy, "codex-context-window");
+		assert(compactions.at(-1)?.summary.includes(currentSummary));
+		assert.notEqual(compactions.at(-1)?.details?.strategy, "codex-context-window");
+		assert(sm.getBranch().findIndex((entry) => entry.id === compactions.at(-1)?.firstKeptEntryId) >= sm.getBranch().findIndex((entry) => entry.id === boundary));
 		detached = true;
 		const file = sm.getSessionFile()!;
 		for (const entry of rawBeforeSwitch) assert.deepEqual(sm.getEntry(entry.id), entry, "mode switch rewrote raw history");

@@ -56,9 +56,13 @@ Toolkit 只读取一个全局配置文件，即使扩展安装在项目内也一
 
 **远程窗口**需要原生 `openai-codex` 提供商的 `openai-codex-responses` API，或支持相应协议的 `openai-responses` 网关。网关必须在精确模型下设置 `compatibility.transport: "codex-gateway"`；这一设置不会让普通兼容端点自动获得该能力。
 
-将上例的 `mode` 改为 `remote-windows` 后，符合条件的会话会提供 `new_context`、`get_context_remaining`、`history` 和 `notes`。手动 `/compact [instructions]` 会远程压缩当前窗口，不切换当前模型，也不打开新窗口。检查点保存成功后由原模型继续；失败则停止并保留现有上下文，不回退到文本摘要。它沿用 `context.remoteCompaction.model` 设置；`null` 仍使用当前模型。
+将上例的 `mode` 改为 `remote-windows` 后，符合条件的会话会提供 `new_context`、`get_context_remaining`、`history` 和 `notes`。手动 `/compact [instructions]` 使用 Pi 原生文本压缩，**只处理当前窗口**。它不调用 Toolkit 的远程 producer 或指定回退模型，不切换当前模型、打开新窗口，也不自动发送续跑提示。只有 `remote-compaction` 模式选择 Toolkit 的远程压缩及回退链路。
 
-切换模型或改用 `remote-compaction`、`pi` 模式后，已有的有效窗口边界仍然生效：只使用当前本地窗口，旧窗口历史不会发送给新模型或 compaction 模型。扩展会用一个不生成摘要的本地边界保留已持久化的 Remote Window / Context Session；切回支持窗口的模型时会复用同一个窗口，不会重复创建。该边界只写一次：之后在非窗口模型下的压缩会继续走普通 producer、native fallback 或 Pi 默认链路，而不再被取消。旧配置中的 `leaveManagedMode` 仍会解析，但不再触发批量 close-out 压缩。
+切换模型或改用 `remote-compaction`、`pi` 模式后，已有的有效窗口边界仍然生效：旧历史不会进入普通请求或任何压缩层。历史边界只限定输入，不能把实际压缩替换成一次无摘要清理。窗口身份仍会保留，便于切回；无法安全重建当前窗口时取消操作，不退回全部归档历史。旧配置中的 `leaveManagedMode` 仍会解析，但不再触发批量 close-out 压缩。
+
+原生文本压缩无法读取已有的加密检查点。如果当前上下文由该检查点承接，原生压缩或回退会取消并保留现状，避免把占位文本当作摘要、丢失信息；兼容的远程压缩仍可复用它。
+
+完整历史仍保存在本地 Pi 会话 JSONL，远端 `history`、`notes` 则是独立的后端 API。窗口标记本身不是 Pi 原生截断点，运行时隔离仍依赖扩展正常加载。旧会话若恰好以无摘要清理记录结尾，Pi 可能在进入扩展钩子前提示 `Already compacted`；先发送一条正常用户消息再重试。Toolkit 不改写原日志，也不绕过 Pi 的压缩资格检查。
 
 远程窗口依赖 alpha 接口，上游可能随时调整。切换模型时远程窗口状态仍会持久化并可复用，详见[窗口生命周期](docs/internals.md#rollover-lifecycle)。
 

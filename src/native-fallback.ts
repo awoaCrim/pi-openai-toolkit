@@ -20,7 +20,9 @@ export type NativeFallbackFailureReason =
 	| "auth-failed"
 	| "aborted"
 	| "empty-summary"
-	| "compact-failed";
+	| "compact-failed"
+	| "public-runtime-unavailable"
+	| "missing-model";
 
 export type NativeFallbackResult =
 	| {
@@ -39,7 +41,7 @@ export type NativeFallbackResult =
 export type NativeCompactFn = typeof compact;
 
 type ResolvedAuth =
-	| { ok: true; apiKey?: string; headers?: ProviderHeaders; env?: Record<string, string> }
+	| { ok: true; apiKey?: string; headers?: ProviderHeaders; baseUrl?: string; env?: Record<string, string> }
 	| { ok: false; error: string };
 
 function isAbortError(error: unknown): boolean {
@@ -61,10 +63,10 @@ function toErrorMessage(error: unknown): string {
  * active model cannot use remote v2 at all. This function never inspects `remoteCompactModel`
  * itself, so a model that cannot compact remotely can never inherit the remote producer.
  *
- * Only the "resolved model differs from the current one" case is handled here: when the feature
- * is disabled, nothing is resolved, or it equals the current model, the caller returns undefined
- * from session_before_compact so pi runs the same native path itself, keeping its internal
- * streamFn/thinkingLevel wiring.
+ * Ordinary no-boundary defaults stay with Pi. When a window constrains input,
+ * useCurrentModel runs the same public native primitive with the public registry
+ * stream, current thinking and auth, rather than reopening unscoped host history.
+ * Host-private custom stream/retry callbacks are not exposed by ExtensionContext.
  */
 export async function runNativeFallbackCompaction(args: {
 	ctx: ExtensionContext;
@@ -73,32 +75,32 @@ export async function runNativeFallbackCompaction(args: {
 	/** Model spec supplied by the caller for this specific fallback reason. */
 	modelSpec?: string;
 	compactFn?: NativeCompactFn;
+	/** Scoped input cannot be handed back to an unscoped host default. */
+	scoped?: boolean;
+	/** Run current-model native policy, independently of Toolkit's fallback config. */
+	useCurrentModel?: boolean;
+	isCurrent?: () => boolean;
 }): Promise<NativeFallbackResult> {
 	const { ctx, event, config } = args;
 	const compactFn = args.compactFn ?? compact;
 	const nativeFallback = config.nativeFallback;
+	const isCurrent = () => !event.signal.aborted && (args.isCurrent?.() ?? true);
+	if (!isCurrent()) return { ok: false, reason: "aborted" };
 
-	if (!nativeFallback.enabled) {
-		return { ok: false, reason: "disabled" };
-	}
-
-	const spec = args.modelSpec?.trim() ?? "";
-	if (!spec) {
-		return { ok: false, reason: "no-model-configured" };
-	}
-
+	if (!args.useCurrentModel && !nativeFallback.enabled) return { ok: false, reason: "disabled" };
+	const spec = args.useCurrentModel ? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "") : args.modelSpec?.trim() ?? "";
+	if (!spec) return { ok: false, reason: args.useCurrentModel ? "missing-model" : "no-model-configured" };
 	const parsed = parseModelSpec(spec);
-	if (!parsed) {
-		return { ok: false, reason: "invalid-model-spec", modelSpec: spec };
-	}
-
-	const model = ctx.modelRegistry.find(parsed.provider, parsed.modelId);
-	if (!model) {
-		return { ok: false, reason: "model-not-found", modelSpec: spec };
-	}
-
-	if (ctx.model && ctx.model.provider === model.provider && ctx.model.id === model.id) {
+	if (!parsed) return { ok: false, reason: "invalid-model-spec", modelSpec: spec };
+	const model = args.useCurrentModel ? ctx.model : ctx.modelRegistry.find(parsed.provider, parsed.modelId);
+	if (!model) return { ok: false, reason: "model-not-found", modelSpec: spec };
+	if (!args.useCurrentModel && ctx.model && ctx.model.provider === model.provider && ctx.model.id === model.id) {
 		return { ok: false, reason: "same-as-current-model", modelSpec: spec };
+	}
+	// The public registry preserves provider-native stream/auth wiring. Do not
+	// silently use a compat-only transport for scoped current-model compression.
+	if (args.scoped && typeof ctx.modelRegistry.streamSimple !== "function" && !args.compactFn) {
+		return { ok: false, reason: "public-runtime-unavailable", modelSpec: spec };
 	}
 
 	// Pi owns prompt construction, tool-result truncation and split-turn requests.
@@ -115,20 +117,21 @@ export async function runNativeFallbackCompaction(args: {
 		return { ok: false, reason: "auth-failed", modelSpec: spec, errorMessage: auth.error };
 	}
 
+	if (!isCurrent()) return { ok: false, reason: "aborted", modelSpec: spec };
 	try {
 		const result = await compactFn(
 			event.preparation,
-			model,
+			auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model,
 			auth.apiKey,
 			mergeProviderHeaders(auth.headers),
 			event.customInstructions,
 			event.signal,
-			nativeFallback.thinkingLevel,
-			undefined,
+			args.useCurrentModel ? ctx.thinkingLevel : nativeFallback.thinkingLevel,
+			args.scoped && typeof ctx.modelRegistry.streamSimple === "function" ? ctx.modelRegistry.streamSimple.bind(ctx.modelRegistry) : undefined,
 			auth.env,
 		);
 
-		if (event.signal.aborted) {
+		if (!isCurrent()) {
 			return { ok: false, reason: "aborted", modelSpec: spec };
 		}
 		if (!result.summary || result.summary.trim().length === 0) {

@@ -761,129 +761,6 @@ test("late activation fails closed when the context window cannot initialize", a
 });
 
 
-for (const leaveManagedMode of ["warn", "compact"] as const) {
-	for (const reason of ["manual", "threshold", "overflow"] as const) {
-		test(`non-window ${reason} detaches without any compactor and reuses Remote identity (${leaveManagedMode})`, async () => {
-			const handlers = new Map<string, (event: never, ctx: never) => unknown>();
-			const registered: Array<{ name: string }> = [];
-			const sent: Array<{ customType?: string }> = [];
-			const notices: string[] = [];
-			let active = ["read"];
-			let remoteCalls = 0;
-			let nativeCalls = 0;
-			let compactCalls = 0;
-			let localAuthCalls = 0;
-			let aborted = false;
-			const pi = {
-				on: (name: string, handler: (event: never, ctx: never) => unknown) => handlers.set(name, handler),
-				registerTool: (tool: { name: string }) => registered.push(tool),
-				getAllTools: () => registered, getActiveTools: () => active,
-				setActiveTools: (names: string[]) => { active = names; },
-				sendMessage: (message: { customType?: string }) => { sent.push(message); },
-			} as unknown as ExtensionAPI;
-			const windows = new CodexContextWindowManager(async () => undefined);
-			extension(pi, {
-				loadConfig: () => ({ config: {
-					...DEFAULT_TOOLKIT_CONFIG, compaction: {
-						...DEFAULT_COMPACTION_CONFIG, contextManagement: "remote", leaveManagedMode,
-						remoteCompactModel: "uwoacrimson/gpt-6-luna",
-						nativeFallback: { enabled: true, model: "uwoacrimson/gpt-6-luna", thinkingLevel: "off" },
-					},
-				}, warnings: [] }),
-				contextWindows: windows,
-				remoteCompact: async () => { remoteCalls++; throw new Error("must not summarize Remote history"); },
-				nativeFallback: async () => { nativeCalls++; throw new Error("must not send even the filtered current window to Luna"); },
-			});
-			const sm = SessionManager.inMemory("/synthetic-project");
-			const sessionId = sm.getSessionId();
-			const head = { role: "system", content: "", sections: { preamble: "prompt" },
-				toolsAdded: [{ name: "read", description: "read", parameters: {} }], timestamp: 1 } as AgentMessage;
-			const headId = sm.appendMessage(head);
-			// A checkpoint from before the Remote window must not be replayed into
-			// the local projection, even on the same endpoint.
-			sm.appendCompaction("old opaque checkpoint", headId, 10, createNativeCompactionDetails({
-				provider: model.provider, api: model.api, model: model.id, baseUrl: model.baseUrl,
-				inputProvenance: LEGACY_REMOTE_V2_INPUT_PROVENANCE,
-				compactedWindow: [{ type: "compaction", encrypted_content: "old-opaque" }],
-			}));
-			const addMarker = (windowId: string, windowNumber: number) => sm.appendCustomMessageEntry(
-				CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, "window", true, {
-					protocol: 1, id: `marker-${windowId}`, sessionId,
-					contextManagement: { protocol: 1, kind: "window", firstWindowId: "w1", currentWindowId: windowId, windowNumber },
-				},
-			);
-			addMarker("w1", 0);
-			const retired = { role: "user", content: "retired history ".repeat(100_000), timestamp: 2 } as AgentMessage;
-			sm.appendMessage(retired);
-			const boundaryId = addMarker("w2", 1);
-			// Already-Remote-managed current history can itself exceed Luna's
-			// physical window. Detachment is NOT a filtered summary request.
-			const current = { role: "user", content: reason === "manual" ? "current remote window ".repeat(60_000) : "current remote window", timestamp: 3 } as AgentMessage;
-			sm.appendMessage(current);
-			sm.appendMessage(fauxAssistantMessage("current work"));
-			const localModel = reason === "overflow"
-				? { provider: "anthropic", api: "anthropic-messages", id: "claude-x", baseUrl: "https://api.anthropic.com", contextWindow: 100_000 }
-				: { ...model, provider: "uwoacrimson", api: "openai-responses", id: "gpt-6-luna", contextWindow: 272_000 };
-			const context = (currentModel: typeof model) => ({
-				...makeContext([], currentModel), sessionManager: sm, hasUI: true,
-				ui: { notify: (message: string) => notices.push(message) },
-				abort: () => { aborted = true; },
-				compact: () => { compactCalls++; },
-				modelRegistry: { getApiKeyAndHeaders: async (requestedModel: typeof model) => {
-					if (requestedModel.provider !== model.provider || requestedModel.id !== model.id) { localAuthCalls++; throw new Error("no local provider/compactor resolution needed"); }
-					return { ok: true, apiKey: "token", headers: { "chatgpt-account-id": "account" }, baseUrl: model.baseUrl };
-				} },
-			}) as never;
-			const remoteCtx = context(model);
-			const localCtx = context(localModel);
-			await handlers.get("session_start")!({} as never, remoteCtx);
-			const identity = windows.currentIdentity();
-			expect(identity?.currentWindowId).toBe("w2");
-			const rawBranch = structuredClone(sm.getBranch());
-			await handlers.get("model_select")!({ model: localModel, previousModel: model, source: "set" } as never, remoteCtx);
-			await handlers.get("agent_settled")!({} as never, localCtx);
-			expect(active).toEqual(["read"]);
-			expect(windows.currentIdentity()).toEqual(identity);
-			const projected = await handlers.get("context_with_system")!({ messages: sm.buildSessionProjection().messages } as never, localCtx) as { messages: AgentMessage[] };
-			expect(declaredToolNames(projected.messages)).toEqual(["read"]);
-			expect(projected.messages).toContainEqual(current);
-			expect(projected.messages).not.toContainEqual(retired);
-			expect(projected.messages.some((message) => message.role === "custom" || message.role === "compactionSummary")).toBe(false);
-			expect(await handlers.get("before_provider_request")!({ payload: { model: localModel.id, input: [] } } as never, localCtx)).toBeUndefined();
-			expect(sm.getBranch()).toEqual(rawBranch);
-			const prepare = () => handlers.get("session_before_compact")!({
-				signal: new AbortController().signal, reason, branchEntries: sm.getBranch(),
-				preparation: { firstKeptEntryId: "wrong-boundary", tokensBefore: 700_000,
-					messagesToSummarize: [retired, current], turnPrefixMessages: [] },
-			} as never, localCtx);
-			const result = await prepare() as { compaction: CompactionResult<ContextWindowCompactionDetails> };
-			expect(result.compaction.summary).toBe(CONTEXT_WINDOW_COMPACTION_SUMMARY);
-			expect(result.compaction.firstKeptEntryId).toBe(boundaryId);
-			expect(result.compaction.tokensBefore).toBeLessThan(700_000);
-			expect(result.compaction.details).toEqual({ protocol: 1, strategy: "codex-context-window", windowId: "w2" });
-			expect(await prepare()).toEqual(result); // An unpersisted proposal remains retryable.
-			expect(sm.getBranch()).toEqual(rawBranch);
-			const { summary, firstKeptEntryId, tokensBefore, details } = result.compaction;
-			const compactionId = sm.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, true);
-			await handlers.get("session_compact")!({ compactionEntry: sm.getEntry(compactionId) } as never, localCtx);
-			const after = await handlers.get("context_with_system")!({ messages: sm.buildSessionProjection().messages } as never, localCtx) as { messages: AgentMessage[] };
-			expect(after.messages.slice(1)).toEqual(projected.messages.slice(1));
-			expect(declaredToolNames(after.messages)).toEqual(["read"]);
-			expect(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === CODEX_CONTEXT_WINDOW_MESSAGE_TYPE)).toHaveLength(2);
-			await handlers.get("model_select")!({ model, previousModel: localModel, source: "set" } as never, localCtx);
-			await handlers.get("agent_settled")!({} as never, remoteCtx);
-			expect(active).toEqual(["read", "new_context", "get_context_remaining", "history", "notes"]);
-			expect(windows.currentIdentity()).toEqual(identity);
-			const replay = await handlers.get("before_provider_request")!({ payload: { model: model.id, input: [] } } as never, remoteCtx) as { client_metadata: { "x-codex-turn-metadata": string } };
-			expect(JSON.parse(replay.client_metadata["x-codex-turn-metadata"]).context_window_id).toBe("w2");
-			expect(sent).toEqual([]); // No duplicate initialization or handoff marker.
-			expect(notices).toEqual([]);
-			expect([remoteCalls, nativeCalls, compactCalls, localAuthCalls]).toEqual([0, 0, 0, 0]);
-			expect(aborted).toBe(false);
-		});
-	}
-}
-
 for (const remote of [false, true]) {
 	for (const keepMarker of [false, true]) {
 		test(`newer opaque replay survives historical window (${remote ? "remote" : "local"}, marker retained=${keepMarker})`, async () => {
@@ -1074,110 +951,8 @@ test("v2 context lifecycle reads one snapshot across awaited activation and sees
 	expect(active).toEqual(["read"]);
 });
 
-for (const reason of ["manual", "threshold", "overflow"] as const) {
-	test(`consumed detached boundary reaches the configured fallback model (${reason})`, async () => {
-		const handlers = new Map<string, (event: never, ctx: never) => unknown>();
-		const registered: Array<{ name: string }> = [];
-		const sent: Array<{ customType?: string }> = [];
-		const notices: string[] = [];
-		let active = ["read"];
-		let aborted = false;
-		const fallbackCalls: Array<{ modelSpec?: string; event: unknown }> = [];
-		const producerCalls: string[] = [];
-		const pi = {
-			on: (name: string, handler: (event: never, ctx: never) => unknown) => handlers.set(name, handler),
-			registerTool: (tool: { name: string }) => registered.push(tool),
-			getAllTools: () => registered, getActiveTools: () => active,
-			setActiveTools: (names: string[]) => { active = names; },
-			sendMessage: (message: { customType?: string }) => { sent.push(message); },
-		} as unknown as ExtensionAPI;
-		const windows = new CodexContextWindowManager(async () => undefined);
-		extension(pi, {
-			loadConfig: () => ({ config: {
-				...DEFAULT_TOOLKIT_CONFIG, compaction: {
-					...DEFAULT_COMPACTION_CONFIG, contextManagement: "remote",
-					nativeFallback: { enabled: true, model: "uwoacrimson/gpt-6-summary", thinkingLevel: "off" },
-				},
-			}, warnings: [] }),
-			contextWindows: windows,
-			remoteCompact: async () => { producerCalls.push("remote"); throw new Error("no Remote V2 for a local API"); },
-			nativeFallback: async (args: { modelSpec?: string; event: unknown }) => {
-				fallbackCalls.push(args);
-				return { ok: false, reason: "no-model-configured" } as never;
-			},
-		});
-		const sm = SessionManager.inMemory("/synthetic-project");
-		const sessionId = sm.getSessionId();
-		sm.appendMessage({ role: "system", content: "", sections: { preamble: "prompt" },
-			toolsAdded: [{ name: "read", description: "read", parameters: {} }], timestamp: 1 } as AgentMessage);
-		const addMarker = (windowId: string, windowNumber: number) => sm.appendCustomMessageEntry(
-			CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, "window", true, {
-				protocol: 1, id: `marker-${windowId}`, sessionId,
-				contextManagement: { protocol: 1, kind: "window", firstWindowId: "w1", currentWindowId: windowId, windowNumber },
-			},
-		);
-		addMarker("w1", 0);
-		const retired = { role: "user", content: "RETIRED-SENTINEL ".repeat(2000), timestamp: 2 } as AgentMessage;
-		sm.appendMessage(retired);
-		const boundaryId = addMarker("w2", 1);
-		sm.appendMessage({ role: "user", content: "CURRENT-WINDOW-SENTINEL", timestamp: 3 });
-		sm.appendMessage(fauxAssistantMessage("current work"));
-		const localModel = { ...model, provider: "uwoacrimson", api: "openai-completions", id: "gpt-6-luna", contextWindow: 272_000 };
-		const context = (currentModel: typeof model) => ({
-			...makeContext([], currentModel), sessionManager: sm, hasUI: true,
-			ui: { notify: (message: string) => notices.push(message) },
-			abort: () => { aborted = true; },
-			compact: () => undefined,
-			modelRegistry: {
-				find: () => ({ ...model, provider: "uwoacrimson", api: "openai-responses", id: "gpt-6-summary" }),
-				getApiKeyAndHeaders: async () => ({
-					ok: true, apiKey: "token", headers: { "chatgpt-account-id": "account" }, baseUrl: model.baseUrl,
-				}),
-			},
-		}) as never;
-		const remoteCtx = context(model);
-		const localCtx = context(localModel);
-		await handlers.get("session_start")!({} as never, remoteCtx);
-		const identity = windows.currentIdentity();
-		expect(identity?.currentWindowId).toBe("w2");
-		await handlers.get("model_select")!({ model: localModel, previousModel: model, source: "set" } as never, remoteCtx);
-		const prepare = (preparation: unknown) => handlers.get("session_before_compact")!({
-			signal: new AbortController().signal, reason, branchEntries: sm.getBranch(), preparation,
-		} as never, localCtx);
-		const preparation = { firstKeptEntryId: "wrong-boundary", tokensBefore: 700_000,
-			messagesToSummarize: [retired], turnPrefixMessages: [] };
-
-		// First pass detaches at the durable boundary with no producer involvement.
-		const detached = await prepare(preparation) as { compaction: CompactionResult<ContextWindowCompactionDetails> };
-		expect(detached.compaction.summary).toBe(CONTEXT_WINDOW_COMPACTION_SUMMARY);
-		expect(detached.compaction.firstKeptEntryId).toBe(boundaryId);
-		expect([producerCalls.length, fallbackCalls.length]).toEqual([0, 0]);
-		const { summary, firstKeptEntryId, tokensBefore, details } = detached.compaction;
-		sm.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, true);
-		await handlers.get("session_compact")!({ compactionEntry: sm.getBranch().at(-1) } as never, localCtx);
-
-		// Second pass: a consumed boundary must not cancel the configured fallback tier.
-		expect(await prepare(preparation)).toBeUndefined();
-		expect(fallbackCalls).toHaveLength(1);
-		expect(fallbackCalls[0]!.modelSpec).toBe("uwoacrimson/gpt-6-summary");
-		expect(producerCalls).toEqual([]);
-		expect(aborted).toBe(false);
-
-		// The projection the producer would consume already excludes retired history.
-		const effective = sm.buildSessionProjection().messages;
-		expect(JSON.stringify(effective)).not.toContain("RETIRED-SENTINEL");
-		expect(JSON.stringify(effective)).toContain("CURRENT-WINDOW-SENTINEL");
-
-		// Window identity survives and is reused on switch-back without a duplicate marker.
-		await handlers.get("model_select")!({ model, previousModel: localModel, source: "set" } as never, localCtx);
-		await handlers.get("agent_settled")!({} as never, remoteCtx);
-		expect(active).toEqual(["read", "new_context", "get_context_remaining", "history", "notes"]);
-		expect(windows.currentIdentity()).toEqual(identity);
-		expect(sent).toEqual([]);
-	});
-}
-
 function activeManualHarness(options: {
+	mode?: "remote-compaction" | "remote-windows";
 	result?: RemoteV2CompactionClientResult;
 	producer?: "missing" | "auth-failed" | "incompatible";
 	inputSource?: "legacy" | "pi-context-hook";
@@ -1209,13 +984,15 @@ function activeManualHarness(options: {
 	const notices: string[] = [];
 	const forbidden: string[] = [];
 	let active = ["read"];
+	let thinking = "high";
+	let pending = false;
 	const pi = {
 		on: (name: string, handler: (event: never, ctx: never) => unknown) => handlers.set(name, handler),
 		registerTool: (tool: { name: string }) => registered.push(tool),
 		getAllTools: () => registered,
 		getActiveTools: () => active,
 		setActiveTools: (names: string[]) => { active = names; },
-		getThinkingLevel: () => "high",
+		getThinkingLevel: () => thinking,
 		setThinkingLevel: () => { forbidden.push("thinking"); },
 		setModel: async () => { forbidden.push("model"); return true; },
 		sendUserMessage: (message: string) => { prompts.push(message); },
@@ -1225,9 +1002,9 @@ function activeManualHarness(options: {
 		baseUrl: options.producer === "incompatible" ? "https://other.invalid/backend-api" : model.baseUrl };
 	let selected = model;
 	const ctx = {
-		get model() { return selected; }, thinkingLevel: "high", sessionManager: sm, hasUI: true,
+		get model() { return selected; }, get thinkingLevel() { return thinking; }, sessionManager: sm, hasUI: true,
 		ui: { notify: (message: string) => notices.push(message) },
-		isIdle: () => true, hasPendingMessages: () => false,
+		isIdle: () => true, hasPendingMessages: () => pending,
 		getContextUsage: () => undefined, getSystemPrompt: () => "CURRENT-PROMPT-HEAD",
 		modelRegistry: {
 			find: (provider: string, id: string) => options.producer !== "missing" && provider === model.provider && id === "producer" ? producer : undefined,
@@ -1240,12 +1017,11 @@ function activeManualHarness(options: {
 		},
 	} as never;
 	const windows = new CodexContextWindowManager(async () => undefined);
+	let mode: "remote-windows" | "remote-compaction" = "remote-windows";
 	extension(pi, {
-		loadConfig: () => ({ config: { ...DEFAULT_TOOLKIT_CONFIG, compaction: {
-			...DEFAULT_COMPACTION_CONFIG, contextManagement: "remote", remoteCompactModel: `${model.provider}/producer`,
-			remoteV2ContextSource: options.inputSource ?? "legacy",
-			nativeFallback: { enabled: true, model: `${model.provider}/producer`, thinkingLevel: "off" },
-		} }, warnings: [] }),
+		loadConfig: () => v2Fixture({ defaults: { context: { mode, remoteCompaction: {
+			model: `${model.provider}/producer`, inputSource: options.inputSource ?? "legacy",
+		}, nativeFallback: { enabled: true, model: `${model.provider}/producer`, thinkingLevel: "off" } } } }),
 		contextWindows: windows,
 		projectCompactionContext: options.projectCompactionContext,
 		remoteCompact: async (args) => {
@@ -1256,11 +1032,14 @@ function activeManualHarness(options: {
 				response: { status: "completed", output: [{ type: "compaction", encrypted_content: "current-opaque" }] } };
 		},
 		standaloneCompact: async () => { forbidden.push("standalone"); return { ok: false, reason: "network-error" }; },
-		nativeFallback: async () => { forbidden.push("native-summary"); return { ok: false, reason: "no-model-configured" }; },
+		nativeFallback: async () => { forbidden.push("native-summary"); return { ok: false, reason: "compact-failed" }; },
 	});
 	return {
 		sm, boundaryId, headId, windows, requests, prompts, forbidden, notices,
 		get selected() { return selected; },
+		setPending: () => { pending = true; },
+		chooseThinking: () => { thinking = "low"; return handlers.get("thinking_level_select")!({ level: thinking } as never, ctx); },
+		emit: (name: string, event = {}) => handlers.get(name)!(event as never, ctx),
 		selectModel: (next: typeof model) => {
 			const previousModel = selected; selected = next;
 			sm.appendModelChange(next.provider, next.id);
@@ -1269,11 +1048,40 @@ function activeManualHarness(options: {
 		start: () => handlers.get("session_start")!({} as never, ctx),
 		stop: () => handlers.get("session_shutdown")!({} as never, ctx),
 		beforeRequest: (payload: unknown) => handlers.get("before_provider_request")!({ payload } as never, ctx),
-		compact: (reason = "manual", signal = new AbortController().signal) => handlers.get("session_before_compact")!({
-			signal, reason, branchEntries: sm.getBranch(), customInstructions: "USER-COMPACT-GUIDANCE",
-			preparation: { firstKeptEntryId: headId, tokensBefore: 1234, messagesToSummarize: [], turnPrefixMessages: [] },
-		} as never, ctx),
+		compact: (reason = "manual", signal = new AbortController().signal) => {
+			mode = options.mode ?? "remote-compaction";
+			return handlers.get("session_before_compact")!({
+				signal, reason, branchEntries: sm.getBranch(), customInstructions: "USER-COMPACT-GUIDANCE",
+				preparation: { firstKeptEntryId: headId, tokensBefore: 1234, messagesToSummarize: [], turnPrefixMessages: [],
+					settings: { enabled: false, keepRecentTokens: 1, reserveTokens: 2048 } },
+			} as never, ctx);
+		},
 	};
+}
+
+for (const change of ["abort", "queues", "model", "thinking", "branch", "shutdown", "newer-compact", "user-input"] as const) {
+	test(`scoped compaction rechecks ${change} after later before-compact observers without draining queues`, async () => {
+		const h = activeManualHarness();
+		try {
+			await h.start();
+			const controller = new AbortController();
+			const result = await h.compact("manual", controller.signal) as { cancel: boolean; compaction: CompactionResult };
+			expect(result.compaction).toBeDefined();
+			expect(result.cancel).toBe(false);
+			if (change === "abort") controller.abort();
+			else if (change === "queues") h.setPending();
+			else if (change === "model") await h.selectModel({ ...model, id: "new-user-model" });
+			else if (change === "thinking") await h.chooseThinking();
+			else if (change === "branch") h.sm.appendMessage({ role: "user", content: "LATER-OBSERVER-WORK", timestamp: 100 });
+			else if (change === "shutdown") await h.stop();
+			else if (change === "newer-compact") await h.compact();
+			else await h.emit("input", { source: "interactive", text: "queued user text" });
+			expect(result.cancel).toBe(true);
+			expect(h.sm.getBranch().filter((entry) => entry.type === "compaction")).toEqual([]);
+			expect(h.prompts).toEqual([]);
+			expect(h.forbidden).toEqual([]);
+		} finally { await h.stop(); }
+	});
 }
 
 test("active Remote captures live extras without entering ordinary replay and keeps the current synthetic tool head", async () => {
@@ -1331,8 +1139,9 @@ test("active Remote manual compact sends only the canonical current window to th
 		expect(wireInput).not.toContain("RETIRED-WINDOW-ZERO");
 		expect(request.request.instructions).toContain("CURRENT-PROMPT-HEAD");
 		expect(request.request.instructions).toContain("USER-COMPACT-GUIDANCE");
-		expect(result.compaction.firstKeptEntryId).toBe(h.boundaryId);
-		expect(result.compaction.tokensBefore).toBe(1234);
+		expect(h.sm.getEntry(result.compaction.firstKeptEntryId)).toBeDefined();
+		expect(result.compaction.firstKeptEntryId).not.toBe(h.headId);
+		expect(result.compaction.tokensBefore).toBeLessThan(1234);
 		expect(result.compaction.details).toMatchObject({ model: model.id, compactionModel: { model: "producer" },
 			inputProvenance: LEGACY_REMOTE_V2_INPUT_PROVENANCE, compactedWindow: [{ type: "compaction", encrypted_content: "current-opaque" }] });
 		expect(h.sm.getBranch()).toEqual(before);
@@ -1380,7 +1189,7 @@ for (const api of ["anthropic-messages", "openai-responses"]) {
 
 for (const reason of ["threshold", "overflow"]) {
 	test(`active Remote ${reason} retains its automatic compaction contract`, async () => {
-		const h = activeManualHarness();
+		const h = activeManualHarness({ mode: "remote-windows" });
 		try {
 			await h.start();
 			const result = await h.compact(reason) as { compaction: CompactionResult };
@@ -1398,7 +1207,7 @@ for (const reason of ["threshold", "overflow"]) {
 }
 
 for (const failure of ["non-2xx", "network-error", "invalid-sse", "malformed-compaction-item", "aborted"] as const) {
-	test(`active Remote manual ${failure} stops without any summary or standalone fallback`, async () => {
+	test(`scoped remote-compaction ${failure} follows ordinary fallback eligibility`, async () => {
 		const h = activeManualHarness({ result: { ok: false, reason: failure, ...(failure === "non-2xx" ? { status: 500 } : {}) } });
 		try {
 			await h.start();
@@ -1407,14 +1216,14 @@ for (const failure of ["non-2xx", "network-error", "invalid-sse", "malformed-com
 			expect(h.requests).toHaveLength(1);
 			expect(h.sm.getBranch()).toEqual(before);
 			expect(h.prompts).toEqual([]);
-			expect(h.forbidden).toEqual([]);
+			expect(h.forbidden).toEqual(failure === "aborted" ? [] : ["native-summary"]);
 			expect(h.notices.some((notice) => /continuing with native summary/i.test(notice))).toBe(false);
 		} finally { await h.stop(); }
 	});
 }
 
 for (const producer of ["missing", "auth-failed", "incompatible"] as const) {
-	test(`active Remote manual ${producer} producer does not retry with the consumer`, async () => {
+	test(`scoped remote-compaction ${producer} producer reaches the configured native fallback`, async () => {
 		const h = activeManualHarness({ producer });
 		try {
 			await h.start();
@@ -1423,7 +1232,7 @@ for (const producer of ["missing", "auth-failed", "incompatible"] as const) {
 			expect(h.requests).toEqual([]);
 			expect(h.sm.getBranch()).toEqual(before);
 			expect(h.prompts).toEqual([]);
-			expect(h.forbidden).toEqual([]);
+			expect(h.forbidden).toEqual(["native-summary"]);
 		} finally { await h.stop(); }
 	});
 }
@@ -1515,7 +1324,7 @@ for (const projection of ["unavailable", "head-removed", "retained-removed"] as 
 		const h = activeManualHarness({ inputSource: "pi-context-hook", ...(projection === "unavailable" ? {} : {
 			projectCompactionContext: (messages: readonly AgentMessage[]) => {
 				projections++;
-				return messages.filter((message) => projection === "head-removed" ? (message.role as string) !== "system" : message.role !== "user");
+				return messages.filter((message) => projection === "head-removed" ? (message.role as string) !== "system" : message.role !== "assistant");
 			},
 		}) });
 		try {

@@ -913,11 +913,12 @@ test("strict remote compression cannot resurrect a remembered head missing from 
 	expect(() => missing.manager.prepareRemoteCompaction(missing.event(), missing.ctx)).toThrow("compaction-system-tool-head-lost");
 });
 
-for (const invalidCleanup of ["summary", "owner"] as const) {
+for (const invalidCleanup of ["summary", "owner", "window", "retained-start"] as const) {
 	test(`strict remote compression rejects a forged Toolkit cleanup (${invalidCleanup})`, () => {
 		const h = remoteCompactionWindow();
 		h.sm.appendCompaction(invalidCleanup === "summary" ? "unrelated foreign summary" : CONTEXT_WINDOW_COMPACTION_SUMMARY,
-			h.boundaryId, 100, { protocol: 1, strategy: "codex-context-window", windowId: "w2" }, invalidCleanup !== "owner");
+			invalidCleanup === "retained-start" ? h.sm.getLeafId()! : h.boundaryId, 100,
+			{ protocol: 1, strategy: "codex-context-window", windowId: invalidCleanup === "window" ? "wrong-window" : "w2" }, invalidCleanup !== "owner");
 		expect(() => h.manager.prepareRemoteCompaction(h.event(), h.ctx)).toThrow("unverified-window-cleanup");
 	});
 }

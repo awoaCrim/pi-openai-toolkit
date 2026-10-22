@@ -102,6 +102,10 @@ try {
 		if (scenario === "cleaned") sm.appendCompaction(CONTEXT_WINDOW_COMPACTION_SUMMARY, currentBoundary, 100,
 			{ protocol: 1, strategy: "codex-context-window", windowId: "w1" }, true);
 	}
+	if (!excluded && !legacyRecovery) {
+		sm.appendMessage({ role: "user", content: "CURRENT-WINDOW-PREFIX ".repeat(400), timestamp: 5 });
+		sm.appendMessage(fauxAssistantMessage("CURRENT-PREFIX-ANSWER ".repeat(20)));
+	}
 	if (legacyRecovery) {
 		sm.appendCustomEntry(MANUAL_COMPACT_ENTRY_TYPE, { version: 1, operationId: "legacy-owned", sessionId: sm.getSessionId(),
 			sourceWindowId: "w1", anchorId: currentBoundary!, originalModel: `${provider}/original`, targetModel: `${provider}/checkpoint`,
@@ -115,7 +119,7 @@ try {
 	let conversationPhase = 0, fullPhase = 0, phasesAtCompact = 0;
 	let heldSuccessObserver = false, heldBeforeCompactObserver = false, compactReturned = true;
 	let releaseBeforeCompactObserver: (() => void) | undefined;
-	let seed = 0, remoteCalls = 0, savedCount = 0, continuations = 0, externalCalls = 0;
+	let seed = 0, remoteCalls = 0, savedCount = 0, continuations = 0, externalCalls = 0, nativeSummaryCalls = 0;
 	let noteReads = 0, noteWrites = 0, historyReads = 0, rolloverStage = -1, remindersAtCompact = 0;
 	let failure: unknown, liveReadTool: unknown;
 	const errors: string[] = [];
@@ -238,13 +242,21 @@ try {
 						assert(!inputText.includes("ACTIVE-WINDOW-TASK") && !inputText.includes("CURRENT-WINDOW-READ-DATA"));
 					}
 					const tools = JSON.stringify(body.tools);
-					assert(tools?.includes("notes") && tools.includes("history") && tools.includes("read"), "active Remote request extras/tool head were lost");
+					assert(tools?.includes("read"), "current read tool declaration was lost");
+					if (remoteCalls === 1) assert(tools.includes("notes") && tools.includes("history"), "initial current tool head was lost");
+					else assert(!tools.includes("notes") && !tools.includes("history"), "ordinary policy reactivated stale Remote tool declarations");
 					assert.deepEqual(declaredReadTool(body.tools), liveReadTool, "synthetic tool schema differs from the compatible live SDK head");
 				}
 				if (scenario === "failure") return Response.json({ error: { code: "server_error" } }, { status: 500 });
 				if (scenario === "abort") { session.abortCompaction(); throw new DOMException("fixture cancellation", "AbortError"); }
 				if (scenario === "select-during") await session.setModel(runtime.getModel(provider, "user-choice")!);
 				return streamResponse([{ type: "compaction", encrypted_content: scenario === "invalid-output" ? "" : `opaque-${remoteCalls}` }], `remote-${remoteCalls}`, scenario === "open-stream");
+			}
+			if (inputText.includes("<conversation>")) {
+				nativeSummaryCalls++;
+				assert(["failure", "invalid-output", "invalid-model"].includes(scenario), "unexpected native fallback request");
+				assert.equal(body.model, "checkpoint");
+				return Response.json({ error: { code: "server_error" } }, { status: 500 });
 			}
 			assert.equal(body.model, "original", "notes duty/native summary/hidden switched-model inference");
 			assert.equal((body.reasoning as { effort?: string } | undefined)?.effort, "high", "original thinking level changed");
@@ -278,8 +290,7 @@ try {
 			assert.equal(inputText.split(`opaque-${savedCount}`).length - 1, 1, "opaque checkpoint missing/duplicated");
 			assert(!inputText.includes("ACTIVE-WINDOW-TASK") && !inputText.includes("CURRENT-WINDOW-READ-DATA"));
 			assert(!inputText.includes("HIDDEN-LIVE-TAIL") && !inputText.includes("OLD-LIVE-TAIL"));
-			const metadata = JSON.parse((body.client_metadata as Record<string, string>)["x-codex-turn-metadata"]);
-			assert.equal(metadata.context_window_id, "w1");
+			assert.equal((body.client_metadata as Record<string, string> | undefined)?.["x-codex-turn-metadata"], undefined, "ordinary mode reactivated Remote Windows ingest");
 			if (inputText.includes("NEWER-USER-WORK") || inputText.includes("REOPEN-REQUEST")) externalCalls++;
 			else continuations++;
 			return textResponse("CONTINUED", `continued-${continuations}-${externalCalls}`);
@@ -296,6 +307,7 @@ try {
 			if (!excluded) await session!.prompt("ACTIVE-WINDOW-TASK: preserve this work and its next steps.");
 			if (failure) throw failure;
 			fixtureConfig.defaults.context.remoteWindows.reminderThresholdPercent = 100;
+			fixtureConfig.defaults.context.mode = "remote-compaction";
 			await writeFile(configPath, JSON.stringify(fixtureConfig));
 			const originalSessionId = sm.getSessionId();
 			const sourceBranch = structuredClone(sm.getBranch());
@@ -328,7 +340,11 @@ try {
 					assert.deepEqual(session!.getFollowUpMessages(), ["QUEUED-USER-2"]);
 				}
 			} else {
-				await waitUntil(() => continuations === 1 && session!.isIdle, "original-model continuation did not complete");
+				await new Promise((done) => setTimeout(done, 50));
+				assert.equal(continuations, 0, "manual compression launched a synthetic continuation");
+				await session!.prompt("EXPLICIT-NEXT-USER-REQUEST");
+				if (failure) throw failure;
+				assert.equal(continuations, 1, "explicit user request did not receive compressed context");
 				assert.deepEqual((checkpoints().at(-1)!.details as { compactedWindow: unknown[] }).compactedWindow,
 					[{ type: "compaction", encrypted_content: "opaque-1" }]);
 				if (scenario === "old-opaque") assert.equal((checkpoints().at(-1)!.details as { deferredToolCarryover?: unknown }).deferredToolCarryover, undefined, "retired checkpoint donated deferred state");
@@ -347,7 +363,10 @@ try {
 					session!.refreshContext();
 					phasesAtCompact = conversationPhase; compactReturned = false;
 					await compactSession("Second current-window compression"); savedCount = 2; compactReturned = true;
-					await waitUntil(() => continuations === 2 && session!.isIdle, "second exact checkpoint did not continue");
+					assert.equal(continuations, 1, "second manual compression resumed automatically");
+					await session!.prompt("EXPLICIT-NEXT-USER-REQUEST-2");
+					if (failure) throw failure;
+					assert.equal(continuations, 2);
 					assert.equal(remoteCalls, 2);
 					assert.equal(checkpoints().filter((entry) => entry.summary === checkpoints().at(-1)!.summary).length, 2, "fixture must exercise equal summaries");
 				}
@@ -363,6 +382,8 @@ try {
 					assert.equal(requests.length, before); assert.equal(remoteCalls, 1); assert.equal(continuations, 1);
 				}
 				if (scenario === "rollover") {
+					fixtureConfig.defaults.context.mode = "remote-windows";
+					await writeFile(configPath, JSON.stringify(fixtureConfig));
 					rolloverStage = 0;
 					await session!.prompt("Write notes, inspect history, then switch windows once.");
 					assert.equal(noteWrites, 1); assert.equal(historyReads, 2); assert.equal(markers().length, 3);
@@ -374,6 +395,7 @@ try {
 			if (scenario !== "rollover") assert.equal(markers().length, excluded ? 0 : 2, "compression opened another window");
 			assert.equal(remoteCalls, scenario === "invalid-model" ? 0 : scenario === "repeat" ? 2 : 1);
 			assert.equal(noteWrites, scenario === "rollover" ? 1 : 0, "compression started a notes-writing loop");
+			assert.equal(nativeSummaryCalls > 0, ["failure", "invalid-output", "invalid-model"].includes(scenario), "ordinary native fallback eligibility changed");
 			assert.equal(session!.model?.id, selectsUserModel ? "user-choice" : "original");
 			if (!selectsUserModel) assert.deepEqual(setterCalls, []);
 			assert(!sm.getBranch().some((entry) => entry.type === "custom" && entry.customType === MANUAL_COMPACT_ENTRY_TYPE), "new operation created notes-duty records");

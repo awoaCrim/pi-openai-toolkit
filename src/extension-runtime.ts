@@ -23,8 +23,10 @@ import { rewriteContextNamespaceCalls, rewriteContextNamespaceTools, routeContex
 import { rewriteEncryptedToolOutputs } from "./context-management/window-request";
 import { loadHistoryNotesThreadHint } from "./context-management/history-notes";
 import { CodexContextWindowManager } from "./context-management/window-manager";
-import { ManagedManualCompact, RemoteManualCompact, type RemoteManualCompactOperation } from "./context-management/manual-compact";
-import { isSystemTranscriptMessage } from "./context-management/messages";
+import { ManagedManualCompact } from "./context-management/manual-compact";
+import { prepareScopedNativeCompaction } from "./context-management/scoped-compaction";
+import type { RemoteWindowCompactionInput } from "./context-management/window-manager";
+import { CONTEXT_WINDOW_COMPACTION_SUMMARY, isSystemTranscriptMessage } from "./context-management/messages";
 import { isRecord } from "./context-management/types";
 import {
 	registerContextManagementTools,
@@ -81,6 +83,8 @@ import {
 	COMPACTION_EXTENSION_ID,
 	LEGACY_NATIVE_COMPACTION_STRATEGY,
 	REMOTE_V2_COMPACTION_STRATEGY,
+	NATIVE_COMPACTION_FALLBACK_SUMMARY,
+	STANDALONE_COMPACTION_FALLBACK_SUMMARY,
 	getLatestDeferredToolCarryover,
 	getRemoteV2InputProvenance,
 	isNativeCompactionDetails,
@@ -124,7 +128,8 @@ type CompactionDependencies = {
 	nativeFallback: typeof runNativeFallbackCompaction;
 	contextWindows: CodexContextWindowManager;
 	manualCompact?: ManagedManualCompact;
-	remoteManualCompact: RemoteManualCompact;
+	/** Read-only fence shared by all scoped producer tiers. */
+	isCurrentCompaction?: () => boolean;
 	/** Test seam for the same ordered projection exposed by the Pi host patch. */
 	projectCompactionContext?: CompactionContextProjection;
 	piContextHookPatch: PiContextHookPatchResult;
@@ -440,16 +445,16 @@ function adaptCompactionWireInput(input: ResponsesInputItem[], namespaces: Reado
 	return adapted.input as ResponsesInputItem[];
 }
 
-async function prepareActiveRemoteCompaction(
+async function prepareScopedResponsesCompaction(
 	event: SessionBeforeCompactEvent,
 	ctx: ExtensionContext,
 	config: CompactionConfig,
 	execution: RemoteCompactionExecution,
 	dependencies: CompactionDependencies,
 	isCurrent: () => boolean,
+	prepared: RemoteWindowCompactionInput,
 ): Promise<ScopedResponsesCompactInput> {
 	const windows = dependencies.contextWindows;
-	const prepared = windows.prepareRemoteCompaction(event, ctx);
 	const branch = ctx.sessionManager.getBranch();
 	const provenance = getRemoteV2InputProvenance(config.remoteV2ContextSource);
 	let checkpoint: NativeCompactionEntry | undefined;
@@ -521,7 +526,7 @@ async function prepareActiveRemoteCompaction(
 	// Current cache-stack state is authoritative; never borrow deferred metadata
 	// from an unrelated pre-window checkpoint. The canonical head proves which
 	// of those schemas are still live, including tools activated before rollover.
-	const activation = getLatestDeferredToolCarryover(branch) ?? checkpoint?.details?.deferredToolCarryover;
+	const activation = getLatestDeferredToolCarryover(branch.slice(prepared.windowBoundaryIndex)) ?? checkpoint?.details?.deferredToolCarryover;
 	const names = new Set(tools.map((tool) => tool.name));
 	const deferredToolCarryover = activation ? { ...activation, toolNames: activation.toolNames.filter((name) => names.has(name)) } : undefined;
 	return {
@@ -542,7 +547,7 @@ async function runResponsesNativeCompact(
 	projectCompactionContext: CompactionContextProjection | undefined,
 	/** Only ordinary compaction supplies this; managed recovery remains V2-only. */
 	standaloneCompact?: typeof executeNativeCompaction,
-	/** Active Remote manual input is strict/current-window-only and has no fallback. */
+	/** Window scope is independent of the ordinary producer/fallback policy. */
 	scopedInput?: ScopedResponsesCompactInput,
 ): Promise<ResponsesCompactOutcome> {
 	const { consumer, compactor } = execution;
@@ -704,7 +709,7 @@ async function runResponsesNativeCompact(
 			errorType: compactResult.errorType,
 			errorParam: compactResult.errorParam,
 			errorMessage: compactResult.errorMessage,
-			nextStep: tryStandalone ? "standalone-compact" : scopedInput ? "stop-and-preserve" : "native-summary",
+			nextStep: tryStandalone ? "standalone-compact" : "native-summary",
 		}, config, ctx);
 		if (tryStandalone && standaloneCompact) {
 			if (event.signal?.aborted) return { outcome: "aborted" };
@@ -942,68 +947,6 @@ async function runUnavailableContextCompaction(
 	return { cancel: true };
 }
 
-const ACTIVE_REMOTE_PREPARATION_REASONS = new Set([
-	"unsafe-compaction-window-boundary", "compaction-window-boundary-missing", "compaction-system-tool-head-lost",
-	"compaction-branch-changed", "compaction-source-projection-unavailable", "unverified-window-cleanup",
-	"compaction-owner-missing", "unsafe-compaction-retained-start", "compaction-owner-mismatch",
-	"compaction-continuity-unavailable", "compaction-operation-superseded", "compaction-tool-pair-mismatch",
-	"compaction-retained-context-mismatch", "compaction-wire-adaptation-failed", "compaction-boundary-not-found",
-	"first-kept-entry-not-found", "compaction-summary-not-found", "retained-context-mismatch", "unverified-compaction-input",
-	COMPACTION_CHECKPOINT_CONTEXT_EDITED, COMPACTION_CHECKPOINT_PROVENANCE_UNAVAILABLE,
-	COMPACTION_PROJECTED_CONTEXT_UNAVAILABLE, COMPACTION_PROJECTION_UNAVAILABLE, COMPACTION_SESSION_CONTEXT_UNAVAILABLE,
-]);
-
-async function runActiveRemoteManualCompact(
-	event: SessionBeforeCompactEvent,
-	ctx: ExtensionContext,
-	dependencies: CompactionDependencies,
-	resolved: ResolvedToolkitConfig,
-	operation: RemoteManualCompactOperation | undefined,
-): Promise<{ cancel: true } | { compaction: CompactionResult<NativeCompactionDetails> }> {
-	const lifecycle = dependencies.remoteManualCompact;
-	const config = resolved.config.compaction;
-	const stop = (reason: string): { cancel: true } => {
-		// No exception text, provider body, auth or opaque content crosses this boundary.
-		lifecycle.cancel(operation);
-		writeDebugArtifact("compaction-event", {
-			event: "session_before_compact.remote-window-manual-stopped", reason, nextStep: "stop-and-preserve",
-		}, config, ctx);
-		notifyWarning(ctx, `Remote /compact stopped (${reason}); existing context preserved. No summary fallback or automatic continuation was started.`);
-		return { cancel: true };
-	};
-	const isCurrent = () => !!operation && lifecycle.current(operation, ctx);
-	try {
-		if (!operation || dependencies.manualCompact?.busy || !isCurrent()) return stop("compaction-operation-superseded");
-		// Producer policy and auth are resolved once from the initiating document.
-		if (resolved.format === "v2" && config.remoteCompactModel) {
-			const spec = parseModelSpec(config.remoteCompactModel);
-			if (spec) {
-				const producerPolicy = resolveToolkitConfig(resolved.snapshot, { provider: spec.provider, id: spec.modelId });
-				notifyConfigIssues(ctx, producerPolicy);
-				if (producerPolicy.invalidFeatures.includes("compatibility")) return stop("invalid-producer-compatibility");
-			}
-		}
-		const resolution = await resolveRemoteCompactionExecution(ctx, {
-			enabled: config.enabled, responsesApis: config.responsesApis, codexGatewayModels: compactGatewayModels(resolved),
-		}, config.remoteCompactModel);
-		if (!isCurrent()) return stop("compaction-operation-superseded");
-		if (!resolution.ok) return stop(resolution.reason);
-		const scopedEvent = { ...event, signal: operation.signal };
-		const input = await prepareActiveRemoteCompaction(scopedEvent, ctx, config, resolution.execution, dependencies, isCurrent);
-		if (!isCurrent()) return stop("compaction-operation-superseded");
-		const outcome = await runResponsesNativeCompact(scopedEvent, ctx, config, resolution.execution,
-			dependencies.remoteCompact, dependencies.projectCompactionContext, undefined, input);
-		if (!isCurrent()) return stop("compaction-operation-superseded");
-		if (outcome.outcome !== "success") return stop(outcome.outcome === "unprojected-input" ? outcome.reason
-			: outcome.outcome === "failed" ? outcome.remoteFailure?.reason ?? "remote-compaction-failed" : "aborted");
-		const result = lifecycle.arm(operation, ctx, outcome.compaction);
-		return result ?? stop("compaction-operation-superseded");
-	} catch (error) {
-		return stop(error instanceof Error && ACTIVE_REMOTE_PREPARATION_REASONS.has(error.message)
-			? error.message : "remote-compaction-failed");
-	}
-}
-
 async function handleSessionBeforeCompact(
 	event: SessionBeforeCompactEvent,
 	ctx: ExtensionContext,
@@ -1046,84 +989,58 @@ async function handleSessionBeforeCompact(
 		return { cancel: true };
 	}
 
-	// Capture intent BEFORE capability/auth awaits so selection/navigation/work
-	// during resolution cannot silently become the owner of an older /compact.
-	let manualOperation: RemoteManualCompactOperation | undefined;
-	if (event.reason === "manual" && !dependencies.manualCompact?.isMaintenance && config.enabled && config.contextManagement === "remote") {
-		try { manualOperation = dependencies.remoteManualCompact.begin(event, ctx, resolved); } catch { /* active route stops below */ }
+	// A rollover trim is owned maintenance, not user /compact.
+	if (dependencies.manualCompact?.isMaintenance) return dependencies.contextWindows.prepareCompaction(event);
+
+	// Preserve the existing automatic Remote Windows protocol. Manual operations
+	// select their engine by current policy, never by persisted marker ownership.
+	if (event.reason !== "manual" && config.enabled && config.contextManagement === "remote") {
+		const contextModel = await resolveContextCapabilityModel(ctx);
+		if (isCodexContextModel(contextModel, config)) {
+			if (await remoteContextActive(ctx, config, contextModel)) return dependencies.contextWindows.prepareCompaction(event);
+			return runUnavailableContextCompaction(event, ctx, dependencies, resolved, config, getContextToolRegistrationState());
+		}
 	}
 
-	// Active and inactive covered Codex consumers retain their existing routing.
-	const contextModel = config.enabled && config.contextManagement === "remote"
-		? await resolveContextCapabilityModel(ctx)
-		: undefined;
-	if (manualOperation && !dependencies.remoteManualCompact.current(manualOperation, ctx)) {
-		dependencies.remoteManualCompact.cancel(manualOperation);
-		return { cancel: true };
+	const isCurrent = dependencies.isCurrentCompaction ?? (() => !event.signal.aborted);
+	let scope: RemoteWindowCompactionInput | undefined;
+	if (dependencies.contextWindows.currentIdentity()) {
+		scope = dependencies.contextWindows.prepareRemoteCompaction(event, ctx);
+		requireCompleteCompactionToolPairs(scope.messages);
+		event = prepareScopedNativeCompaction(event, scope);
+		const keptIndex = event.branchEntries.findIndex((entry) => entry.id === event.preparation.firstKeptEntryId);
+		scope = { ...scope, firstKeptEntryId: event.preparation.firstKeptEntryId,
+			retainedMessages: scope.entries.filter((entry) => entry.sourceEntry.type !== "compaction"
+				&& event.branchEntries.findIndex((raw) => raw.id === entry.sourceEntry.id) >= keptIndex)
+				.flatMap((entry) => entry.messages) };
+		if (!isCurrent()) return { cancel: true };
 	}
-	if (isCodexContextModel(contextModel, config)) {
-		const active = await remoteContextActive(ctx, config, contextModel);
-		// New work may make a formerly active runtime look unavailable. That is
-		// supersession, not permission to start the inactive-runtime fallback.
-		if (manualOperation && !dependencies.remoteManualCompact.current(manualOperation, ctx)) {
-			dependencies.remoteManualCompact.cancel(manualOperation);
+	const nativeScopeSafe = () => {
+		if (scope && !event.preparation.messagesToSummarize.length && !event.preparation.turnPrefixMessages.length && !event.preparation.previousSummary) {
+			notifyWarning(ctx, "Current window has no eligible native summary span; context preserved.");
+			return false;
+		}
+		const owner = scope?.owningCompaction;
+		if (!owner) return true;
+		const opaque = owner.summary === NATIVE_COMPACTION_FALLBACK_SUMMARY || owner.summary === STANDALONE_COMPACTION_FALLBACK_SUMMARY
+			|| (isRecord(owner.details) && (owner.details.strategy === REMOTE_V2_COMPACTION_STRATEGY || owner.details.strategy === LEGACY_NATIVE_COMPACTION_STRATEGY));
+		if (!opaque) return true;
+		// Pi's text summarizer cannot interpret a Toolkit encrypted checkpoint.
+		// Replacing it with a summary of its sentinel would silently lose history.
+		notifyWarning(ctx, "Native compression cannot merge the current encrypted checkpoint; context preserved.");
+		return false;
+	};
+	const nativeDefault = async () => {
+		if (!scope) return undefined;
+		if (!nativeScopeSafe()) return { cancel: true };
+		const result = await dependencies.nativeFallback({ ctx, event, config, scoped: true, useCurrentModel: true, isCurrent });
+		if (!isCurrent() || !result.ok) {
+			if (!result.ok) notifyWarning(ctx, `Current-window native compression stopped (${result.reason}); context preserved.`);
 			return { cancel: true };
 		}
-		if (active) {
-			try {
-				if (event.reason === "manual" && !dependencies.manualCompact?.isMaintenance) {
-					return await runActiveRemoteManualCompact(event, ctx, dependencies, resolved, manualOperation);
-				}
-				return dependencies.contextWindows.prepareCompaction(event);
-			} catch {
-				notifyRemoteContextFailure(ctx, "malformed-window-state");
-				return { cancel: true };
-			}
-		}
-
-		dependencies.remoteManualCompact.cancel(manualOperation);
-		const registrationState = getContextToolRegistrationState();
-		const failureReason = contextManagementFailureReason(registrationState);
-		if (failureReason !== "context-tools-excluded") {
-			notifyRemoteContextFailure(ctx, failureReason);
-		}
-		return runUnavailableContextCompaction(
-			event,
-			ctx,
-			dependencies,
-			resolved,
-			config,
-			registrationState,
-		);
-	}
-
-	dependencies.remoteManualCompact.cancel(manualOperation);
-	try {
-		const detached = dependencies.contextWindows.prepareDetachedCompaction(event);
-		// A local consumer cannot summarize history owned by a Remote window,
-		// even after switching modes or disabling Toolkit compaction.
-		if (detached) return detached;
-		// A boundary already persisted by an earlier detach still owns this session.
-		// Retired Remote history is outside Pi's effective projection at that point, so
-		// ordinary compaction may continue; record why it no longer detaches.
-		const ownedIdentity = dependencies.contextWindows.currentIdentity();
-		if (ownedIdentity) {
-			writeDebugArtifact(
-				"compaction-event",
-				{
-					event: "session_before_compact.detached-already-owned",
-					windowId: ownedIdentity.currentWindowId,
-					superseded: dependencies.contextWindows.hasSupersededWindow(),
-				},
-				config,
-				ctx,
-			);
-		}
-	} catch {
-		notifyRemoteContextFailure(ctx, "malformed-window-state");
-		return { cancel: true };
-	}
-	if (!config.enabled) return undefined;
+		return { compaction: result.result };
+	};
+	if (!config.enabled || resolved.policy.context.mode !== "remote-compaction") return nativeDefault();
 
 	// Resolve producer protocol policy from this operation's document, not a later disk read.
 	if (resolved.format === "v2" && config.remoteCompactModel) {
@@ -1145,7 +1062,9 @@ async function handleSessionBeforeCompact(
 		},
 		config.remoteCompactModel,
 	);
+	if (scope && !isCurrent()) return { cancel: true };
 	if (resolution.ok) {
+		const scopedInput = scope ? await prepareScopedResponsesCompaction(event, ctx, config, resolution.execution, dependencies, isCurrent, scope) : undefined;
 		remoteAttempted = true;
 		const responsesOutcome = await runResponsesNativeCompact(
 			event,
@@ -1155,6 +1074,7 @@ async function handleSessionBeforeCompact(
 			dependencies.remoteCompact,
 			dependencies.projectCompactionContext,
 			dependencies.standaloneCompact,
+			scopedInput,
 		);
 		if (responsesOutcome.outcome === "success") {
 			return { compaction: responsesOutcome.compaction };
@@ -1232,7 +1152,9 @@ async function handleSessionBeforeCompact(
 	// Branch 2: run pi's native compaction method. A failed remote request is compacted by the
 	// remote producer itself; a model that cannot use remote v2 at all uses nativeFallback.model.
 	const fallbackModelSpec = remoteAttempted ? config.remoteCompactModel : config.nativeFallback.model;
-	const fallback = await dependencies.nativeFallback({ ctx, event, config, modelSpec: fallbackModelSpec });
+	if (scope && !nativeScopeSafe()) return { cancel: true };
+	const fallback = await dependencies.nativeFallback({ ctx, event, config, modelSpec: fallbackModelSpec, ...(scope ? { scoped: true, isCurrent } : {}) });
+	if (scope && !isCurrent()) return { cancel: true };
 	if (fallback.ok) {
 		if (ctx.hasUI) {
 			ctx.ui.notify(
@@ -1283,8 +1205,9 @@ async function handleSessionBeforeCompact(
 		return { cancel: true };
 	}
 
-	// Branch 3: pi's default native compaction with the current model.
-	return undefined;
+	// An unscoped undefined handoff would reopen archived windows. A scoped
+	// current-model selection uses the public native primitive instead.
+	return nativeDefault();
 }
 
 function rejectInheritedCheckpointReplay(
@@ -1321,6 +1244,11 @@ async function handleContextInternal(
 		return undefined;
 	}
 
+	// A synthetic compression projection is read-only in EVERY mode. The
+	// caller performs the sole retained-copy match after all ordered hooks;
+	// ordinary replay here would remove the same copies a second time.
+	if (contextWindows.isPreparingCompaction) return { messages: contextWindows.projectCompactionContext(event.messages) };
+
 	let localMessages: AgentMessage[] | undefined;
 	let remoteReplayProjection = false;
 	// Disabled and intentionally downgraded runtimes never enter opaque replay,
@@ -1335,11 +1263,6 @@ async function handleContextInternal(
 				// The latter still contains retired remote windows and can be inflated by
 				// an upstream error even though this request only carries the live window.
 				let projected = contextWindows.project(event.messages, "remote", false);
-				if (contextWindows.isPreparingCompaction) {
-					// Synthetic preparation is read-only. The caller owns the one strict
-					// retained-copy match, then encrypted wire adaptation after all hooks.
-					return { messages: projected };
-				}
 				// Projection may observe the exact queued rollover before Pi persists
 				// it. Decide replay ownership from this request, not the old branch.
 				const ownsWindow = contextWindows.hasEffectiveWindow() || !contextWindows.currentIdentity();
@@ -1710,8 +1633,9 @@ export default function registerCompactionExtension(
 	const contextWindows = overrides.contextWindows ?? new CodexContextWindowManager((ctx, signal, gatewayModels) =>
 		loadHistoryNotesThreadHint(ctx, signal, gatewayModels)
 	);
-	const manualCompact = new ManagedManualCompact(pi, contextWindows);
-	const remoteManualCompact = new RemoteManualCompact(pi, contextWindows);
+	const manualCompact = new ManagedManualCompact(pi);
+	let compactionGeneration = 0;
+	const invalidateCompaction = () => { compactionGeneration++; };
 	const dependencies: CompactionDependencies = {
 		remoteCompact: executeRemoteV2Compaction,
 		standaloneCompact: executeNativeCompaction,
@@ -1719,8 +1643,7 @@ export default function registerCompactionExtension(
 		contextWindows,
 		...overrides,
 		manualCompact,
-		remoteManualCompact,
-		loadConfig: () => remoteManualCompact.snapshot ?? manualCompact.snapshot ?? loadConfig(),
+		loadConfig,
 		piContextHookPatch: overrides.piContextHookPatch ?? piContextHookPatch,
 	};
 	let tools!: ReturnType<typeof registerContextManagementTools>;
@@ -1779,7 +1702,7 @@ export default function registerCompactionExtension(
 		}
 	};
 	pi.on("session_start", async (_event, ctx) => {
-		remoteManualCompact.invalidate();
+		invalidateCompaction();
 		const resolved = contextOperation(dependencies.loadConfig, ctx);
 		const syncOutcome = await syncTools(ctx, ctx.model, { notifyWindowFailure: true }, resolved);
 		await manualCompact.recover(ctx);
@@ -1850,9 +1773,26 @@ export default function registerCompactionExtension(
 		return handleContext(event, ctx, pi, dependencies.loadConfig, contextWindows, remoteContextActive, getContextToolRegistrationState);
 	});
 	pi.on("session_before_compact", async (event, ctx) => {
-		remoteManualCompact.invalidate();
+		invalidateCompaction();
+		const generation = compactionGeneration;
+		const branch = structuredClone(event.branchEntries);
+		const sessionId = getSessionId(ctx);
+		const model = ctx.model ? { ...ctx.model } : undefined;
+		const thinking = ctx.thinkingLevel;
+		const isCurrent = () => generation === compactionGeneration && !event.signal.aborted
+			&& getSessionId(ctx) === sessionId && isDeepStrictEqual(branch, ctx.sessionManager.getBranch())
+			&& isDeepStrictEqual(model, ctx.model)
+			&& thinking === ctx.thinkingLevel
+			&& !(event.reason === "manual" && typeof ctx.hasPendingMessages === "function" && ctx.hasPendingMessages());
 		try {
-			return await handleSessionBeforeCompact(event, ctx, dependencies, remoteContextActive, getContextToolRegistrationState);
+			const result = await handleSessionBeforeCompact(event, ctx, { ...dependencies, isCurrentCompaction: isCurrent }, remoteContextActive, getContextToolRegistrationState);
+			if (contextWindows.currentIdentity() && !manualCompact.isMaintenance && result && "compaction" in result && result.compaction
+				&& result.compaction.summary !== CONTEXT_WINDOW_COMPACTION_SUMMARY) {
+				// Pi consumes this after every later before-compact observer. Reject
+				// stale work then, without broad aborts that can drain host queues.
+				return { compaction: result.compaction, get cancel() { return !isCurrent(); } };
+			}
+			return result;
 		} catch {
 			// Pi treats a rejected hook as absent and can invoke its implicit summary.
 			// Unexpected preparation/service failures must never authorize that work.
@@ -1862,15 +1802,11 @@ export default function registerCompactionExtension(
 	});
 	pi.on("session_compact", (event, ctx) => {
 		contextWindows.synchronize(ctx);
-		if (event.reason === "manual" && event.fromExtension) remoteManualCompact.persisted(ctx);
-		else remoteManualCompact.invalidate();
+		invalidateCompaction();
 	});
-	pi.on("session_compact_failed", async (event, ctx) => {
-		remoteManualCompact.invalidate();
-		if (event.reason === "manual" && !manualCompact.isMaintenance) await manualCompact.compactFailed(ctx);
-	});
+	pi.on("session_compact_failed", invalidateCompaction);
 	pi.on("session_shutdown", async (_event, ctx) => {
-		remoteManualCompact.invalidate();
+		invalidateCompaction();
 		await manualCompact.shutdown(ctx);
 		contextWindowReady = false;
 		contextWindows.reset();
@@ -1882,7 +1818,7 @@ export default function registerCompactionExtension(
 		await manualCompact.settled(ctx);
 	});
 	pi.on("model_select", async (event, ctx) => {
-		remoteManualCompact.invalidate();
+		invalidateCompaction();
 		manualCompact.modelSelected(event.model, ctx);
 		// Switching into a covered model mid-session must open the window
 		// lifecycle immediately: without an identity the request rewrite skips
@@ -1893,29 +1829,26 @@ export default function registerCompactionExtension(
 		await syncTools(ctx, event.model, { notifyWindowFailure: true }, resolved);
 	});
 	pi.on("before_agent_start", async (_event, ctx) => {
-		remoteManualCompact.invalidate();
+		invalidateCompaction();
 		await syncTools(ctx, ctx.model, { notifyWindowFailure: true });
 	});
-	pi.on("agent_start", () => remoteManualCompact.invalidate());
-	pi.on("input", () => { remoteManualCompact.invalidate(); });
+	pi.on("agent_start", () => invalidateCompaction());
+	pi.on("input", () => { invalidateCompaction(); });
 	pi.on("thinking_level_select", (event, ctx) => {
-		remoteManualCompact.invalidate();
+		invalidateCompaction();
 		manualCompact.thinkingSelected(event.level, ctx);
 	});
-	pi.on("message_start", (event) => {
-		remoteManualCompact.invalidate();
-		manualCompact.messageStarted(event.message);
-	});
+	pi.on("message_start", invalidateCompaction);
 	pi.on("turn_end", (_event, ctx) => manualCompact.turnEnded(ctx));
 	pi.on("tool_call", (event) => {
-		remoteManualCompact.invalidate();
+		invalidateCompaction();
 		return manualCompact.guardTool(event.toolName);
 	});
-	pi.on("session_before_switch", () => remoteManualCompact.invalidate());
-	pi.on("session_before_fork", () => remoteManualCompact.invalidate());
-	pi.on("session_before_tree", () => remoteManualCompact.invalidate());
+	pi.on("session_before_switch", () => invalidateCompaction());
+	pi.on("session_before_fork", () => invalidateCompaction());
+	pi.on("session_before_tree", () => invalidateCompaction());
 	pi.on("session_tree", async (_event, ctx) => {
-		remoteManualCompact.invalidate();
+		invalidateCompaction();
 		contextWindows.synchronize(ctx);
 		await manualCompact.recover(ctx);
 		await syncTools(ctx);

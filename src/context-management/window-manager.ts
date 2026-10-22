@@ -12,6 +12,7 @@ import {
 	type ExtensionContext,
 	type SessionBeforeCompactEvent,
 	type SessionEntry,
+	type ProjectedSessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { ContextWindowBudget, type ContextRemaining } from "./window-budget";
 import {
@@ -70,6 +71,8 @@ type WindowBoundaryEntry = Extract<SessionEntry, { type: "custom_message" }> & {
 /** Canonical input and real source anchors for one read-only manual compression. */
 export type RemoteWindowCompactionInput = {
 	messages: AgentMessage[];
+	/** Verified canonical source contributions within this window, including edits. */
+	entries: ProjectedSessionEntry[];
 	firstKeptEntryId: string;
 	/** Only a newer compaction can own this window; pre-window checkpoints are retired. */
 	owningCompaction?: Extract<SessionEntry, { type: "compaction" }>;
@@ -339,7 +342,9 @@ export class CodexContextWindowManager {
 		const windowBoundaryIndex = branch.findIndex((entry) => entry.id === this.boundaryEntryId());
 		if (windowBoundaryIndex < 0) throw new Error("compaction-window-boundary-missing");
 		const latest = [...branch].reverse().find((entry) => entry.type === "compaction");
-		if (this.boundary.kind === "effective" && this.boundary.cleaned) {
+		if (latest?.type === "compaction" && branch.findIndex((entry) => entry.id === latest.id) > windowBoundaryIndex
+			&& (isContextWindowCompactionDetails(latest.details) || latest.summary === CONTEXT_WINDOW_COMPACTION_SUMMARY)) {
+			// A malformed cleanup cannot masquerade as a new native/text owner.
 			// Details alone do not turn an arbitrary summary into Toolkit cleanup.
 			if (!latest || latest.type !== "compaction" || latest.fromHook !== true
 				|| latest.summary !== CONTEXT_WINDOW_COMPACTION_SUMMARY
@@ -360,6 +365,8 @@ export class CodexContextWindowManager {
 		const retainedIds = new Set(branch.slice(keptIndex).map((entry) => entry.id));
 		return {
 			messages: this.projectCompactionContext(structuredClone(projection.messages)),
+			entries: structuredClone(projection.entries.filter((entry) =>
+				branch.findIndex((raw) => raw.id === entry.sourceEntry.id) >= windowBoundaryIndex)),
 			firstKeptEntryId,
 			owningCompaction,
 			retainedMessages: structuredClone(projection.entries.filter((entry) => retainedIds.has(entry.sourceEntry.id)

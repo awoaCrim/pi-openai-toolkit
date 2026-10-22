@@ -102,6 +102,47 @@ describe("native summary model selection", () => {
 	}
 });
 
+describe("scoped current-model native wiring", () => {
+	test("current-model policy ignores Toolkit fallback enable/spec and binds the public registry transport", async () => {
+		const f = fixture();
+		Object.assign(f.ctx, { thinkingLevel: "high" });
+		let streamOwner: unknown;
+		const publicStream = {};
+		Object.assign(f.ctx.modelRegistry, { streamSimple: function(this: unknown) { streamOwner = this; return publicStream; } });
+		f.ctx.modelRegistry.getApiKeyAndHeaders = async (model) => {
+			f.authCalls.push(model);
+			return { ok: true, apiKey: "scoped-key", baseUrl: "https://resolved-native.invalid/v1", headers: { "x-keep": "2", "x-delete": null }, env: { E: "scoped" } };
+		};
+		f.args.config.nativeFallback.enabled = false;
+		expect((await runNativeFallbackCompaction({ ...f.args, modelSpec: "test/missing", scoped: true, useCurrentModel: true })).ok).toBe(true);
+		expect(f.authCalls).toEqual([currentModel]);
+		const call = f.compactCalls[0];
+		expect(call[1]).toEqual({ ...currentModel, baseUrl: "https://resolved-native.invalid/v1" });
+		expect(call[2]).toBe("scoped-key");
+		expect(call[3]).toEqual({ "x-keep": "2" });
+		expect(call[6]).toBe("high");
+		expect(call[8]).toEqual({ E: "scoped" });
+		expect((call[7] as () => unknown)()).toBe(publicStream);
+		expect(streamOwner).toBe(f.ctx.modelRegistry);
+		expect(f.ctx.model).toBe(currentModel);
+	});
+
+	test("missing public scoped transport fails closed instead of choosing a compat-only default", async () => {
+		const f = fixture();
+		const { compactFn: _compact, ...args } = f.args;
+		expect(await runNativeFallbackCompaction({ ...args, scoped: true, useCurrentModel: true })).toEqual({ ok: false, reason: "public-runtime-unavailable", modelSpec: "test/deepseek" });
+		expect(f.authCalls).toEqual([]);
+	});
+
+	test("a stale scoped selection after awaited auth never starts native inference", async () => {
+		const f = fixture();
+		let current = true;
+		f.ctx.modelRegistry.getApiKeyAndHeaders = async () => { current = false; return { ok: true, apiKey: "key" }; };
+		expect(await runNativeFallbackCompaction({ ...f.args, scoped: true, isCurrent: () => current })).toEqual({ ok: false, reason: "aborted", modelSpec: "test/luna" });
+		expect(f.compactCalls).toEqual([]);
+	});
+});
+
 describe("native summary failure reporting", () => {
 	for (const throws of [false, true]) {
 		test(`reports auth failure (${throws ? "throw" : "result"}) without running compact`, async () => {
