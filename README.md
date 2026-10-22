@@ -1,6 +1,6 @@
 # pi-openai-toolkit
 
-Remote context windows, Responses compaction, web search, and image generation for Pi. Uses Pi's existing models, endpoints, authentication, and sessions without registering another provider or model.
+Responses compaction, web search, and image generation for Pi. Uses Pi's existing models, endpoints, authentication, and sessions without registering another provider or model.
 
 [![npm version](https://img.shields.io/npm/v/pi-openai-toolkit.svg)](https://www.npmjs.com/package/pi-openai-toolkit)
 [![MIT](https://img.shields.io/npm/l/pi-openai-toolkit.svg)](LICENSE)
@@ -47,30 +47,19 @@ Settings resolve in this order: built-in defaults → `defaults` → `models["pr
 Set `defaults.context.mode` or an individual model's `context.mode`:
 
 - `remote-compaction`: the default; continue with encrypted checkpoints returned by the server
-- `remote-windows`: use Codex remote context windows, retrieve earlier work with `history`, and save handoff notes with `notes`
 - `pi`: leave context management to Pi
 
 **Remote compaction** accepts `openai-responses`, `openai-codex-responses`, and `azure-openai-responses`. It tries V2 first. On the official OpenAI API-key route, a qualifying protocol failure can trigger one standalone `/v1/responses/compact` request; its complete encrypted replacement window is preserved for replay. OpenAI OAuth, native Codex, Azure, and gateways keep their existing V2 route. OpenAI subscription-sharing OAuth and native Codex login are separate grants, not interchangeable credentials. Backend/model access is still required.
 
-Set `context.remoteCompaction.model` to use a separate producer on the same effective base URL without changing the active model. For ordinary remote compaction, exhausted remote attempts warn before continuing with a native text summary. `nativeFallback.enabled: false` disables only Toolkit's configured-model tier, not Pi's default summary. Aborts, incompatible provenance, and edits to sealed history still cancel rather than bypassing checkpoint safety. See [context settings](docs/configuration.md#context) and [checkpoint rules](docs/internals.md#remote-compaction-v2-wire-contract).
+Set `context.remoteCompaction.model` to use a separate producer on the same effective base URL without changing the active model. When its full `provider/model-id` matches the current model, Toolkit directly reuses the current runtime, authentication snapshot, and session; it does not select the model again or switch to native summarization merely because the models match. For ordinary remote compaction, exhausted remote attempts warn before continuing with a native text summary. `nativeFallback.enabled: false` disables only Toolkit's configured-model tier, not Pi's default summary. Aborts, incompatible provenance, and edits to sealed history still cancel rather than bypassing checkpoint safety. See [context settings](docs/configuration.md#context) and [checkpoint rules](docs/internals.md#remote-compaction-v2-wire-contract).
 
-**Remote windows** require the native `openai-codex` provider with `openai-codex-responses`, or an `openai-responses` gateway implementing the protocol. Gateways require `compatibility.transport: "codex-gateway"` on the exact model entry. This setting does not add the capability to an ordinary compatible endpoint.
-
-Change `mode` in the example above to `remote-windows`. Eligible sessions expose `new_context`, `get_context_remaining`, `history`, and `notes`. Manual `/compact [instructions]` uses Pi's native text compression of **only the current window**. It does not use the Toolkit remote producer or configured fallback, switch the active model, open another window, or send an automatic continuation. `remote-compaction` is the mode that selects Toolkit's remote/fallback compression chain.
-
-An existing effective window boundary survives model changes and switches to `remote-compaction` or `pi`: retired history stays outside live requests and every compaction tier. Historical boundaries constrain input; they cannot replace a requested compression with no-summary cleanup. Window identity is preserved for switching back. An unsafe current-window view cancels rather than reopening archived windows. The legacy `leaveManagedMode` setting remains compatible but does not trigger bulk close-out compaction.
-
-Native text compression cannot read an existing encrypted checkpoint. If that checkpoint owns the current context, native compression/fallback cancels and preserves it instead of summarizing its placeholder and losing information. Compatible remote compression can still reuse it.
-
-Raw history remains in the local Pi session JSONL; remote `history`/`notes` are separate backend APIs. Window markers alone are not native Pi cutoffs, so request-time isolation requires the extension to be loaded. An old session already ending in a no-summary cleanup may report `Already compacted` before any extension hook; continue with a genuine user message before retrying. Toolkit does not rewrite those logs or bypass Pi's eligibility checks.
-
-Remote windows use alpha endpoints that may change upstream. When switching models, the remote window remains persisted and reusable; see the [window lifecycle](docs/internals.md#rollover-lifecycle).
+**Remote Windows has been removed**, including its four tools and model-selection recovery. Old window sessions are not continuable: Toolkit refuses branches containing their markers instead of resending retired history. Start a new session; existing files are not rewritten or deleted. Dormant window settings are ignored with a warning, but a selected `remote-windows` mode must be changed explicitly. See [retirement guidance](docs/configuration.md#removed-remote-windows). Shared Codex gateway transport remains available to compaction and images.
 
 ## Codex Fast
 
 Fast is OFF by default. Run `/fast` in Pi's terminal or a UI-backed RPC client such as pi-web to turn it ON, then run it again to turn it OFF. Notifications confirm changes; the status is `Fast ON`, `Fast OFF`, or `Fast N/A` for an ineligible route, with display placement controlled by the client. Print/JSON and headless commands cannot toggle Fast. No Fast configuration is needed.
 
-Supports native Codex and recognizable GPT/Codex models on compatible Responses gateways. The selection is saved only in the current session: reload/resume and `new_context` retain it; new or forked sessions start OFF. ON requests Fast, while OFF requests Standard, overriding an existing service-tier preference on eligible conversation requests without changing reasoning effort or configuration files.
+Supports native Codex and recognizable GPT/Codex models on compatible Responses gateways. The selection is saved only in the current session: reload/resume retain it; new or forked sessions start OFF. ON requests Fast, while OFF requests Standard, overriding an existing service-tier preference on eligible conversation requests without changing reasoning effort or configuration files.
 
 Fast may increase usage/cost. The indicator shows the requested mode, not confirmed backend acceleration; a gateway may reject, ignore, or downgrade it. Opaque gateway model aliases need an existing Codex gateway identity. See the [Fast contract](docs/internals.md#codex-fast-session-control) for scope and lifecycle details.
 

@@ -1,15 +1,21 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ResolvedToolkitConfig } from "../config";
-import { RETIRED_AUTO_MODE_ISSUE, RETIRED_AUTO_MODE_MESSAGE, type ConfigIssue } from "./policy";
+import {
+	RETIRED_AUTO_MODE_ISSUE, RETIRED_AUTO_MODE_MESSAGE,
+	RETIRED_REMOTE_WINDOWS_ISSUE, RETIRED_REMOTE_WINDOWS_MODE_ISSUE,
+	RETIRED_REMOTE_WINDOWS_CONFIG_MESSAGE, RETIRED_REMOTE_WINDOWS_MODE_MESSAGE,
+	type ConfigIssue,
+} from "./policy";
 import { redactValue } from "../debug";
 
 const lastNotice = new WeakMap<object, string>();
 
 /** Controlled human text for a known code; never built from user-supplied configuration values. */
 function issueExplanation(issue: ConfigIssue): string {
-	return issue.code === RETIRED_AUTO_MODE_ISSUE
-		? RETIRED_AUTO_MODE_MESSAGE
-		: issue.code;
+	if (issue.code === RETIRED_AUTO_MODE_ISSUE) return RETIRED_AUTO_MODE_MESSAGE;
+	if (issue.code === RETIRED_REMOTE_WINDOWS_ISSUE) return RETIRED_REMOTE_WINDOWS_CONFIG_MESSAGE;
+	if (issue.code === RETIRED_REMOTE_WINDOWS_MODE_ISSUE) return RETIRED_REMOTE_WINDOWS_MODE_MESSAGE;
+	return issue.code;
 }
 
 export function formatConfigIssues(issues: readonly ConfigIssue[], limit = 12): string {

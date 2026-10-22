@@ -74,7 +74,6 @@ type HookHarnessOptions = {
 	config?: Partial<CompactionConfig>;
 	nativeFallbackResult?: Record<string, unknown>;
 	disableCompactionProjection?: boolean;
-	contextToolsPublished?: boolean;
 };
 
 const defaultModel: TestModel = {
@@ -359,7 +358,6 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 	contextHook: HookHandler;
 	sessionBeforeCompact: HookHandler;
 	beforeProviderRequest: HookHandler;
-	beforeProviderHeaders: HookHandler;
 	compactCalls: Array<Record<string, unknown>>;
 	fallbackCalls: Array<Record<string, unknown>>;
 	abortCalls: { count: number };
@@ -379,7 +377,7 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 		registerTool: (tool: Record<string, unknown>) => {
 			registeredTools.push(tool);
 		},
-		getAllTools: () => options.contextToolsPublished === false ? [] : registeredTools,
+		getAllTools: () => registeredTools,
 		getActiveTools: () => [...activeTools],
 		setActiveTools: (names: string[]) => {
 			activeTools = [...names];
@@ -425,40 +423,15 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 			? undefined
 			: (messages) => messages,
 	});
-	// Pi owns scheduling. Active manual Remote compression uses public lifecycle
-	// hooks to fence newer work and resumes only after exact persistence and idle;
-	// ordinary compaction still supplies/replays results without scheduler patches.
-	expect([...handlers.keys()]).toEqual([
-		"session_start",
-		"context_with_system",
-		"session_before_compact",
-		"session_compact",
-		"session_compact_failed",
-		"session_shutdown",
-		"agent_settled",
-		"model_select",
-		"before_agent_start",
-		"agent_start",
-		"input",
-		"thinking_level_select",
-		"message_start",
-		"turn_end",
-		"tool_call",
-		"session_before_switch",
-		"session_before_fork",
-		"session_before_tree",
-		"session_tree",
-		"before_provider_request",
-		"before_provider_headers",
-		"message_end",
-	]);
+	// Pi owns scheduling; ordinary compaction/replay no longer registers window tools.
+	for (const name of ["session_start", "context_with_system", "session_before_compact", "before_provider_request", "message_end"]) expect(handlers.has(name)).toBe(true);
+	expect(registeredTools).toEqual([]);
 
 	const sessionStart = handlers.get("session_start");
 	const contextHook = handlers.get("context_with_system");
 	const sessionBeforeCompact = handlers.get("session_before_compact");
 	const beforeProviderRequest = handlers.get("before_provider_request");
-	const beforeProviderHeaders = handlers.get("before_provider_headers");
-	if (!sessionStart || !contextHook || !sessionBeforeCompact || !beforeProviderRequest || !beforeProviderHeaders) {
+	if (!sessionStart || !contextHook || !sessionBeforeCompact || !beforeProviderRequest) {
 		throw new Error("Expected pi-openai-toolkit compaction hooks to register");
 	}
 
@@ -475,7 +448,6 @@ async function loadHookHarness(options: HookHarnessOptions = {}): Promise<{
 			}, ctx);
 		},
 		beforeProviderRequest,
-		beforeProviderHeaders,
 		compactCalls,
 		fallbackCalls,
 		abortCalls,
@@ -591,7 +563,7 @@ for (const failure of ["disabled", "no-model-configured", "same-as-current-model
 			preparation: { firstKeptEntryId: "keep", tokensBefore: 100, messagesToSummarize: [], turnPrefixMessages: [] } },
 			createContext({ model: { ...defaultModel, api: "openai-completions" }, notifications }));
 		if (failure === "aborted") expect(result).toEqual({ cancel: true });
-		else expect(result).toBeUndefined();
+		else expect(result).toEqual({ cancel: false });
 		expect(compactCalls).toHaveLength(0);
 		expect(notifications).toEqual([]);
 	});
@@ -642,7 +614,7 @@ test("suppresses the expected active-consumer unsupported-api warning and keeps 
 		},
 	} as never, createContext({ model: consumer, notifications }));
 
-	expect(result).toBeUndefined();
+	expect(result).toEqual({ cancel: false });
 	expect(compactCalls).toHaveLength(0);
 	expect(fallbackCalls).toHaveLength(1);
 	expect(fallbackCalls[0]?.modelSpec).toBe("google/gemini-2.5-flash");
@@ -672,7 +644,7 @@ test("retains the actionable warning when an explicit producer override is reach
 		},
 	} as never, createContext({ notifications }));
 
-	expect(result).toBeUndefined();
+	expect(result).toEqual({ cancel: false });
 	expect(compactCalls).toHaveLength(0);
 	expect(fallbackCalls).toHaveLength(1);
 	expect(fallbackCalls[0]?.modelSpec).toBe("google/gemini-2.5-flash");
@@ -711,7 +683,7 @@ test("retains the producer warning when a resolved producer uses an unsupported 
 		},
 	} as never, createContext({ registryModels: [producer], notifications }));
 
-	expect(result).toBeUndefined();
+	expect(result).toEqual({ cancel: false });
 	expect(compactCalls).toHaveLength(0);
 	expect(fallbackCalls).toHaveLength(1);
 	expect(fallbackCalls[0]?.modelSpec).toBe("google/gemini-2.5-flash");
@@ -720,7 +692,7 @@ test("retains the producer warning when a resolved producer uses an unsupported 
 	)).toBe(true);
 });
 
-test("unavailable Context Management uses the configured remote compactor", async () => {
+test("ordinary remote compaction does not depend on retired context tools", async () => {
 	const consumer = {
 		...defaultModel,
 		provider: "gateway",
@@ -729,9 +701,7 @@ test("unavailable Context Management uses the configured remote compactor", asyn
 	};
 	const compactor = { ...consumer, id: "gpt-5.6-luna" };
 	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
-		contextToolsPublished: false,
 		config: {
-			contextManagement: "remote",
 			gatewayContextModels: ["gateway/gpt-5.6-sol"],
 			remoteCompactModel: "gateway/gpt-5.6-luna",
 			nativeFallback: { enabled: true, model: "google/gemini-2.5-flash", thinkingLevel: "off" },
@@ -766,7 +736,7 @@ test("unavailable Context Management uses the configured remote compactor", asyn
 	}));
 });
 
-test("unavailable Context Management uses only the explicit native fallback after Remote V2 fails", async () => {
+test("ordinary remote failure uses the producer even without context tools", async () => {
 	const consumer = {
 		...defaultModel,
 		provider: "gateway",
@@ -781,9 +751,7 @@ test("unavailable Context Management uses only the explicit native fallback afte
 		details: { readFiles: [], modifiedFiles: [] },
 	};
 	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
-		contextToolsPublished: false,
 		config: {
-			contextManagement: "remote",
 			gatewayContextModels: ["gateway/gpt-5.6-sol"],
 			remoteCompactModel: "gateway/gpt-5.6-luna",
 			nativeFallback: { enabled: true, model: "google/gemini-2.5-flash", thinkingLevel: "off" },
@@ -792,7 +760,7 @@ test("unavailable Context Management uses only the explicit native fallback afte
 		nativeFallbackResult: {
 			ok: true,
 			result: fallbackResult,
-			model: { provider: "google", id: "gemini-2.5-flash" },
+			model: { provider: "gateway", id: "gpt-5.6-luna" },
 		},
 	});
 	const user = createUserEntry("context-fallback-native", "Use only the explicit native fallback.");
@@ -815,22 +783,21 @@ test("unavailable Context Management uses only the explicit native fallback afte
 
 	expect(compactCalls).toHaveLength(1);
 	expect(fallbackCalls).toHaveLength(1);
-	expect(fallbackCalls[0]).toMatchObject({ modelSpec: "google/gemini-2.5-flash" });
+	expect(fallbackCalls[0]).toMatchObject({ modelSpec: "gateway/gpt-5.6-luna" });
 	expect(result.compaction).toEqual(fallbackResult);
 });
 
-test("unavailable Context Management never falls through to the active-model compaction path", async () => {
+test("remote-ineligible explicit native fallback failure never reroutes to the current model", async () => {
 	const consumer = {
 		...defaultModel,
 		provider: "gateway",
+		api: "openai-completions",
 		id: "gpt-5.6-sol",
 		baseUrl: "https://gateway.example/v1",
 	};
 	const user = createUserEntry("context-fallback-cancel", "Do not use the active model implicitly.");
 	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({
-		contextToolsPublished: false,
 		config: {
-			contextManagement: "remote",
 			gatewayContextModels: ["gateway/gpt-5.6-sol"],
 			nativeFallback: { enabled: true, model: "google/gemini-2.5-flash", thinkingLevel: "off" },
 		},
@@ -1100,55 +1067,20 @@ test("recursive remote compaction cancels when raw live tail contains custom con
 	expect(fallbackCalls).toHaveLength(0);
 });
 
-test("gateway Remote Context headers preserve session affinity and strip inherited credentials", async () => {
-	const { sessionStart, beforeProviderHeaders } = await loadHookHarness({
-		config: {
-			contextManagement: "remote",
-			gatewayContextModels: ["uwoacrimson/gpt-6-astra"],
-		},
-	});
-	const gatewayModel: TestModel = {
-		...defaultModel,
-		provider: "uwoacrimson",
-		api: "openai-responses",
-		id: "gpt-6-astra",
-		baseUrl: "https://newapi.example/v1",
-	};
-	const ctx = createContext({ model: gatewayModel });
-	await sessionStart({ type: "session_start" }, ctx);
-
-	const headers: Record<string, string | null> = {
-		authorization: "Bearer stale",
-		cookie: "stale",
-		"chatgpt-account-id": "stale",
-		"x-api-key": "stale",
-		"x-management-key": "stale",
-		traceparent: "stale",
-		"session-id": "stale",
-		"x-client-request-id": "stale",
-	};
-	await beforeProviderHeaders({ type: "before_provider_headers", headers }, ctx);
-
-	expect(headers.authorization).toBe("Bearer sk-test-gpt-6-astra");
-	expect(headers["session-id"]).toBe("session-validation");
-	expect(headers["x-client-request-id"]).toBe("session-validation");
-	expect(headers["x-codex-affinity-scope"]).toBe("codex-session-v1");
-	expect(headers["x-codex-model"]).toBe("gpt-6-astra");
-	expect(headers.cookie).toBeUndefined();
-	expect(headers["chatgpt-account-id"]).toBeUndefined();
-	expect(headers["x-api-key"]).toBeUndefined();
-	expect(headers["x-management-key"]).toBeUndefined();
-	expect(headers.traceparent).toBeUndefined();
-
-	// The managed live hook must not inject the Toolkit's own client version, and
-	// must not delete or overwrite a version the caller supplied.
-	const explicitVersion: Record<string, string | null> = { version: "0.154.0" };
-	await beforeProviderHeaders({ type: "before_provider_headers", headers: explicitVersion }, ctx);
-	expect(explicitVersion.version).toBe("0.154.0");
-
-	const noVersion: Record<string, string | null> = {};
-	await beforeProviderHeaders({ type: "before_provider_headers", headers: noVersion }, ctx);
-	expect(noVersion.version).toBeUndefined();
+test("an explicit same-model remote producer compacts in the existing session without registry reselection", async () => {
+	const { sessionBeforeCompact, compactCalls, fallbackCalls } = await loadHookHarness({ config: { remoteCompactModel: defaultModel.provider + "/" + defaultModel.id } });
+	const user = createUserEntry("same-model-user", "Preserve the existing conversation.");
+	let authCalls = 0;
+	const ctx = createContext({ branchEntries: [user], resolveAuth: () => { authCalls++; return { ok: true, apiKey: "synthetic-current-key" }; } });
+	ctx.modelRegistry.find = () => { throw new Error("same model must not be selected again"); };
+	const originalModel = ctx.model;
+	const result = await sessionBeforeCompact({ reason: "manual", signal: new AbortController().signal,
+		preparation: { firstKeptEntryId: user.id, tokensBefore: 512, messagesToSummarize: [toReplayMessage(user)], turnPrefixMessages: [] } }, ctx) as { compaction: { details: Record<string, unknown> } };
+	expect(compactCalls).toHaveLength(1); expect(fallbackCalls).toHaveLength(0); expect(authCalls).toBe(1);
+	expect(compactCalls[0].runtime).toMatchObject({ model: defaultModel.id, sessionId: "session-validation", apiKey: "synthetic-current-key" });
+	expect(result.compaction.details).toMatchObject({ strategy: "openai-remote-compaction-v2", model: defaultModel.id, compactionModel: { provider: defaultModel.provider, model: defaultModel.id } });
+	expect(ctx.model).toBe(originalModel);
+	expect(ctx.sessionManager.getBranch()).toEqual(linkBranch([user]));
 });
 
 test("manual /compact preserves tool/result ordering + assistant phases and persists the native window", async () => {
@@ -1458,7 +1390,7 @@ test("session_before_compact falls through to the configured-model fallback when
 		}),
 	);
 
-	expect(result).toBeUndefined();
+	expect(result).toEqual({ cancel: false });
 	expect(compactCalls).toHaveLength(0);
 	// Responses compact declined (non-native latest entry) → configured-model fallback is consulted.
 	expect(fallbackCalls).toHaveLength(1);
@@ -1970,7 +1902,7 @@ test("a different latest endpoint blocks remote compaction and replay without se
 		createContext({ branchEntries, model: unsupportedProviderModel, systemPrompt: matchingPayload.instructions }),
 	);
 
-	expect(compactResult).toBeUndefined();
+	expect(compactResult).toEqual({ cancel: false });
 	expect(compactCalls).toHaveLength(0);
 	expect(mismatchedLatestResult).toBeUndefined();
 	expect(unsupportedProviderResult).toBeUndefined();
@@ -2138,7 +2070,7 @@ test("a failed remote v2 request without an override keeps the active model", as
 	expect(compactCalls).toHaveLength(1);
 	expect(fallbackCalls).toHaveLength(1);
 	expect(fallbackCalls[0]).toMatchObject({ modelSpec: undefined });
-	expect(result).toBeUndefined();
+	expect(result).toEqual({ cancel: false });
 });
 
 test("nativeFallback disabled leaves a successful remote v2 compaction intact", async () => {
@@ -2228,7 +2160,7 @@ test("nativeFallback disabled sends a failed remote v2 straight to Pi's default 
 	expect((compactCalls[0] as { runtime: { model: string } }).runtime.model).toBe(luna.id);
 	expect(fallbackCalls).toHaveLength(1);
 	expect(fallbackCalls[0]).toMatchObject({ modelSpec: "openai/gpt-5.6-luna" });
-	expect(result).toBeUndefined();
+	expect(result).toEqual({ cancel: false });
 });
 
 test("non-Responses model routes straight to the native-method fallback", async () => {
@@ -2559,7 +2491,7 @@ test("an unusable explicit remote override enters native fallback without retryi
 		createContext({ model: sol, sessionContextMessages: [toReplayMessage(user)] }),
 	);
 
-	expect(result).toBeUndefined();
+	expect(result).toEqual({ cancel: false });
 	expect(compactCalls).toHaveLength(0);
 	expect(fallbackCalls).toHaveLength(1);
 });

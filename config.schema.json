@@ -63,8 +63,7 @@
         "mode": {
           "enum": [
             "pi",
-            "remote-compaction",
-            "remote-windows"
+            "remote-compaction"
           ]
         },
         "remoteCompaction": {
@@ -74,7 +73,7 @@
           "$ref": "#/$defs/nativeFallback"
         },
         "remoteWindows": {
-          "$ref": "#/$defs/remoteWindows"
+          "$ref": "#/$defs/retiredRemoteWindows"
         }
       }
     },
@@ -122,22 +121,9 @@
         }
       }
     },
-    "remoteWindows": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "leaveManagedMode": {
-          "enum": [
-            "warn",
-            "compact"
-          ]
-        },
-        "reminderThresholdPercent": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 100
-        }
-      }
+    "retiredRemoteWindows": {
+      "deprecated": true,
+      "description": "Remote Windows has been removed. This opaque ancillary value is ignored with a warning; remove it from your configuration. Selecting the removed mode blocks context operations until pi or remote-compaction is explicitly selected."
     },
     "webSearch": {
       "type": "object",

@@ -1,7 +1,6 @@
 import {
 	DEFAULT_COMPACTION_CONFIG,
 	DEFAULT_IMAGE_GENERATION_MODEL,
-	type LeaveManagedModePolicy,
 	type NativeFallbackConfig,
 	type RemoteV2ContextSource,
 } from "../types";
@@ -18,7 +17,7 @@ export type DiagnosticsConfig = {
 	artifactRoot: string;
 };
 export type ContextPolicy = {
-	mode: "pi" | "remote-compaction" | "remote-windows";
+	mode: "pi" | "remote-compaction";
 	remoteCompaction: {
 		model: string | null;
 		inputSource: RemoteV2ContextSource;
@@ -26,10 +25,6 @@ export type ContextPolicy = {
 		apis: string[];
 	};
 	nativeFallback: Omit<NativeFallbackConfig, "model"> & { model: string | null };
-	remoteWindows: {
-		leaveManagedMode: LeaveManagedModePolicy;
-		reminderThresholdPercent: number;
-	};
 };
 export type EffectiveToolkitPolicy = {
 	context: ContextPolicy;
@@ -61,6 +56,14 @@ export const RETIRED_AUTO_MODE_ISSUE = "retired.autoMode" as const;
 /** Controlled explanation of the retirement; never contains user-supplied values. */
 export const RETIRED_AUTO_MODE_MESSAGE =
 	"Auto Mode has been removed; these settings are ignored and tool calls are no longer reviewed by it.";
+/** Opaque ancillary settings are warning-only; explicitly selected retired modes block context. */
+export const RETIRED_REMOTE_WINDOWS_ISSUE = "retired.remoteWindows" as const;
+export const RETIRED_REMOTE_WINDOWS_MODE_ISSUE = "retired.remoteWindows.mode" as const;
+export const RETIRED_REMOTE_WINDOWS_CONFIG_MESSAGE =
+	"Remote Windows has been removed; these settings are ignored. No window behavior or automatic migration is available.";
+export const RETIRED_REMOTE_WINDOWS_MODE_MESSAGE =
+	"Remote Windows has been removed. Context operations are blocked until you explicitly select pi or remote-compaction. No replacement mode was activated.";
+
 export type ResolvedToolkitPolicy = {
 	policy: EffectiveToolkitPolicy;
 	origins: Record<string, ConfigOrigin>;
@@ -91,10 +94,6 @@ export function createPolicyDefaults(): EffectiveToolkitPolicy {
 				apis: [...context.responsesApis],
 			},
 			nativeFallback: { ...context.nativeFallback, model: null },
-			remoteWindows: {
-				leaveManagedMode: context.leaveManagedMode,
-				reminderThresholdPercent: context.contextReminderThresholdPercent,
-			},
 		},
 		webSearch: { route: "unmanaged" },
 		imageGeneration: {

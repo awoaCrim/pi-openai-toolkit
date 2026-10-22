@@ -60,6 +60,8 @@ import {
 import {
 	CONFIG_FEATURES,
 	RETIRED_AUTO_MODE_ISSUE,
+	RETIRED_REMOTE_WINDOWS_ISSUE,
+	RETIRED_REMOTE_WINDOWS_MODE_ISSUE,
 	createPolicyDefaults,
 	type ConfigFeature,
 	type ConfigIssue,
@@ -100,9 +102,8 @@ export const V2_ISSUE = {
 	imageDefaultNotAllowed: "imageGeneration.defaultModel.notAllowed",
 } as const;
 
-const CONTEXT_MODES = ["pi", "remote-compaction", "remote-windows"] as const;
+const CONTEXT_MODES = ["pi", "remote-compaction"] as const;
 const INPUT_SOURCES = ["legacy", "pi-context-hook"] as const;
-const LEAVE_MANAGED_MODES = ["warn", "compact"] as const;
 const SEARCH_ROUTES = ["unmanaged", "local", "hosted", "standalone-alpha"] as const;
 const TRANSPORTS = ["standard", "codex-gateway"] as const;
 const DIAGNOSTIC_LEVELS = ["error", "warn", "info", "debug"] as const;
@@ -116,7 +117,6 @@ const MODEL_OVERRIDE_KEYS = new Set(["context", "webSearch", "autoMode", "compat
 const CONTEXT_KEYS = new Set(["mode", "remoteCompaction", "nativeFallback", "remoteWindows"]);
 const REMOTE_COMPACTION_KEYS = new Set(["model", "inputSource", "allowContinuityBreak", "apis"]);
 const NATIVE_FALLBACK_KEYS = new Set(["enabled", "model", "thinkingLevel"]);
-const REMOTE_WINDOWS_KEYS = new Set(["leaveManagedMode", "reminderThresholdPercent"]);
 const WEB_SEARCH_KEYS = new Set(["route"]);
 const IMAGE_GENERATION_KEYS = new Set(["enabled", "defaultModel", "allowedModels"]);
 const RESPONSES_WEBSOCKET_KEYS = new Set(["enabled"]);
@@ -165,8 +165,6 @@ const POLICY_LEAVES: readonly { leaf: string; feature: ConfigFeature }[] = [
 	{ leaf: "context.nativeFallback.enabled", feature: "context" },
 	{ leaf: "context.nativeFallback.model", feature: "context" },
 	{ leaf: "context.nativeFallback.thinkingLevel", feature: "context" },
-	{ leaf: "context.remoteWindows.leaveManagedMode", feature: "context" },
-	{ leaf: "context.remoteWindows.reminderThresholdPercent", feature: "context" },
 	{ leaf: "webSearch.route", feature: "webSearch" },
 	{ leaf: "imageGeneration.enabled", feature: "imageGeneration" },
 	{ leaf: "imageGeneration.defaultModel", feature: "imageGeneration" },
@@ -410,16 +408,6 @@ function readEnum<T extends string>(allowed: readonly T[], value: unknown): Read
 	return { ok: false, code: V2_ISSUE.expectedEnum };
 }
 
-function readInteger(value: unknown, min: number, max: number): ReadResult<number> {
-	if (typeof value !== "number") {
-		return { ok: false, code: typeCode(value, V2_ISSUE.expectedInteger) };
-	}
-	if (!Number.isInteger(value) || value < min || value > max) {
-		return { ok: false, code: V2_ISSUE.range };
-	}
-	return { ok: true, value };
-}
-
 function readThinkingLevel(value: unknown): ReadResult<ThinkingLevel> {
 	return readEnum(THINKING_LEVELS, value);
 }
@@ -548,7 +536,9 @@ function applyContextSettings(
 		{ key: "mode", leaf: "context.mode", feature: "context" },
 		scope,
 		state,
-		(value) => readEnum(CONTEXT_MODES, value),
+		(value) => typeof value === "string" && value.trim() === "remote-windows"
+			? { ok: false, code: RETIRED_REMOTE_WINDOWS_MODE_ISSUE }
+			: readEnum(CONTEXT_MODES, value),
 		(value) => {
 			state.policy.context.mode = value;
 		},
@@ -560,8 +550,12 @@ function applyContextSettings(
 	const nativeFallback = openGroup(raw, "nativeFallback", scope, state, "context");
 	if (nativeFallback) applyNativeFallbackSettings(nativeFallback.raw, nativeFallback.scope, state);
 
-	const remoteWindows = openGroup(raw, "remoteWindows", scope, state, "context");
-	if (remoteWindows) applyRemoteWindowsSettings(remoteWindows.raw, remoteWindows.scope, state);
+	// Retired ancillary data is opaque, even when malformed. Never validate
+	// children, create origins or invalidate otherwise valid context policy.
+	if (Object.hasOwn(raw, "remoteWindows")) state.issues.push(withModel(scope, {
+		severity: "warning", code: RETIRED_REMOTE_WINDOWS_ISSUE,
+		path: joinPath(scope.input, "remoteWindows"), feature: "context",
+	}));
 }
 
 function applyRemoteCompactionSettings(
@@ -688,39 +682,6 @@ function applyNativeFallbackSettings(
 		readThinkingLevel,
 		(value) => {
 			state.policy.context.nativeFallback.thinkingLevel = value;
-		},
-	);
-}
-
-function applyRemoteWindowsSettings(
-	raw: Record<string, unknown>,
-	scope: Scope,
-	state: ResolutionState,
-): void {
-	reportUnknownKeys(raw, REMOTE_WINDOWS_KEYS, scope, state, "context");
-
-	applyField(
-		raw,
-		{ key: "leaveManagedMode", leaf: "context.remoteWindows.leaveManagedMode", feature: "context" },
-		scope,
-		state,
-		(value) => readEnum(LEAVE_MANAGED_MODES, value),
-		(value) => {
-			state.policy.context.remoteWindows.leaveManagedMode = value;
-		},
-	);
-	applyField(
-		raw,
-		{
-			key: "reminderThresholdPercent",
-			leaf: "context.remoteWindows.reminderThresholdPercent",
-			feature: "context",
-		},
-		scope,
-		state,
-		(value) => readInteger(value, 0, 100),
-		(value) => {
-			state.policy.context.remoteWindows.reminderThresholdPercent = value;
 		},
 	);
 }

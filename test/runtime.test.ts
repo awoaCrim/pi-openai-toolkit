@@ -315,33 +315,63 @@ describe("resolveNativeCompactionEnvironment", () => {
 		}
 	});
 
-	test("accepts an explicit override that resolves to the active model", async () => {
-		const sol = {
-			provider: "uwoacrimson",
-			api: "openai-responses",
-			id: "gpt-5.6-sol",
-			baseUrl: "https://gateway.example/v1",
-		};
-		const resolution = await resolveRemoteCompactionExecution(
-			{
+	for (const spec of ["uwoacrimson/gpt-5.6-sol", "  uwoacrimson / gpt-5.6-sol  "]) {
+		test("explicit same-model producer reuses current auth/session without registry selection: " + spec, async () => {
+			const sol = Object.freeze({ provider: "uwoacrimson", api: "openai-responses", id: "gpt-5.6-sol", baseUrl: "https://configured.example/v1" });
+			let authCalls = 0;
+			const resolution = await resolveRemoteCompactionExecution({
 				model: sol,
+				sessionManager: { getSessionId: () => "same-model-session" },
 				modelRegistry: {
-					find: () => sol,
-					async getApiKeyAndHeaders() {
-						return { ok: true, apiKey: "sk-sol" };
+					find: () => { throw new Error("same-model producer must not be selected again"); },
+					getApiKeyAndHeaders: async (selected: unknown) => {
+						expect(selected).toBe(sol); authCalls++;
+						return { ok: true, apiKey: "synthetic-key", baseUrl: "https://effective.example/v1/", headers: { "x-auth-snapshot": "current" } };
 					},
 				},
-			} as any,
-			{},
-			"uwoacrimson/gpt-5.6-sol",
-		);
-
-		expect(resolution.ok).toBe(true);
-		if (resolution.ok) {
-			expect(resolution.execution.consumer.model).toBe(sol.id);
-			expect(resolution.execution.compactor.model).toBe(sol.id);
+			} as never, {}, spec);
+			expect(resolution.ok).toBe(true);
+			expect(authCalls).toBe(1);
+			if (!resolution.ok) return;
+			expect(resolution.execution.compactor).toBe(resolution.execution.consumer);
 			expect(resolution.execution.compactor.currentModel).toBe(sol);
-		}
+			expect(resolution.execution.compactor.sessionId).toBe("same-model-session");
+			expect(resolution.execution.compactor.baseUrl).toBe("https://effective.example/v1");
+			expect(resolution.execution.compactor.headers).toEqual({ "x-auth-snapshot": "current" });
+		});
+	}
+
+	for (const spec of ["virtual/router", "physical/actual-model"]) {
+		test("same current virtual/physical producer resolves the route and auth once: " + spec, async () => {
+			const virtual = { provider: "virtual", api: "pi-virtual", id: "router" };
+			const physical = { provider: "physical", api: "openai-responses", id: "actual-model", baseUrl: "https://gateway.example/v1" };
+			let routes = 0;
+			let authCalls = 0;
+			const resolution = await resolveRemoteCompactionExecution({ model: virtual,
+				sessionManager: { getSessionId: () => "virtual-current", buildSessionProjection: () => ({ messages: [] }) },
+				modelRegistry: {
+					find: () => { throw new Error("producer registry lookup is redundant"); },
+					runtime: { resolveModel: async () => { routes++; return { model: physical }; }, getPhysicalModel: () => physical },
+					getApiKeyAndHeaders: async (selected: unknown) => { expect(selected).toBe(physical); authCalls++; return { ok: true, apiKey: "synthetic-key" }; },
+				},
+			} as never, {}, spec);
+			expect(resolution.ok).toBe(true);
+			expect(routes).toBe(1); expect(authCalls).toBe(1);
+			if (resolution.ok) { expect(resolution.execution.compactor).toBe(resolution.execution.consumer); expect(resolution.execution.compactor.currentModel).toBe(physical); }
+		});
+	}
+
+	test("same model ID at a different provider still resolves the explicit producer", async () => {
+		const consumer = { provider: "consumer", api: "openai-responses", id: "shared-id", baseUrl: "https://gateway.example/v1" };
+		const producer = { ...consumer, provider: "producer" };
+		let lookups = 0;
+		const authModels: unknown[] = [];
+		const resolution = await resolveRemoteCompactionExecution({ model: consumer, modelRegistry: {
+			find: (provider: string, id: string) => { expect([provider, id]).toEqual(["producer", "shared-id"]); lookups++; return producer; },
+			getApiKeyAndHeaders: async (model: unknown) => { authModels.push(model); return { ok: true, apiKey: "synthetic-key" }; },
+		} } as never, {}, "producer/shared-id");
+		expect(resolution.ok).toBe(true); expect(lookups).toBe(1); expect(authModels).toEqual([consumer, producer]);
+		if (resolution.ok) { expect(resolution.execution.compactor).not.toBe(resolution.execution.consumer); expect(resolution.execution.compactor.provider).toBe("producer"); }
 	});
 
 	test("resolves the override model, auth headers, metadata, and effective base URL", async () => {

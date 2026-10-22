@@ -167,7 +167,7 @@ for (const options of [{ oauth: true }, { oauth: "unknown" }, { configured: fals
 	test(`ineligible auth/endpoint keeps one V2 attempt: ${JSON.stringify(options)}`, async () => {
 		const harness = hookHarness(options); let calls = 0;
 		globalThis.fetch = (async () => { calls++; return protocolFailure(); }) as typeof fetch;
-		expect(await harness.run()).toBeUndefined(); expect(calls).toBe(1); expect(harness.fallbackCalls).toHaveLength(1); expect(harness.notifications.filter((message) => message.includes("No encrypted remote checkpoint"))).toHaveLength(1);
+		expect(await harness.run()).toEqual({ cancel: false }); expect(calls).toBe(1); expect(harness.fallbackCalls).toHaveLength(1); expect(harness.notifications.filter((message) => message.includes("No encrypted remote checkpoint"))).toHaveLength(1);
 	});
 }
 
@@ -177,7 +177,7 @@ for (const fixture of [
 ]) test(`excluded V2 failure never probes standalone: ${JSON.stringify(fixture)}`, async () => {
 	const harness = hookHarness(); let calls = 0;
 	globalThis.fetch = (async () => { calls++; if (!fixture.status) throw new Error("secret URL"); return Response.json({ error: { code: fixture.code, message: "raw-secret" } }, { status: fixture.status }); }) as typeof fetch;
-	expect(await harness.run()).toBeUndefined(); expect(calls).toBe(1); expect(harness.fallbackCalls).toHaveLength(1);
+	expect(await harness.run()).toEqual({ cancel: false }); expect(calls).toBe(1); expect(harness.fallbackCalls).toHaveLength(1);
 	expect(harness.notifications.join()).not.toContain("raw-secret");
 });
 
@@ -192,7 +192,7 @@ for (const reason of ["manual", "threshold", "overflow"]) test(`${reason}: exhau
 test("headless exhausted attempts record a safe transition before Pi-default summary", async () => {
 	const harness = hookHarness({ hasUI: false }); let calls = 0;
 	globalThis.fetch = (async () => { calls++; return protocolFailure(); }) as typeof fetch;
-	expect(await harness.run()).toBeUndefined(); expect(calls).toBe(2); expect(harness.notifications).toHaveLength(0);
+	expect(await harness.run()).toEqual({ cancel: false }); expect(calls).toBe(2); expect(harness.notifications).toHaveLength(0);
 	const text = readdirSync(harness.root, { recursive: true }).filter((file) => typeof file === "string" && file.endsWith(".json")).map((file) => readFileSync(join(harness.root, String(file)), "utf8")).join("\n");
 	expect(text).toContain("remote-to-native-summary"); expect(text).toContain('"nextStep": "native-summary"'); expect(text).not.toContain("raw-secret");
 });

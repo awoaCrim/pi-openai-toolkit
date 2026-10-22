@@ -46,7 +46,7 @@ Known nested objects merge by field. Missing fields inherit, arrays replace inst
 
 A missing file uses independent built-in defaults. Invalid JSON, an unreadable file, missing/unsupported `schemaVersion` on a v2-shaped document, or mixed legacy/v2 fields are reported distinctly. Unknown v2 policy keys are errors in their owning scope. Invalid selected settings block dependent operations; they never silently pick a more permissive route. Errors in other models remain visible without replacing a valid current model's policy. A valid exact leaf may shadow an invalid default leaf, but cannot hide a malformed containing object or unknown field in that feature scope.
 
-Each public callback, tool execution, compaction, or config command uses an immutable snapshot across its awaited helpers. The next operation reads again. This does not make separate Pi headers, payload, and tool events one atomic transaction. Windows and results stay out of the config file.
+Each public callback, tool execution, compaction, or config command uses an immutable snapshot across its awaited helpers. The next operation reads again. This does not make separate Pi headers, payload, and tool events one atomic transaction. Session state and results stay out of the config file.
 
 ---
 
@@ -56,36 +56,24 @@ Place `context` under `defaults` or an exact `models` entry.
 
 | Relative field | Default | Contract |
 | --- | --- | --- |
-| `mode` | `"remote-compaction"` | `"pi"` delegates ordinary context management to Pi; `"remote-compaction"` uses the eligible Responses checkpoint path; `"remote-windows"` selects Codex windows where supported. |
-| `remoteCompaction.model` | `null` | Exact synthetic producer reference for `remote-compaction`, on the same effective base URL. `null` uses the active model; a separate producer never changes the active model. `remote-windows` user `/compact` uses Pi native compression instead. |
-| `remoteCompaction.inputSource` | `"legacy"` | `"legacy"` uses canonical session input without request-time context hooks; `"pi-context-hook"` opts into Pi's ordered context projection. An inherited window restricts either source to its current context. Checkpoint provenance must match. |
+| `mode` | `"remote-compaction"` | `"pi"` delegates ordinary context management to Pi; `"remote-compaction"` uses the eligible Responses checkpoint path. |
+| `remoteCompaction.model` | `null` | Exact synthetic producer reference on the same effective base URL. `null` uses the active model. An exact current `provider/model-id` reuses its runtime/auth/session directly without another producer selection; a separate producer never changes the selected session model. |
+| `remoteCompaction.inputSource` | `"legacy"` | `"legacy"` uses canonical session input without request-time context hooks; `"pi-context-hook"` opts into Pi's ordered context projection. Checkpoint provenance must match. |
 | `remoteCompaction.allowContinuityBreak` | `false` | Allow restarting from Pi context after a foreign compaction entry. It does not make malformed opaque checkpoints replayable. |
 | `remoteCompaction.apis` | `["openai-responses", "openai-codex-responses", "azure-openai-responses"]` | May narrow this set; `[]` permits no remote-compaction API. Azure uses Pi's resolved `AZURE_OPENAI_*` environment values for the `/openai/v1` Responses path, deployment mapping, and `api-version`; unsupported entries are errors. |
 | `nativeFallback.enabled` | `true` | Enable the existing native-method fallback tier. |
 | `nativeFallback.model` | `null` | Summary-model reference on the remote-ineligible path. Character-count estimates do not bypass it; resolution, auth or summary failure cancels compaction without retrying the active model. After a remote attempt fails, the existing producer-first selection is retained. Disabled/unset/same-model selections keep Pi's default path. |
 | `nativeFallback.thinkingLevel` | `"off"` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; actual model support still applies. |
-| `remoteWindows.leaveManagedMode` | `"warn"` | Legacy compatibility field. Both values preserve the same behavior: non-window models receive only the current local window, and no bulk close-out compaction is started for retired Remote Context history. |
-| `remoteWindows.reminderThresholdPercent` | `5` | Integer 0-100. `0` disables both the once-per-window reminder and exhausted-window fallback. |
 
 Ordinary remote compaction tries V2 first. One automatic standalone `/v1/responses/compact` attempt is available only for the official HTTPS OpenAI endpoint, an `openai-responses` physical producer, public Pi auth metadata explicitly indicating configured non-OAuth auth, and an outgoing Bearer header matching Pi's resolved key. Missing/unknown auth metadata, an unrelated Authorization override, Codex affinity, OAuth, Azure, and third-party gateways do not opt in. A protocol-compatible rejection or invalid successful V2 checkpoint can qualify; auth/subscription, quota/rate-limit, network, abort, and unrelated server failures do not. No protocol selector, credential switch, or capability cache is added; a selected standalone attempt may add latency/cost.
 
 Standalone success preserves the full canonical output window, including retained items, rather than treating retained assistant text as a summary. When actual remote attempts are exhausted, Toolkit warns that no encrypted checkpoint was produced and starts the existing native text-summary chain: the configured remote producer after a remote attempt, or `nativeFallback.model` when remote compaction is unavailable. `nativeFallback.enabled: false` disables only the configured-model tier; disabled/unset/same-model selections still permit Pi's default summary. Explicit summary-model failures and checkpoint-integrity failures cancel. OpenAI subscription-sharing OAuth can reject compaction; separately authenticating native Codex is a different route, not a way to reuse that grant. See the [wire contract](internals.md#remote-compaction-v2-wire-contract).
 
-Native Codex eligibility derives from the actual Pi provider/API. Gateways additionally need the exact transport opt-in below. An effective Remote Window boundary survives model and context-mode changes, including `remote-compaction`, `pi`, and legacy disabled/off settings. Retired history stays outside live requests and all compaction tiers without activating Remote tools for a non-window consumer. Historical boundaries constrain inputs; they do not choose a compression engine or replace requested compression with no-summary cleanup. Normal `new_context` retains its persisted-notes, duplicate and cooldown gates. See [Toolkit internals](internals.md).
+The effective mode determines `/compact [instructions]` policy. `remote-compaction` uses the same ordinary Remote V2, eligible standalone, configured native and Pi-default chain for manual, threshold and overflow compaction. `pi` keeps Pi's normal native policy for clean sessions. An exact same-model remote producer still uses Remote Compaction; equality is not a native-summary shortcut. Different providers with the same bare model ID remain distinct identities.
 
-The effective mode determines user `/compact [instructions]` policy:
+Manual success saves compressed output into the current session and waits for normal user continuation. Toolkit does not switch the selected model/thinking, create another session, synthesize a continuation, or consume/reorder host queues. Pi owns eligibility, scheduling and retry. Existing opaque checkpoints retain their provenance, context-edit, replay and recursive-compaction safety checks.
 
-- `remote-compaction`: Toolkit's ordinary Remote V2, eligible standalone, configured native and Pi-default chain. Manual, threshold and overflow compaction use this same policy, including immediately after leaving window mode.
-- `remote-windows`: Pi native text compression of **only the current window**. It does not invoke Toolkit's remote producer or configured fallback, write notes, switch models, call `new_context`, or send a post-compact continuation.
-- `pi`: native compression; any inherited effective window still limits the input to current context.
-
-Input isolation is independent of engine selection. Native compression may run through a scoped public adapter when Pi's original preparation includes archived windows. Missing/edited ownership or an unsafe system/tool head cancels; whole archived history is not a repair source. Compaction results use real visible source IDs, preserve context edits and complete tool pairs, and leave raw session entries unchanged. Owned rollover trim remains a separate maintenance operation, not a successful user compression.
-
-Scoped native compression uses Pi's public `compact()` and bound model-registry transport, preserving auth, provider environment and current thinking. Host-private custom stream/retry callbacks are not available through this adapter; sessions without a window keep Pi's original default path. An encrypted current owner cannot be converted into a text summary: native/default/fallback cancels and preserves that checkpoint rather than summarizing its placeholder. Compatible remote recursion remains eligible.
-
-Manual success saves actual compressed output and waits for normal user continuation; Toolkit does not consume or reorder host queues. Pi still owns automatic scheduling and retry. Its pre-hook “nothing to compact” and “already compacted” checks remain: a legacy session already ending at no-summary cleanup needs a genuine new user message before another attempt. Old notes-handoff records remain readable only for owned selection recovery, without retrying inference.
-
-Local history remains in Pi's session JSONL; `history` and `notes` call separate backend APIs. Window markers alone are not native Pi cutoffs, so request-time filtering cannot guarantee isolation if the extension never loads. Existing native-recognized compaction boundaries remain effective without that filter; Toolkit does not split/delete raw logs or modify the host to create stronger unload guarantees.
+Remote Windows and its compatibility execution chain have been removed. Any active branch carrying old window or manual-handoff evidence is refused before provider dispatch or compression, including in `pi` or disabled mode. This is not a transparent upgrade of old windows; start a new session. See [removed Remote Windows](#removed-remote-windows).
 
 ---
 
@@ -251,6 +239,16 @@ At the compaction and replay boundary, Toolkit applies the declared resize profi
 
 ---
 
+### Removed Remote Windows
+
+Remote Windows, `remote-windows` mode, `new_context`, `get_context_remaining`, `history`, `notes`, window metadata/reminders/rollover, and old manual model-selection recovery have been removed. No alpha history/notes/thread-hint requests or replacement handoff driver remain. Shared Codex gateway compatibility for ordinary compaction, images and other retained features is unchanged.
+
+Old window sessions are intentionally not continuable. Toolkit checks only the current branch for reserved window messages, cleanup strategies/sentinel, or old manual-compaction records, even if malformed or superseded by a later checkpoint. Such branches cannot send model requests or compact; start a new session. A clean branch before those records is not blocked by evidence on an abandoned sibling. Existing local/remote files are never deleted, rewritten, migrated or repaired automatically, and saved temporary selections are not restored. The extension must be loaded to enforce this boundary; removing it does not turn window markers into native Pi cutoffs.
+
+Dormant v2 `context.remoteWindows` and legacy `leaveManagedMode` / `contextReminderThresholdPercent` values are ignored as opaque retired settings with warnings, not effective policy. Remove them manually. Explicit `mode: "remote-windows"` or legacy `contextManagement: "remote"` is a context error, including after whitespace normalization: explicitly choose `pi` or `remote-compaction`. Toolkit does not silently substitute a potentially paid route. Migration previews flag removed behavior for manual review and do not write configuration or sessions.
+
+---
+
 ### Removed Auto Mode
 
 Auto Mode, `/auto`, and `--auto` have been removed. Toolkit no longer performs this feature's tool-call review, background classification, or review confirmations. No replacement approval gate is installed.
@@ -286,10 +284,10 @@ The preview maps recognized fields into a candidate, supplies leaf origins, list
 
 | Legacy input | v2 destination |
 | --- | --- |
-| `compaction.enabled` / `contextManagement` | `defaults.context.mode` |
+| `compaction.enabled` | `defaults.context.mode`; removed `contextManagement: "remote"` requires manual review, not automatic substitution |
 | `compaction.remoteCompactModel`, `remoteV2ContextSource`, `allowCompactionContinuityBreak`, `responsesApis` | `defaults.context.remoteCompaction` fields |
 | `compaction.nativeFallback` | `defaults.context.nativeFallback` |
-| `compaction.leaveManagedMode`, `contextReminderThresholdPercent` | `defaults.context.remoteWindows` fields |
+| `compaction.leaveManagedMode`, `contextReminderThresholdPercent` | Removed; omit with retirement guidance and manual review |
 | `compaction.gatewayContextModels` | Exact `models[key].compatibility.transport` |
 | `webSearch.defaultRoute`, `routes`, `models` | Default/exact search route candidates, subject to review below |
 | `imageGeneration.models` | `allowedModels` plus an explicit default taken from the legacy first entry |

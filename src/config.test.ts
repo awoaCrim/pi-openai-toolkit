@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { CONFIG_PATH, loadToolkitConfig } from "./config";
+import { CONFIG_PATH, loadToolkitConfig, resolveToolkitConfig } from "./config";
 import {
 	DEFAULT_COMPACTION_CONFIG,
 	DEFAULT_IMAGE_GENERATION_CONFIG,
@@ -42,8 +42,9 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.warnings).toEqual([]);
 		expect(loaded.config.compaction.enabled).toBe(true);
 		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(false);
-		expect(loaded.config.compaction.contextManagement).toBe("off");
-		expect(loaded.config.compaction.leaveManagedMode).toBe("warn");
+		expect(loaded.config.compaction).not.toHaveProperty("contextManagement");
+		expect(loaded.config.compaction).not.toHaveProperty("leaveManagedMode");
+		expect(loaded.config.compaction).not.toHaveProperty("contextReminderThresholdPercent");
 		expect(loaded.config.compaction.remoteCompactModel).toBeUndefined();
 		expect(loaded.config.compaction.remoteV2ContextSource).toBe("legacy");
 		expect(loaded.config.compaction.nativeFallback).toEqual({ ...DEFAULT_NATIVE_FALLBACK_CONFIG });
@@ -66,8 +67,6 @@ describe("loadToolkitConfig", () => {
 			JSON.stringify({
 				compaction: {
 					enabled: true,
-					contextManagement: "remote",
-					leaveManagedMode: " compact ",
 					allowCompactionContinuityBreak: true,
 					remoteCompactModel: " uwoacrimson/gpt-5.6-luna ",
 					remoteV2ContextSource: " legacy ",
@@ -98,8 +97,8 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.source).toBe(configPath);
 		expect(loaded.warnings).toEqual([]);
 		expect(loaded.config.compaction.allowCompactionContinuityBreak).toBe(true);
-		expect(loaded.config.compaction.contextManagement).toBe("remote");
-		expect(loaded.config.compaction.leaveManagedMode).toBe("compact");
+		expect(loaded.config.compaction).not.toHaveProperty("contextManagement");
+		expect(loaded.config.compaction).not.toHaveProperty("leaveManagedMode");
 		expect(loaded.config.compaction).not.toHaveProperty("codexGatewayModels");
 		expect(loaded.config.compaction.remoteCompactModel).toBe("uwoacrimson/gpt-5.6-luna");
 		expect(loaded.config.compaction.remoteV2ContextSource).toBe("legacy");
@@ -116,7 +115,7 @@ describe("loadToolkitConfig", () => {
 		]);
 		expect(loaded.config.compaction.debug).toBe(true);
 		expect(loaded.config.compaction.notifyOnLoad).toBe(true);
-		expect(loaded.config.compaction.contextReminderThresholdPercent).toBe(5);
+		expect(loaded.config.compaction).not.toHaveProperty("contextReminderThresholdPercent");
 		expect(loaded.config.compaction.artifactRoot).toBe(path.join(os.homedir(), "artifacts/pot"));
 		expect(loaded.config.webSearch).toEqual({ enabled: false, models: ["provider/model"] });
 		expect(loaded.config.imageGeneration).toEqual({
@@ -141,35 +140,20 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.warnings).toContain("Ignoring codexAstra: unknown field.");
 	});
 
-	test("contextReminderThresholdPercent accepts 0-100 and ignores out-of-range", () => {
-		const configPath = writeTempConfig(
-			JSON.stringify({
-				compaction: { contextManagement: "remote", contextReminderThresholdPercent: 10 },
-			}),
-		);
-		const loaded = loadToolkitConfig(configPath);
-		expect(loaded.config.compaction.contextReminderThresholdPercent).toBe(10);
-		expect(loaded.warnings).toEqual([]);
-
-		const disabledPath = writeTempConfig(
-			JSON.stringify({
-				compaction: { contextManagement: "remote", contextReminderThresholdPercent: 0 },
-			}),
-		);
-		const disabled = loadToolkitConfig(disabledPath);
-		expect(disabled.config.compaction.contextReminderThresholdPercent).toBe(0);
-		expect(disabled.warnings).toEqual([]);
-
-		const invalidPath = writeTempConfig(
-			JSON.stringify({
-				compaction: { contextManagement: "remote", contextReminderThresholdPercent: 150 },
-			}),
-		);
-		const invalid = loadToolkitConfig(invalidPath);
-		expect(invalid.config.compaction.contextReminderThresholdPercent).toBe(5);
-		expect(invalid.warnings).toEqual([
-			"Ignoring compaction.contextReminderThresholdPercent: expected an integer between 0 and 100.",
-		]);
+	test("retired ancillary window settings are opaque warnings, never effective policy", () => {
+		for (const value of [0, 10, -1, 150, 0.5, null, { privateValue: "must-not-leak-window-setting" }]) {
+			const content = JSON.stringify({ compaction: { contextReminderThresholdPercent: value, leaveManagedMode: value, remoteCompactModel: "provider/producer" } });
+			const configPath = writeTempConfig(content);
+			const loaded = loadToolkitConfig(configPath);
+			const resolved = resolveToolkitConfig(loaded, { provider: "provider", id: "consumer" });
+			expect(resolved.invalidFeatures).toEqual([]);
+			expect(resolved.config.compaction).not.toHaveProperty("contextReminderThresholdPercent");
+			expect(resolved.config.compaction).not.toHaveProperty("leaveManagedMode");
+			expect(resolved.config.compaction.remoteCompactModel).toBe("provider/producer");
+			expect(resolved.issues.some((issue) => issue.severity === "warning")).toBe(true);
+			expect(JSON.stringify(resolved.issues)).not.toContain("must-not-leak-window-setting");
+			expect(fs.readFileSync(configPath, "utf8")).toBe(content);
+		}
 	});
 
 	test("null model specs preserve the default remote path and clear the fallback spec", () => {
@@ -334,31 +318,22 @@ describe("loadToolkitConfig", () => {
 		expect(loaded.config).not.toHaveProperty("autoMode");
 	});
 
-	test("contextManagement accepts only trimmed off/remote values and warns for local/tree/invalid values", () => {
+	test("selected legacy Remote Windows mode is rejected without enabling a replacement", () => {
 		const remotePath = writeTempConfig(JSON.stringify({ compaction: { contextManagement: " remote " } }));
-		expect(loadToolkitConfig(remotePath).config.compaction.contextManagement).toBe("remote");
-
-		const invalidPath = writeTempConfig(JSON.stringify({ compaction: { contextManagement: "local" } }));
-		const invalid = loadToolkitConfig(invalidPath);
-		expect(invalid.config.compaction.contextManagement).toBe("off");
-		expect(invalid.warnings).toEqual([
-			"Ignoring compaction.contextManagement: expected one of off, remote.",
-		]);
+		const resolved = resolveToolkitConfig(loadToolkitConfig(remotePath), { provider: "provider", id: "consumer" });
+		expect(resolved.invalidFeatures).toContain("context");
+		expect(resolved.invalidFeatures).not.toContain("webSearch");
+		expect(resolved.config.compaction).not.toHaveProperty("contextManagement");
 	});
 
-	test("leaveManagedMode accepts trimmed warn/compact values and defaults on garbage", () => {
-		const compactPath = writeTempConfig(JSON.stringify({ compaction: { leaveManagedMode: " compact " } }));
-		expect(loadToolkitConfig(compactPath).config.compaction.leaveManagedMode).toBe("compact");
-
-		const invalidPath = writeTempConfig(JSON.stringify({ compaction: { leaveManagedMode: "auto" } }));
-		const invalid = loadToolkitConfig(invalidPath);
-		expect(invalid.config.compaction.leaveManagedMode).toBe("warn");
-		expect(invalid.warnings).toEqual([
-			"Ignoring compaction.leaveManagedMode: expected one of warn, compact.",
-		]);
+	test("retired legacy off value grants no window capability", () => {
+		const configPath = writeTempConfig(JSON.stringify({ compaction: { contextManagement: " off " } }));
+		const resolved = resolveToolkitConfig(loadToolkitConfig(configPath), { provider: "provider", id: "consumer" });
+		expect(resolved.invalidFeatures).toEqual([]);
+		expect(resolved.config.compaction).not.toHaveProperty("contextManagement");
 	});
 
-	test("contextManagement does not rewrite the config file", () => {
+	test("retired context settings do not rewrite the config file", () => {
 		const content = JSON.stringify({ compaction: { contextManagement: "tree" } });
 		const configPath = writeTempConfig(content);
 		loadToolkitConfig(configPath);

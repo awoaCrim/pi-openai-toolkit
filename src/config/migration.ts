@@ -1,6 +1,11 @@
 import { resolveToolkitConfig } from "../config";
 import type { LoadedToolkitConfig } from "../types";
-import { RETIRED_AUTO_MODE_ISSUE, RETIRED_AUTO_MODE_MESSAGE, type ConfigOrigin } from "./policy";
+import {
+	RETIRED_AUTO_MODE_ISSUE, RETIRED_AUTO_MODE_MESSAGE,
+	RETIRED_REMOTE_WINDOWS_ISSUE, RETIRED_REMOTE_WINDOWS_MODE_ISSUE,
+	RETIRED_REMOTE_WINDOWS_CONFIG_MESSAGE, RETIRED_REMOTE_WINDOWS_MODE_MESSAGE,
+	type ConfigOrigin,
+} from "./policy";
 import { resolveV2Config } from "./v2";
 
 export type MigrationPreview = {
@@ -22,9 +27,13 @@ function modelRef(key: string): { provider: string; id: string; api: string } {
 /** Read-only analysis: never edits a source file or claims a lossy candidate is equivalent. */
 export function previewToolkitMigration(loaded: LoadedToolkitConfig): MigrationPreview {
 	if (loaded.document?.format === "v2") {
-		const retired = resolveToolkitConfig(loaded).issues.filter((issue) => issue.code === RETIRED_AUTO_MODE_ISSUE);
-		return { status: "already-v2", reasons: ["The document already uses schemaVersion 2.",
-			...(retired.length ? [RETIRED_AUTO_MODE_MESSAGE] : [])], unmappedPaths: retired.map((issue) => issue.path) };
+		const retired = resolveToolkitConfig(loaded).issues.filter((issue) =>
+			[RETIRED_AUTO_MODE_ISSUE, RETIRED_REMOTE_WINDOWS_ISSUE, RETIRED_REMOTE_WINDOWS_MODE_ISSUE].some((code) => code === issue.code));
+		const removedMode = retired.some((issue) => issue.code === RETIRED_REMOTE_WINDOWS_MODE_ISSUE);
+		return { status: removedMode ? "needs-review" : "already-v2", reasons: ["The document already uses schemaVersion 2.",
+			...(retired.some((issue) => issue.code === RETIRED_AUTO_MODE_ISSUE) ? [RETIRED_AUTO_MODE_MESSAGE] : []),
+			...(retired.some((issue) => issue.code === RETIRED_REMOTE_WINDOWS_ISSUE) ? [RETIRED_REMOTE_WINDOWS_CONFIG_MESSAGE] : []),
+			...(removedMode ? [RETIRED_REMOTE_WINDOWS_MODE_MESSAGE] : [])], unmappedPaths: retired.map((issue) => issue.path) };
 	}
 	if (loaded.document?.format === "invalid" || loaded.document?.format === "missing") {
 		return { status: "unavailable", reasons: ["A readable legacy document is required; no candidate was produced."], unmappedPaths: [] };
@@ -83,11 +92,14 @@ export function previewToolkitMigration(loaded: LoadedToolkitConfig): MigrationP
 		legacy.webSearch.models.some((key) => Object.hasOwn(legacy.webSearch.routes ?? {}, key)))) {
 		unmappedPaths.add("webSearch.models");
 	}
-	if (!legacy.compaction.enabled && legacy.compaction.contextManagement === "remote") {
-		reasons.push("Disabled legacy context management retains a dormant remote mode; the candidate selects Pi ownership.");
+	if (baseline.issues.some((issue) => issue.code === RETIRED_REMOTE_WINDOWS_MODE_ISSUE)) {
+		reasons.push(`${RETIRED_REMOTE_WINDOWS_MODE_MESSAGE} The preview uses Pi ownership only as a safe review placeholder; it is not behavior-equivalent. Choose a supported mode explicitly before any manual apply.`);
 		unmappedPaths.add("compaction.contextManagement");
 	}
-	// Gateway affinity was previously context-mode gated for compaction, and not used by image.
+	if (baseline.issues.some((issue) => issue.code === RETIRED_REMOTE_WINDOWS_ISSUE)) {
+		reasons.push(`${RETIRED_REMOTE_WINDOWS_CONFIG_MESSAGE} No retired ancillary settings were migrated; review their removal.`);
+	}
+	// Gateway affinity is shared across retained compaction and image features.
 	if (legacy.compaction.gatewayContextModels.length) {
 		reasons.push("Gateway compatibility is now shared across features; review synthetic compaction/image affinity before using this candidate.");
 	}

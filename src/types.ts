@@ -19,8 +19,8 @@ export const RESPONSES_COMPACT_CAPABLE_APIS = [
 ] as const;
 /**
  * Bare model ID used by the independent Astra effort compatibility layer.
- * Remote Context eligibility is API/provider based with an exact gateway opt-in;
- * this constant does not verify backend support or grant that opt-in.
+ * Gateway transport is an independent exact-model opt-in; this constant
+ * does not verify backend support or grant that opt-in.
  */
 export const ASTRA_MODEL_ID = "gpt-6-astra";
 export const LEGACY_NATIVE_COMPACTION_STRATEGY = "openai-native-compact-v1";
@@ -60,8 +60,6 @@ export type DebugArtifactKind =
 	| "compaction-event"
 	| "lifecycle";
 
-export type ContextManagementMode = "off" | "remote";
-
 /** How Remote V2 obtains the history it sends to the compaction endpoint. */
 export type RemoteV2ContextSource = "pi-context-hook" | "legacy";
 
@@ -79,12 +77,6 @@ export type NativeFallbackConfig = {
 	thinkingLevel: ThinkingLevel;
 };
 
-/**
- * Legacy compatibility setting. Remote Context history is no longer bulk-compacted when
- * selecting a non-window model; local projection and a no-summary boundary own that handoff.
- */
-export type LeaveManagedModePolicy = "warn" | "compact";
-
 export type DebugConfig = {
 	debug: boolean;
 	notifyOnLoad: boolean;
@@ -96,13 +88,6 @@ export type DebugConfig = {
 
 export type CompactionConfig = {
 	enabled: boolean;
-	/**
-	 * Legacy compatibility setting. Non-window consumers never receive retired Remote Context
-	 * history, regardless of this value; retained config files continue to parse it.
-	 */
-	leaveManagedMode: LeaveManagedModePolicy;
-	/** Optional Codex Remote Context management. Disabled by default for compatibility. */
-	contextManagement: ContextManagementMode;
 	/**
 	 * Allow a Responses session whose latest compaction was not created by this extension
 	 * to restart native compaction from Pi's current serialized session context.
@@ -125,16 +110,10 @@ export type CompactionConfig = {
 	 */
 	responsesApis: string[];
 	/**
-	 * Exact "provider/model" keys allowed to use Codex Remote Context on the
-	 * `openai-responses` gateway wire. The native `openai-codex` route ignores
-	 * this list; gateway coverage is opt-in per model.
+	 * Legacy alias for exact "provider/model" Codex gateway transport opt-ins.
+	 * Shared by compaction and image generation; not a window capability.
 	 */
 	gatewayContextModels: string[];
-	/**
-	 * Percentage of the context window that, when remaining tokens drop below it,
-	 * triggers a checkpoint/new_context reminder (0-100; 0 disables reminders).
-	 */
-	contextReminderThresholdPercent: number;
 	notifyOnLoad: boolean;
 	debug: boolean;
 	logProviderPayloads: boolean;
@@ -526,7 +505,6 @@ export const DEFAULT_NATIVE_FALLBACK_CONFIG: NativeFallbackConfig = {
 
 export const DEFAULT_COMPACTION_CONFIG: CompactionConfig = {
 	enabled: true,
-	contextManagement: "off",
 	allowCompactionContinuityBreak: false,
 	remoteCompactModel: undefined,
 	remoteV2ContextSource: "legacy",
@@ -534,8 +512,6 @@ export const DEFAULT_COMPACTION_CONFIG: CompactionConfig = {
 	nativeFallback: { ...DEFAULT_NATIVE_FALLBACK_CONFIG },
 	responsesApis: [...RESPONSES_COMPACT_CAPABLE_APIS],
 	gatewayContextModels: [],
-	leaveManagedMode: "warn",
-	contextReminderThresholdPercent: 5,
 	notifyOnLoad: false,
 	debug: false,
 	logProviderPayloads: false,

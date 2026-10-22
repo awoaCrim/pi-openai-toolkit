@@ -42,12 +42,12 @@ describe("v2 policy resolution", () => {
 		const result = resolve({ schemaVersion: 2, defaults: {
 			context: { remoteCompaction: { model: " p/producer ", apis: ["openai-responses"] }, nativeFallback: { enabled: true, model: "p/summary" } },
 		}, models: { [key]: {
-			context: { remoteCompaction: { model: null, apis: [] }, remoteWindows: { reminderThresholdPercent: 0 }, nativeFallback: { enabled: false, model: null } },
+			context: { remoteCompaction: { model: null, apis: [] }, nativeFallback: { enabled: false, model: null } },
 			compatibility: { transport: "codex-gateway" },
 		} } });
 		expect(result.invalidFeatures).toEqual([]);
 		expect(result.policy.context.remoteCompaction).toMatchObject({ model: null, apis: [], inputSource: "legacy" });
-		expect(result.policy.context.remoteWindows.reminderThresholdPercent).toBe(0);
+		expect(result.policy.context).not.toHaveProperty("remoteWindows");
 		expect(result.policy.context.nativeFallback).toMatchObject({ enabled: false, model: null });
 		expect(result.policy.compatibility.transport).toBe("codex-gateway");
 		expect(result.origins["context.nativeFallback.model"]).toEqual({ kind: "model", path: `models["${key}"].context.nativeFallback.model` });
@@ -126,11 +126,8 @@ describe("v2 policy resolution", () => {
 		}
 	});
 
-	test("invalid API narrowing and numeric limits are errors rather than fallback policies", () => {
+	test("invalid API narrowing is an error rather than a fallback policy", () => {
 		expect(resolve({ schemaVersion: 2, defaults: { context: { remoteCompaction: { apis: ["other-api"] } } } }).invalidFeatures).toContain("context");
-		for (const reminderThresholdPercent of [-1, 101, 0.5]) {
-			expect(resolve({ schemaVersion: 2, defaults: { context: { remoteWindows: { reminderThresholdPercent } } } }).invalidFeatures).toContain("context");
-		}
 	});
 
 	test("diagnostics never copy unknown field values/names and defaults do not alias", () => {

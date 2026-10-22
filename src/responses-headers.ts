@@ -91,7 +91,7 @@ export function buildCodexCliUserAgent(version: string): string {
 
 /**
  * Codex client identity used by synthetic gateway requests in their User-Agent.
- * Native live and context-management requests do not generate a `version`
+ * Native live and shared synthetic requests do not generate a `version`
  * header; explicitly configured provider values remain caller-owned.
  */
 export const CODEX_CLIENT_VERSION = "0.153.0";

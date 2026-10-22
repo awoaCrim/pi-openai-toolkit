@@ -6,10 +6,8 @@ describe("Mode-gated compaction through the public Pi lifecycle", () => {
 		["remote-compaction", "standalone", "pi-context-hook", "official"]];
 	for (const source of ["legacy", "pi-context-hook"]) {
 		for (const transport of ["gateway", "native"]) {
-			for (const mode of ["remote-windows", "pi"]) {
-				for (const scenario of ["default", "owning-opaque", "owning-native", "owning-malformed"]) cases.push([mode, scenario, source, transport]);
-			}
-			for (const scenario of ["remote", "remote-failure", "native-fallback", "default", "disabled", "same-model", "cleaned", "threshold", "overflow", "abort", "summary-failure", "owning-remote", "owning-native", "owning-fallback"]) {
+			for (const scenario of ["default", "owning-native"]) cases.push(["pi", scenario, source, transport]);
+			for (const scenario of ["remote", "remote-same-model", "remote-unset-model", "remote-failure", "native-fallback", "default", "disabled", "same-model", "threshold", "overflow", "abort", "summary-failure", "owning-remote", "owning-native"]) {
 				cases.push(["remote-compaction", scenario, source, transport]);
 			}
 		}

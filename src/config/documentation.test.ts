@@ -38,7 +38,14 @@ test("editor schema covers every effective field and its built-in value", () => 
 		if (Array.isArray(value)) {
 			for (const item of value) inspect(item, node.items);
 		} else if (value && typeof value === "object") {
-			expect(Object.keys(node.properties).sort()).toEqual(Object.keys(value).sort());
+			const activeProperties = Object.entries(node.properties).filter(([key, child]) => {
+				if (key !== "remoteWindows") return true;
+				const entry = child as { $ref?: string; deprecated?: boolean };
+				const retired = entry.$ref ? schema.$defs[entry.$ref.split("/").at(-1)!] : entry;
+				expect(retired.deprecated).toBe(true);
+				return false;
+			}).map(([key]) => key);
+			expect(activeProperties.sort()).toEqual(Object.keys(value).sort());
 			expect(node.additionalProperties).toBe(false);
 			for (const [key, child] of Object.entries(value)) inspect(child, node.properties[key]);
 		}
@@ -58,6 +65,16 @@ test("schema retains only opaque deprecated compatibility entries for Auto Mode"
 		expect(retired.description).toContain("no longer reviewed");
 		expect(Object.keys(retired).sort()).toEqual(["deprecated", "description"]);
 	}
+});
+
+test("schema has no active window mode or controls and retains opaque retirement only", () => {
+	const schema = JSON.parse(read("config.schema.json"));
+	expect(schema.$defs.context.properties.mode.enum).toEqual(["pi", "remote-compaction"]);
+	const entry = schema.$defs.context.properties.remoteWindows;
+	const retired = entry.$ref ? schema.$defs[entry.$ref.split("/").at(-1)] : entry;
+	expect(retired.deprecated).toBe(true);
+	expect(Object.keys(retired).sort()).toEqual(["deprecated", "description"]);
+	expect(createPolicyDefaults().context).not.toHaveProperty("remoteWindows");
 });
 
 test("package includes configuration runtime/schema/reference but no test helpers", () => {

@@ -1,6 +1,6 @@
 # pi-openai-toolkit
 
-为 Pi 添加远程上下文窗口、Responses 压缩、联网搜索和图像生成。沿用 Pi 的模型、端点、认证和会话配置，不另行注册提供商或模型。
+为 Pi 添加 Responses 压缩、联网搜索和图像生成。沿用 Pi 的模型、端点、认证和会话配置，不另行注册提供商或模型。
 
 [![npm 版本](https://img.shields.io/npm/v/pi-openai-toolkit.svg)](https://www.npmjs.com/package/pi-openai-toolkit)
 [![MIT](https://img.shields.io/npm/l/pi-openai-toolkit.svg)](LICENSE)
@@ -47,30 +47,19 @@ Toolkit 只读取一个全局配置文件，即使扩展安装在项目内也一
 通过 `defaults.context.mode` 或单个模型的 `context.mode` 选择：
 
 - `remote-compaction`：默认模式，使用服务端返回的加密检查点继续会话
-- `remote-windows`：使用 Codex 远程上下文窗口，通过 `history` 检索较早内容、`notes` 保存交接信息
 - `pi`：交给 Pi 管理上下文
 
 **远程压缩**支持 `openai-responses`、`openai-codex-responses` 和 `azure-openai-responses`，先尝试 V2。官方 OpenAI API-key 路由遇到符合条件的协议失败时，可再尝试一次独立的 `/v1/responses/compact`，并完整保存返回的加密替换窗口用于重放。OpenAI OAuth、原生 Codex、Azure 和网关保持原有 V2 路由。OpenAI subscription-sharing OAuth 与原生 Codex 登录是两种独立授权，凭据不能互换；模型和后端仍须具备相应权限。
 
-可用 `context.remoteCompaction.model` 指定同一有效 base URL 下的独立压缩模型，不改变当前模型。普通远程压缩的远程尝试全部失败后，会明确提示并继续文本摘要。`nativeFallback.enabled: false` 只关闭 Toolkit 的指定模型回退层，不关闭 Pi 默认摘要。取消操作、来源不匹配或已封存历史被修改时，仍会取消，不能绕过检查点安全检查。详见[上下文配置](docs/configuration.md#context)和[检查点规则](docs/internals.md#remote-compaction-v2-wire-contract)。
+可用 `context.remoteCompaction.model` 指定同一有效 base URL 下的独立压缩模型，不改变当前模型。指定模型的完整 `provider/model-id` 与当前模型相同时，直接复用当前运行信息、鉴权快照和 session，不重复选择模型，也不会仅因模型相同就改用原生文本摘要。普通远程压缩的远程尝试全部失败后，会明确提示并继续文本摘要。`nativeFallback.enabled: false` 只关闭 Toolkit 的指定模型回退层，不关闭 Pi 默认摘要。取消操作、来源不匹配或已封存历史被修改时，仍会取消，不能绕过检查点安全检查。详见[上下文配置](docs/configuration.md#context)和[检查点规则](docs/internals.md#remote-compaction-v2-wire-contract)。
 
-**远程窗口**需要原生 `openai-codex` 提供商的 `openai-codex-responses` API，或支持相应协议的 `openai-responses` 网关。网关必须在精确模型下设置 `compatibility.transport: "codex-gateway"`；这一设置不会让普通兼容端点自动获得该能力。
-
-将上例的 `mode` 改为 `remote-windows` 后，符合条件的会话会提供 `new_context`、`get_context_remaining`、`history` 和 `notes`。手动 `/compact [instructions]` 使用 Pi 原生文本压缩，**只处理当前窗口**。它不调用 Toolkit 的远程 producer 或指定回退模型，不切换当前模型、打开新窗口，也不自动发送续跑提示。只有 `remote-compaction` 模式选择 Toolkit 的远程压缩及回退链路。
-
-切换模型或改用 `remote-compaction`、`pi` 模式后，已有的有效窗口边界仍然生效：旧历史不会进入普通请求或任何压缩层。历史边界只限定输入，不能把实际压缩替换成一次无摘要清理。窗口身份仍会保留，便于切回；无法安全重建当前窗口时取消操作，不退回全部归档历史。旧配置中的 `leaveManagedMode` 仍会解析，但不再触发批量 close-out 压缩。
-
-原生文本压缩无法读取已有的加密检查点。如果当前上下文由该检查点承接，原生压缩或回退会取消并保留现状，避免把占位文本当作摘要、丢失信息；兼容的远程压缩仍可复用它。
-
-完整历史仍保存在本地 Pi 会话 JSONL，远端 `history`、`notes` 则是独立的后端 API。窗口标记本身不是 Pi 原生截断点，运行时隔离仍依赖扩展正常加载。旧会话若恰好以无摘要清理记录结尾，Pi 可能在进入扩展钩子前提示 `Already compacted`；先发送一条正常用户消息再重试。Toolkit 不改写原日志，也不绕过 Pi 的压缩资格检查。
-
-远程窗口依赖 alpha 接口，上游可能随时调整。切换模型时远程窗口状态仍会持久化并可复用，详见[窗口生命周期](docs/internals.md#rollover-lifecycle)。
+**Remote Windows 已完整移除**，包括四个工具和旧模型选择恢复逻辑。旧窗口会话不能续跑：Toolkit 会拒绝包含旧标记的分支，避免把已退休历史重新发送给模型。请新建会话；原文件不会被改写或删除。闲置窗口配置只提示退役，仍选择 `remote-windows` 的配置则必须明确改用受支持模式。详见[退役说明](docs/configuration.md#removed-remote-windows)。压缩与生图共用的 Codex gateway 传输支持仍然保留。
 
 ## Codex Fast
 
 Fast 默认关闭。在 Pi 终端或 pi-web 等支持 UI 的 RPC 客户端中输入 `/fast` 开启，再输入一次关闭。切换结果通过通知确认；状态为 `Fast ON`、`Fast OFF`，不适用的路由为 `Fast N/A`，显示位置由客户端决定。print/JSON 和无 UI 模式不能切换 Fast。无需添加 Fast 配置。
 
-支持原生 Codex，以及兼容 Responses 网关中可识别的 GPT/Codex 模型。开关只保存在当前会话：reload、续聊和 `new_context` 保留状态，新建或 fork 的会话默认关闭。开启时请求 Fast，关闭时请求标准档，会覆盖符合条件的对话请求中原有的服务档位，但不改变 reasoning effort 或配置文件。
+支持原生 Codex，以及兼容 Responses 网关中可识别的 GPT/Codex 模型。开关只保存在当前会话：reload 和续聊保留状态，新建或 fork 的会话默认关闭。开启时请求 Fast，关闭时请求标准档，会覆盖符合条件的对话请求中原有的服务档位，但不改变 reasoning effort 或配置文件。
 
 Fast 可能增加额度消耗或费用。状态栏表示请求模式，不代表后端已确认加速；网关可能拒绝、忽略或降级请求。无法识别的网关模型别名需要已有的 Codex 网关路由标识。适用范围和生命周期见 [Fast 规则](docs/internals.md#codex-fast-session-control)。
 

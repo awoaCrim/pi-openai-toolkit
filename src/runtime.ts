@@ -784,7 +784,8 @@ export async function resolveRemoteCompactionExecution(
 	options: NativeCompactionSupportOptions = {},
 	remoteModelSpec?: string,
 ): Promise<RemoteCompactionExecutionResolution> {
-	const consumerResolution = await resolveNativeCompactionEnvironment(ctx, options);
+	const selectedModel = ctx.model;
+	const consumerResolution = await resolveNativeCompactionEnvironmentForModel(ctx, selectedModel, options);
 	if (!consumerResolution.ok) {
 		return consumerResolution;
 	}
@@ -807,6 +808,16 @@ export async function resolveRemoteCompactionExecution(
 			reason: "invalid-model-spec",
 			modelSpec: spec,
 		};
+	}
+
+	const consumer = consumerResolution.runtime;
+	const matches = (model: { provider: string; id: string } | undefined) =>
+		model?.provider === parsed.provider && model.id === parsed.modelId;
+	// Reuse this operation's physical/auth snapshot for either the current
+	// logical selection or its resolved physical identity. Do not resolve a
+	// virtual selection again or look up/authenticate an identical producer.
+	if (matches(selectedModel) || matches(consumer.currentModel)) {
+		return { ok: true, execution: { consumer, compactor: consumer } };
 	}
 
 	const compactorModel = ctx.modelRegistry.find(parsed.provider, parsed.modelId);
@@ -832,7 +843,6 @@ export async function resolveRemoteCompactionExecution(
 		};
 	}
 
-	const consumer = consumerResolution.runtime;
 	const compactor = compactorResolution.runtime;
 	if (compactor.baseUrl !== consumer.baseUrl) {
 		return {

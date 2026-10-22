@@ -12,8 +12,6 @@ import {
 	THINKING_LEVELS,
 	TOOLKIT_ID,
 	type CompactionConfig,
-	type ContextManagementMode,
-	type LeaveManagedModePolicy,
 	type ImageGenerationConfig,
 	type RemoteV2ContextSource,
 	type LoadedToolkitConfig,
@@ -22,7 +20,7 @@ import {
 	type WebSearchConfig,
 	type WebSearchRoute,
 } from "../types";
-import { RETIRED_AUTO_MODE_MESSAGE } from "./policy";
+import { RETIRED_AUTO_MODE_MESSAGE, RETIRED_REMOTE_WINDOWS_CONFIG_MESSAGE, RETIRED_REMOTE_WINDOWS_MODE_MESSAGE } from "./policy";
 import { MAX_IMAGE_MODEL_ID_CHARS } from "../image-generation/types";
 
 export const CONFIG_DIR = path.join(os.homedir(), ".pi", "agent", "extensions", TOOLKIT_ID);
@@ -85,34 +83,6 @@ function toBoolean(value: unknown, fieldPath: string, warnings: string[]): boole
 	return undefined;
 }
 
-function toLeaveManagedMode(
-	value: unknown,
-	fieldPath: string,
-	warnings: string[],
-): LeaveManagedModePolicy | undefined {
-	if (value === undefined) return undefined;
-	if (typeof value === "string") {
-		const normalized = value.trim();
-		if (normalized === "warn" || normalized === "compact") return normalized;
-	}
-	warnings.push(`Ignoring ${fieldPath}: expected one of warn, compact.`);
-	return undefined;
-}
-
-function toContextManagementMode(
-	value: unknown,
-	fieldPath: string,
-	warnings: string[],
-): ContextManagementMode | undefined {
-	if (value === undefined) return undefined;
-	if (typeof value === "string") {
-		const normalized = value.trim();
-		if (normalized === "off" || normalized === "remote") return normalized;
-	}
-	warnings.push(`Ignoring ${fieldPath}: expected one of off, remote.`);
-	return undefined;
-}
-
 function toRemoteV2ContextSource(
 	value: unknown,
 	fieldPath: string,
@@ -143,21 +113,6 @@ function toThinkingLevel(value: unknown, fieldPath: string, warnings: string[]):
 		return value as ThinkingLevel;
 	}
 	warnings.push(`Ignoring ${fieldPath}: expected one of ${THINKING_LEVELS.join(", ")}.`);
-	return undefined;
-}
-
-function toBoundedInteger(
-	value: unknown,
-	fieldPath: string,
-	warnings: string[],
-	min: number,
-	max: number,
-): number | undefined {
-	if (value === undefined) return undefined;
-	if (typeof value === "number" && Number.isInteger(value) && Number.isFinite(value) && value >= min && value <= max) {
-		return value;
-	}
-	warnings.push(`Ignoring ${fieldPath}: expected an integer between ${min} and ${max}.`);
 	return undefined;
 }
 
@@ -309,12 +264,17 @@ function applyCompactionConfig(
 	warnUnknownFields(raw, COMPACTION_FIELDS, "compaction", warnings);
 
 	resolved.enabled = toBoolean(raw.enabled, "compaction.enabled", warnings) ?? resolved.enabled;
-	resolved.contextManagement =
-		toContextManagementMode(raw.contextManagement, "compaction.contextManagement", warnings) ??
-		resolved.contextManagement;
-	resolved.leaveManagedMode =
-		toLeaveManagedMode(raw.leaveManagedMode, "compaction.leaveManagedMode", warnings) ??
-		resolved.leaveManagedMode;
+	for (const key of ["leaveManagedMode", "contextReminderThresholdPercent"]) {
+		if (Object.hasOwn(raw, key)) warnings.push(`Ignoring compaction.${key}: ${RETIRED_REMOTE_WINDOWS_CONFIG_MESSAGE}`);
+	}
+	if (Object.hasOwn(raw, "contextManagement")) {
+		const mode = typeof raw.contextManagement === "string" ? raw.contextManagement.trim() : undefined;
+		warnings.push(mode === "remote"
+			? `Ignoring compaction.contextManagement: ${RETIRED_REMOTE_WINDOWS_MODE_MESSAGE}`
+			: mode === "off"
+				? `Ignoring compaction.contextManagement: ${RETIRED_REMOTE_WINDOWS_CONFIG_MESSAGE}`
+				: "Ignoring compaction.contextManagement: expected off; remote has been removed.");
+	}
 	resolved.allowCompactionContinuityBreak =
 		toBoolean(
 			raw.allowCompactionContinuityBreak,
@@ -323,16 +283,6 @@ function applyCompactionConfig(
 		) ?? resolved.allowCompactionContinuityBreak;
 	resolved.notifyOnLoad =
 		toBoolean(raw.notifyOnLoad, "compaction.notifyOnLoad", warnings) ?? resolved.notifyOnLoad;
-	const reminderPercent = toBoundedInteger(
-		raw.contextReminderThresholdPercent,
-		"compaction.contextReminderThresholdPercent",
-		warnings,
-		0,
-		100,
-	);
-	if (reminderPercent !== undefined) {
-		resolved.contextReminderThresholdPercent = reminderPercent;
-	}
 	resolved.debug = toBoolean(raw.debug, "compaction.debug", warnings) ?? resolved.debug;
 	resolved.logProviderPayloads =
 		toBoolean(raw.logProviderPayloads, "compaction.logProviderPayloads", warnings) ??

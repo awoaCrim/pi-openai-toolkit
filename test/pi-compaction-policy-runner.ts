@@ -11,22 +11,21 @@ const scenario = process.argv[3] ?? "remote";
 const source = process.argv[4] ?? "legacy";
 const native = process.argv[5] === "native";
 const official = process.argv[5] === "official";
-assert(["remote-compaction", "remote-windows", "pi"].includes(mode));
+assert(["remote-compaction", "pi"].includes(mode));
 const automatic = scenario === "threshold" || scenario === "overflow";
-const remoteEnabled = mode === "remote-compaction" && ["remote", "remote-failure", "abort", "owning-remote", "standalone"].includes(scenario);
-const remoteSuccess = remoteEnabled && ["remote", "owning-remote", "standalone"].includes(scenario);
-const blockedOpaque = ["owning-opaque", "owning-fallback", "owning-malformed"].includes(scenario);
-const failedCompression = blockedOpaque || scenario === "abort" || scenario === "summary-failure";
+const remoteEnabled = mode === "remote-compaction" && ["remote", "remote-same-model", "remote-unset-model", "remote-failure", "abort", "owning-remote", "standalone"].includes(scenario);
+const remoteSuccess = remoteEnabled && ["remote", "remote-same-model", "remote-unset-model", "owning-remote", "standalone"].includes(scenario);
+const producer = ["remote-same-model", "remote-unset-model"].includes(scenario) ? "consumer" : "producer";
+const failedCompression = scenario === "abort" || scenario === "summary-failure";
 const ownsCheckpoint = scenario.startsWith("owning-");
 const owningOpaque = "CURRENT-OWNED-OPAQUE";
 const expectedModel = mode !== "remote-compaction" || ["default", "disabled", "same-model"].includes(scenario)
 	? "consumer" : scenario === "remote-failure" ? "producer" : "summary";
 const provider = native ? "openai-codex" : "policy-fixture";
 const baseUrl = official ? "https://api.openai.com/v1" : native ? "https://compact-policy.invalid/backend-api" : "https://compact-policy.invalid/v1";
-const retired = "RETIRED-WINDOW-PLAINTEXT";
-const current = "CURRENT-WINDOW-PLAINTEXT";
-const oldOpaque = "RETIRED-OPAQUE-CHECKPOINT";
-const compacted = "CURRENT-WINDOW-COMPRESSED";
+const initial = "INITIAL-ORDINARY-HISTORY";
+const current = "CURRENT-ORDINARY-HISTORY";
+const compacted = "ORDINARY-COMPRESSED";
 let streamId = 0;
 function response(output: Array<Record<string, unknown>>) {
 	const id = `policy-${++streamId}`;
@@ -51,18 +50,16 @@ function textResponse(text: string) {
 try {
 	const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } = await import("@earendil-works/pi-coding-agent");
 	const { InMemoryCredentialStore, InMemoryModelsStore, fauxAssistantMessage } = await import("@earendil-works/pi-ai");
-	const { CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, CONTEXT_WINDOW_COMPACTION_SUMMARY } = await import("../src/context-management/messages");
-	const { createNativeCompactionDetails, createNativeCompactionResult, LEGACY_REMOTE_V2_INPUT_PROVENANCE, getRemoteV2InputProvenance } = await import("../src/types");
+	const { createNativeCompactionDetails, createNativeCompactionResult, getRemoteV2InputProvenance } = await import("../src/types");
 	const configDir = join(env.agentDir, "extensions/pi-openai-toolkit");
 	await mkdir(configDir, { recursive: true });
 	const configPath = join(configDir, "config.json");
 	const policy = {
 		schemaVersion: 2,
-		defaults: { context: { mode: "remote-windows", remoteCompaction: {
-			model: `${provider}/producer`, inputSource: source, apis: remoteEnabled ? ["openai-responses", "openai-codex-responses"] : [],
+		defaults: { context: { mode, remoteCompaction: {
+			model: scenario === "remote-unset-model" ? null : `${provider}/${producer}`, inputSource: source, apis: remoteEnabled ? ["openai-responses", "openai-codex-responses"] : [],
 		}, nativeFallback: { enabled: scenario !== "disabled", model: scenario === "default" ? null
-			: `${provider}/${scenario === "same-model" ? "consumer" : "summary"}` },
-		remoteWindows: { reminderThresholdPercent: 100 } } },
+			: `${provider}/${scenario === "same-model" ? "consumer" : "summary"}` } } },
 		models: Object.fromEntries(["consumer", "producer", "summary"].map((id) => [`${provider}/${id}`,
 			native || official ? {} : { compatibility: { transport: "codex-gateway" } }])),
 	};
@@ -76,12 +73,6 @@ try {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 64000, maxTokens: 2048 })) });
 	const consumer = runtime.getModel(provider, "consumer")!;
 	const sm = SessionManager.create(env.cwd, join(env.cwd, "sessions"));
-	const beforeOpaque = sm.appendMessage({ role: "user", content: "BEFORE-OLD-CHECKPOINT", timestamp: 1 });
-	sm.appendMessage(fauxAssistantMessage("old answer"));
-	const old = createNativeCompactionResult({ firstKeptEntryId: beforeOpaque, tokensBefore: 100,
-		details: createNativeCompactionDetails({ provider, api: consumer.api, model: consumer.id, baseUrl,
-			inputProvenance: LEGACY_REMOTE_V2_INPUT_PROVENANCE, compactedWindow: [{ type: "compaction", encrypted_content: oldOpaque }] }) });
-	sm.appendCompaction(old.summary, old.firstKeptEntryId, old.tokensBefore, old.details);
 	const settings = SettingsManager.inMemory({ transport: "sse", cacheWarming: "off",
 		retry: { enabled: false, provider: { maxRetries: 0 } }, compaction: { enabled: false, keepRecentTokens: 128,
 			reserveTokens: scenario === "threshold" ? 60000 : 2048 } }, { projectTrusted: true });
@@ -118,24 +109,27 @@ try {
 			const synthetic = items.at(-1)?.type === "compaction_trigger";
 			const summary = !synthetic && (serialized.includes("<conversation>") || (serialized.includes("# Instructions") && serialized.includes("# Conversation")));
 			requests.push({ kind: synthetic ? "remote" : summary ? "summary" : "consumer", model: body.model, input: serialized });
-			assert(!serialized.includes(oldOpaque), "retired opaque checkpoint reached transport");
-			if (phase !== "seed") assert(!serialized.includes(retired), "retired plaintext reached transport");
+			assert(!serialized.includes("codex-context-window"), "ordinary session emitted a window marker");
+			assert(!serialized.includes("new_context") && !serialized.includes("get_context_remaining"), "ordinary session published removed tools");
+			assert.equal(request.headers.get("x-codex-window-id"), null);
+			// Codex/gateway affinity is not an official API-key header contract.
+			if (synthetic || standalone) assert.equal(request.headers.get("session-id"), official ? null : sm.getSessionId());
 			if (standalone) {
 				standaloneCalls++;
 				assert(official && scenario === "standalone");
 				assert.equal(body.model, "producer");
-				assert(serialized.includes(current) && !serialized.includes("RETIRED-FILE-PATH"));
+				assert(serialized.includes(current));
 				assert.equal(body.tools, undefined);
 				assert(!synthetic);
 				return Response.json({ output: [{ type: "compaction", encrypted_content: "policy-opaque" }] });
 			}
 			if (synthetic || summary) {
 				assert.equal(session!.model?.id, "consumer", "compactor changed active selection");
-				assert(!serialized.includes("RETIRED-FILE-PATH"), "retired file operation reached compactor");
+
 				if (synthetic) {
 					remoteCalls++;
 					assert(remoteEnabled, "wrong mode selected Toolkit Remote V2");
-					assert.equal(body.model, "producer");
+					assert.equal(body.model, producer);
 					assert(serialized.includes(current));
 					if (scenario === "owning-remote") {
 						assert(serialized.includes(owningOpaque), "current owning checkpoint was omitted");
@@ -149,7 +143,7 @@ try {
 				}
 				summaryCalls++;
 				assert.equal(body.model, expectedModel, "native summary used wrong reason-dependent model");
-				assert(!serialized.includes(CONTEXT_WINDOW_COMPACTION_SUMMARY));
+				assert(!serialized.includes("Pi Codex context-window boundary"));
 				if (scenario === "owning-native") assert(serialized.includes("CURRENT-OWNED-NATIVE-SUMMARY"));
 				if (scenario === "summary-failure") return Response.json({ error: { code: "server_error" } }, { status: 500 });
 				return textResponse(compacted);
@@ -163,7 +157,7 @@ try {
 			if (phase === "continued" || (automatic && summaryCalls > 0)) {
 				const disk = (await readFile(sm.getSessionFile()!, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
 				const saved = disk.filter((entry) => entry.type === "compaction").at(-1);
-				assert(saved && saved.summary !== CONTEXT_WINDOW_COMPACTION_SUMMARY, "consumer preceded durable real compression");
+				assert(saved && saved.summary !== "[Pi Codex context-window boundary; no conversation summary was generated.]", "consumer preceded durable real compression");
 				assert(serialized.includes(remoteSuccess ? "policy-opaque" : compacted), "consumer did not receive new compressed context");
 				assert(serialized.length < 15000, "automatic recovery did not reduce current context");
 			}
@@ -174,27 +168,12 @@ try {
 		await loader.reload(); assert.deepEqual(loader.getExtensions().errors, []);
 		({ session } = await createAgentSession({ cwd: env.cwd, agentDir: env.agentDir, modelRuntime: runtime, model: consumer,
 			settingsManager: settings, resourceLoader: loader, sessionManager: sm,
-			tools: ["read", "new_context", "get_context_remaining", "history", "notes"] }));
+			tools: ["read"] }));
 		await session.bindExtensions({ mode: "print", onError: (error) => errors.push(error.error) });
-		if (official) {
-			sm.appendCustomMessageEntry(CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, "PREVIOUS-REMOTE-WINDOW", true, {
-				protocol: 1, id: "official-marker", sessionId: sm.getSessionId(), contextManagement: { protocol: 1, kind: "window",
-					firstWindowId: "official-window0", currentWindowId: "official-window0", windowNumber: 0 } });
-			session.refreshContext();
-		}
-		await session.prompt(`${retired} ${"retired work ".repeat(500)}`);
+		assert.deepEqual(session.getActiveToolNames(), ["read"]);
+		await session.prompt(`${initial} ${"ordinary work ".repeat(500)}`);
 		if (failure) throw failure;
-		const first = sm.getBranch().find((entry) => entry.type === "custom_message" && entry.customType === CODEX_CONTEXT_WINDOW_MESSAGE_TYPE)!;
-		assert(first.type === "custom_message");
-		const firstWindowId = (first.details as { contextManagement: { firstWindowId: string } }).contextManagement.firstWindowId;
-		sm.appendMessage(fauxAssistantMessage([{ type: "toolCall", id: "retired-read", name: "read", arguments: { path: "RETIRED-FILE-PATH" } }]));
-		sm.appendMessage({ role: "toolResult", toolCallId: "retired-read", toolName: "read", content: [{ type: "text", text: "RETIRED-FILE-PATH" }], isError: false, timestamp: 2 });
-		const boundary = sm.appendCustomMessageEntry(CODEX_CONTEXT_WINDOW_MESSAGE_TYPE, "POLICY-WINDOW-ONE", true, {
-			protocol: 1, id: "policy-marker", sessionId: sm.getSessionId(), contextManagement: { protocol: 1, kind: "window",
-				firstWindowId, currentWindowId: "policy-window-one", windowNumber: 1, trimPreviousWindow: true },
-		});
-		if (scenario === "cleaned") sm.appendCompaction(CONTEXT_WINDOW_COMPACTION_SUMMARY, boundary, 100,
-			{ protocol: 1, strategy: "codex-context-window", windowId: "policy-window-one" }, true);
+		const boundary = sm.appendMessage({ role: "user", content: "CURRENT-WORK-BOUNDARY", timestamp: 2 });
 		for (let i = 0; i < 12; i++) {
 			sm.appendMessage({ role: "user", content: `${current}-${i} ${"current work ".repeat(200)}`, timestamp: 10 + 2 * i });
 			sm.appendMessage({ ...fauxAssistantMessage(`current answer ${i}`), provider, api: consumer.api, model: consumer.id });
@@ -205,8 +184,7 @@ try {
 						details: createNativeCompactionDetails({ provider, api: consumer.api, model: consumer.id, baseUrl,
 							inputProvenance: getRemoteV2InputProvenance(source === "legacy" ? "legacy" : "pi-context-hook"),
 							compactedWindow: [{ type: "compaction", encrypted_content: owningOpaque }] }) });
-					sm.appendCompaction(checkpoint.summary, checkpoint.firstKeptEntryId, checkpoint.tokensBefore,
-						scenario === "owning-malformed" ? { ...checkpoint.details, compactedWindow: [] } : checkpoint.details, true);
+					sm.appendCompaction(checkpoint.summary, checkpoint.firstKeptEntryId, checkpoint.tokensBefore, checkpoint.details, true);
 				}
 			}
 		}
@@ -214,7 +192,7 @@ try {
 		await writeFile(configPath, JSON.stringify(policy));
 		session.refreshContext();
 		const before = structuredClone(sm.getBranch());
-		const markersBefore = before.filter((entry) => entry.type === "custom_message" && entry.customType === CODEX_CONTEXT_WINDOW_MESSAGE_TYPE).length;
+		const originalSessionId = sm.getSessionId();
 		phase = "compact";
 		session.subscribe((event) => { if (event.type === "compaction_end" && event.result) compactReasons.push(event.reason); });
 		if (automatic) {
@@ -227,14 +205,17 @@ try {
 		assert.deepEqual(errors, []);
 		if (failedCompression) {
 			assert.deepEqual(sm.getBranch(), before, "failed compression persisted a checkpoint");
-			if (blockedOpaque) assert.equal(summaryCalls + remoteCalls, 0, "opaque checkpoint was handed to a text summarizer");
 		} else {
 			const saved = sm.getBranch().filter((entry) => entry.type === "compaction").at(-1)!;
-			assert.notEqual(saved.summary, CONTEXT_WINDOW_COMPACTION_SUMMARY);
+			assert.notEqual(saved.summary, "[Pi Codex context-window boundary; no conversation summary was generated.]");
 			assert(saved.summary.includes(remoteSuccess ? "opaque" : compacted));
 			assert(before.some((entry) => entry.id === saved.firstKeptEntryId), "compactor fabricated a retained source ID");
-			assert(before.findIndex((entry) => entry.id === saved.firstKeptEntryId) >= before.findIndex((entry) => entry.id === boundary));
-			assert(!JSON.stringify(saved.details).includes("RETIRED-FILE-PATH"));
+			if (remoteSuccess) {
+				assert.equal(saved.details?.strategy, scenario === "standalone" ? "openai-native-compact-v1" : "openai-remote-compaction-v2");
+				assert.equal(saved.details?.model, "consumer");
+			}
+			const reopened = SessionManager.open(sm.getSessionFile()!);
+			assert.deepEqual(reopened.getBranch().findLast((entry) => entry.type === "compaction")?.details, JSON.parse(JSON.stringify(saved.details)));
 			assert.equal(remoteCalls, remoteEnabled ? 1 : 0);
 			assert.equal(summaryCalls > 0, !remoteSuccess);
 			assert.equal(standaloneCalls, scenario === "standalone" ? 1 : 0);
@@ -253,7 +234,9 @@ try {
 		}
 		if (failure) throw failure;
 		assert.equal(session.model?.id, "consumer");
-		assert.equal(sm.getBranch().filter((entry) => entry.type === "custom_message" && entry.customType === CODEX_CONTEXT_WINDOW_MESSAGE_TYPE).length, markersBefore);
+		assert.equal(sm.getSessionId(), originalSessionId);
+		assert(!sm.getBranch().some((entry) => entry.type === "custom_message" && entry.customType === "codex-context-window"));
+		assert(!sm.getBranch().some((entry) => entry.type === "custom" && entry.customType === "pi-openai-toolkit:manual-compact"));
 		for (const entry of before) assert.deepEqual(sm.getEntry(entry.id), entry, "compression rewrote raw history");
 		if (remoteSuccess && source === "pi-context-hook") assert.equal(hookProjections, 1);
 		env.assertNoNetwork();

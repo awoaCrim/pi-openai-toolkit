@@ -8,6 +8,10 @@ import { resolveV2Config } from "./config/v2";
 import {
 	CONFIG_FEATURES,
 	RETIRED_AUTO_MODE_ISSUE,
+	RETIRED_REMOTE_WINDOWS_ISSUE,
+	RETIRED_REMOTE_WINDOWS_MODE_ISSUE,
+	RETIRED_REMOTE_WINDOWS_CONFIG_MESSAGE,
+	RETIRED_REMOTE_WINDOWS_MODE_MESSAGE,
 	createPolicyDefaults,
 	type ConfigDocumentSnapshot,
 	type ConfigFeature,
@@ -103,7 +107,7 @@ function leafPaths(value: unknown, prefix = ""): string[] {
 }
 
 const LEGACY_PATHS: Record<string, string> = {
-	"context.mode": "compaction.contextManagement",
+	"context.mode": "compaction.enabled",
 	"context.remoteCompaction.model": "compaction.remoteCompactModel",
 	"context.remoteCompaction.inputSource": "compaction.remoteV2ContextSource",
 	"context.remoteCompaction.allowContinuityBreak": "compaction.allowCompactionContinuityBreak",
@@ -111,8 +115,6 @@ const LEGACY_PATHS: Record<string, string> = {
 	"context.nativeFallback.enabled": "compaction.nativeFallback.enabled",
 	"context.nativeFallback.model": "compaction.nativeFallback.model",
 	"context.nativeFallback.thinkingLevel": "compaction.nativeFallback.thinkingLevel",
-	"context.remoteWindows.leaveManagedMode": "compaction.leaveManagedMode",
-	"context.remoteWindows.reminderThresholdPercent": "compaction.contextReminderThresholdPercent",
 	"webSearch.route": "webSearch.models",
 	"imageGeneration.enabled": "imageGeneration.enabled",
 	"imageGeneration.defaultModel": "imageGeneration.models",
@@ -159,6 +161,13 @@ function legacyIssues(loaded: LoadedToolkitConfig, modelKey: string | undefined)
 		if (warning.startsWith("Ignoring autoMode:")) {
 			return { severity: "warning", code: RETIRED_AUTO_MODE_ISSUE, path: "autoMode", feature: "document" };
 		}
+		const retiredField = /^Ignoring (compaction\.(?:contextManagement|leaveManagedMode|contextReminderThresholdPercent)):/.exec(warning)?.[1];
+		if (retiredField && (warning.endsWith(RETIRED_REMOTE_WINDOWS_CONFIG_MESSAGE) || warning.endsWith(RETIRED_REMOTE_WINDOWS_MODE_MESSAGE))) {
+			const selectedMode = warning.endsWith(RETIRED_REMOTE_WINDOWS_MODE_MESSAGE);
+			return { severity: selectedMode ? "error" : "warning",
+				code: selectedMode ? RETIRED_REMOTE_WINDOWS_MODE_ISSUE : RETIRED_REMOTE_WINDOWS_ISSUE,
+				path: retiredField, feature: "context" };
+		}
 		const match = /^Ignoring ([^:]+):/.exec(warning);
 		const field = warning.startsWith("Ignoring compaction.responsesApis entry ") ? "compaction.responsesApis" : match?.[1] ?? "$";
 		const root = field.split(".")[0];
@@ -195,8 +204,10 @@ function fromLegacy(loaded: LoadedToolkitConfig, model: WebSearchModel | undefin
 	const modelKey = getExactModelKey(model);
 	const route = resolveWebSearchRoute({ model, config: config.webSearch });
 	const policy = createPolicyDefaults();
+	const issues = [...(loaded.document?.issues ?? []), ...legacyIssues(loaded, modelKey)];
+	const retiredMode = issues.some((issue) => issue.code === RETIRED_REMOTE_WINDOWS_MODE_ISSUE);
 	policy.context = {
-		mode: !compaction.enabled ? "pi" : compaction.contextManagement === "remote" ? "remote-windows" : "remote-compaction",
+		mode: !compaction.enabled || retiredMode ? "pi" : "remote-compaction",
 		remoteCompaction: {
 			model: compaction.remoteCompactModel ?? null,
 			inputSource: compaction.remoteV2ContextSource,
@@ -204,7 +215,6 @@ function fromLegacy(loaded: LoadedToolkitConfig, model: WebSearchModel | undefin
 			apis: [...compaction.responsesApis],
 		},
 		nativeFallback: { ...compaction.nativeFallback, model: compaction.nativeFallback.model ?? null },
-		remoteWindows: { leaveManagedMode: compaction.leaveManagedMode, reminderThresholdPercent: compaction.contextReminderThresholdPercent },
 	};
 	policy.webSearch.route = route.route === "none" ? "unmanaged" : route.route;
 	policy.imageGeneration = {
@@ -225,8 +235,12 @@ function fromLegacy(loaded: LoadedToolkitConfig, model: WebSearchModel | undefin
 	const origins: Record<string, ConfigOrigin> = Object.create(null);
 	const raw = loaded.document?.raw;
 	for (const leaf of leafPaths(policy)) {
+		if (leaf === "context.mode" && retiredMode) {
+			// A blocked old selection owns no supported effective-mode origin.
+			origins[leaf] = { kind: "builtin" };
+			continue;
+		}
 		let input = LEGACY_PATHS[leaf] ?? leaf;
-		if (leaf === "context.mode" && !compaction.enabled) input = "compaction.enabled";
 		if (leaf === "webSearch.route") {
 			if (!config.webSearch.enabled) input = "webSearch.enabled";
 			else if (route.source === "exact") {
@@ -242,7 +256,6 @@ function fromLegacy(loaded: LoadedToolkitConfig, model: WebSearchModel | undefin
 		origins[leaf] = !ignored && ((raw && containsPath(raw, input)) || (!loaded.document && loaded.source))
 			? { kind: "legacy", path: input, source: loaded.source } : { kind: "builtin" };
 	}
-	const issues = [...(loaded.document?.issues ?? []), ...legacyIssues(loaded, modelKey)];
 	return { policy, origins, issues, invalidFeatures: selectedInvalidFeatures(issues, modelKey) };
 }
 
@@ -252,15 +265,12 @@ function engineConfig(policy: EffectiveToolkitPolicy, gatewayKeys: string[]): To
 	return {
 		compaction: {
 			enabled: context.mode !== "pi",
-			contextManagement: context.mode === "remote-windows" ? "remote" : "off",
 			remoteCompactModel: context.remoteCompaction.model ?? undefined,
 			remoteV2ContextSource: context.remoteCompaction.inputSource,
 			allowCompactionContinuityBreak: context.remoteCompaction.allowContinuityBreak,
 			responsesApis: [...context.remoteCompaction.apis],
 			gatewayContextModels: [...gatewayKeys],
 			nativeFallback: { ...context.nativeFallback, model: context.nativeFallback.model ?? undefined },
-			leaveManagedMode: context.remoteWindows.leaveManagedMode,
-			contextReminderThresholdPercent: context.remoteWindows.reminderThresholdPercent,
 			debug: diagnostics.level === "debug",
 			notifyOnLoad: diagnostics.notifyOnLoad,
 			logProviderPayloads: diagnostics.captureRequests,
