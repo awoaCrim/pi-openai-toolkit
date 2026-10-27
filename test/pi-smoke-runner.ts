@@ -15,7 +15,7 @@ try {
 	await mkdir(configDir, { recursive: true });
 	await writeFile(join(configDir, "config.json"), JSON.stringify({
 		schemaVersion: 2,
-		defaults: { responsesWebSocket: { enabled: true }, autoMode: { available: true, reviewerModel: "missing/reviewer" } },
+		defaults: { responsesWebSocket: { enabled: true }, context: { remoteWindows: { reminderThresholdPercent: 80 } }, autoMode: { available: true, reviewerModel: "missing/reviewer" } },
 	}));
 	const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } =
 		await import("@earendil-works/pi-coding-agent");
@@ -59,10 +59,17 @@ try {
 		noTools: "all",
 	});
 	try {
+		const notices: string[] = [];
+		const errors: string[] = [];
+		await session.bindExtensions({ mode: "rpc", uiContext: { notify: (text: string) => notices.push(text), setStatus: () => undefined } as never,
+			onError: (error) => errors.push(error.error) });
 		await session.prompt("Reply with the single word OK.");
 		const last = session.messages.at(-1);
 		if (last?.role !== "assistant" || last.content.filter((block) => block.type === "text").map((block) => block.text).join("") !== "OK") throw new Error("Unexpected faux response");
 		if (faux.state.callCount !== 1 || session.messages.some((message) => message.role === "toolResult")) throw new Error("Loading smoke unexpectedly ran another request/tool");
+		if (errors.length) throw new Error(`Pi extension errors: ${errors.join("; ")}`);
+		if (!notices.some((notice) => notice.includes("Auto Mode has been removed"))) throw new Error("Unrelated configuration warning was suppressed");
+		if (notices.some((notice) => /Remote Windows|remoteWindows/.test(notice))) throw new Error("Clean session received a dormant Remote Windows warning");
 		env.assertNoNetwork();
 	} finally {
 		session.dispose();

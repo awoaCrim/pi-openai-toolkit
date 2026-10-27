@@ -6,6 +6,7 @@ import { assertConfigValid, loadToolkitConfig, resolveToolkitConfig } from "../c
 import { describeToolkitConfig, registerToolkitConfigCommand } from "../config-command";
 import { previewToolkitMigration } from "./migration";
 import { notifyConfigIssues } from "./notifications";
+import { RETIRED_REMOTE_WINDOW_TYPE } from "../retired-remote-windows";
 
 const model = { provider: "p", id: "m", api: "openai-responses" };
 const secret = "private-retired-window-setting";
@@ -46,6 +47,9 @@ describe("Remote Windows configuration retirement", () => {
 				expect(describeToolkitConfig(resolved)).toMatch(/Remote Windows/i);
 				expect(describeToolkitConfig(resolved)).not.toContain(secret);
 				expect(JSON.stringify(resolved.issues)).not.toContain(secret);
+				const notices: string[] = [];
+				notifyConfigIssues({ hasUI: true, sessionManager: { getBranch: () => [] }, ui: { notify: (text: string) => notices.push(text) } } as never, resolved);
+				expect(notices).toEqual([]);
 				const preview = previewToolkitMigration(loaded);
 				expect(preview.status).toBe("already-v2");
 				expect(preview.reasons.join(" ")).toMatch(/Remote Windows/i);
@@ -97,14 +101,58 @@ describe("Remote Windows configuration retirement", () => {
 		expect(resolveToolkitConfig(loaded, model).invalidFeatures).toEqual(["webSearch"]);
 	});
 
-	test("notices are deduplicated and headless operation never uses UI", async () => {
+	test("dormant legacy settings do not notify a branch with ordinary compactions", () => {
+		const { loaded, file, bytes } = fixture({ compaction: { contextManagement: "off", leaveManagedMode: { secret }, contextReminderThresholdPercent: 80 } });
+		const resolved = resolveToolkitConfig(loaded, model);
+		const notices: string[] = [];
+		const ctx = { hasUI: true, sessionManager: {
+			getBranch: () => [{ type: "compaction", summary: "Native summary" }, { type: "compaction", details: { strategy: "remote_compaction_v2" } }],
+			getEntries: () => { throw new Error("must not inspect abandoned branches"); },
+		}, ui: { notify: (text: string) => notices.push(text) } };
+		notifyConfigIssues(ctx as never, resolved);
+		expect(notices).toEqual([]);
+		expect(resolved.issues).toHaveLength(3);
+		expect(describeToolkitConfig(resolved)).toMatch(/Remote Windows/i);
+		expect(fs.readFileSync(file, "utf8")).toBe(bytes);
+	});
+
+	for (const [raw, level, explanation] of [
+		[{ schemaVersion: 2, defaults: { context: { remoteWindows: null }, autoMode: null } }, "warning", "Auto Mode"],
+		[{ schemaVersion: 2, defaults: { context: { remoteWindows: null }, webSearch: { route: "invalid" } } }, "error", "defaults.webSearch.route"],
+		[{ schemaVersion: 2, defaults: { context: { remoteWindows: null, mode: "remote-windows" } } }, "error", "Context operations are blocked"],
+		[{ compaction: { contextManagement: "remote", leaveManagedMode: null } }, "error", "Context operations are blocked"],
+	] as const) {
+		test(`suppressing dormant settings preserves ${explanation} notices`, () => {
+			const { loaded } = fixture(raw);
+			const resolved = resolveToolkitConfig(loaded, model);
+			const notices: Array<{ message: string; level: string }> = [];
+			const ctx = { hasUI: true, sessionManager: { getBranch: () => [] }, ui: { notify: (message: string, level: string) => notices.push({ message, level }) } };
+			notifyConfigIssues(ctx as never, resolved);
+			notifyConfigIssues(ctx as never, resolved);
+			expect(notices).toHaveLength(1);
+			expect(notices[0].level).toBe(level);
+			expect(notices[0].message).toContain(explanation);
+			expect(notices[0].message).not.toContain("Remote Windows has been removed; these settings are ignored.");
+			expect(resolved.issues.length).toBeGreaterThan(1);
+		});
+	}
+
+	test("notices follow the active branch, are deduplicated and never use headless UI", async () => {
 		const { loaded } = fixture({ schemaVersion: 2, defaults: { context: { mode: "pi", remoteWindows: { secret } } } });
 		const resolved = resolveToolkitConfig(loaded, model);
 		const notices: string[] = [];
-		const ctx = { model, hasUI: true, sessionManager: {}, ui: { notify: (text: string) => notices.push(text) } };
+		let branch = [{ type: "custom_message", customType: RETIRED_REMOTE_WINDOW_TYPE }];
+		const ctx = { model, hasUI: true, sessionManager: { getBranch: () => branch }, ui: { notify: (text: string) => notices.push(text) } };
 		notifyConfigIssues(ctx as never, resolved); notifyConfigIssues(ctx as never, resolved);
 		expect(notices).toHaveLength(1);
 		expect(notices[0]).toMatch(/Remote Windows/i); expect(notices[0]).not.toContain(secret);
+		branch = [];
+		notifyConfigIssues(ctx as never, resolved);
+		expect(notices).toHaveLength(1);
+		branch = [{ type: "custom_message", customType: RETIRED_REMOTE_WINDOW_TYPE }];
+		notifyConfigIssues(ctx as never, resolved);
+		expect(notices).toHaveLength(2);
+		branch = [];
 		notifyConfigIssues({ hasUI: false, ui: { notify: () => { throw new Error("headless UI accessed"); } } } as never, resolved);
 		const commands = new Map<string, { handler: (args: string, ctx: never) => Promise<void> }>();
 		registerToolkitConfigCommand({ registerCommand: (name: string, command: never) => commands.set(name, command) } as never, () => loaded);
