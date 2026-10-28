@@ -6,7 +6,8 @@ import { createSmokeEnvironment } from "./pi-smoke-environment";
 const env = await createSmokeEnvironment();
 const scenario = process.argv[2];
 const standalone = scenario === "standalone" || scenario === "standalone-hook";
-const hookSource = scenario === "pi-context-hook" || scenario === "edited-checkpoint-hook" || scenario === "standalone-hook";
+const codemode = scenario === "codemode" || scenario === "codemode-hook";
+const hookSource = scenario === "pi-context-hook" || scenario === "codemode-hook" || scenario === "edited-checkpoint-hook" || scenario === "standalone-hook";
 const baseUrl = standalone ? "https://api.openai.com/v1" : "https://projection.invalid/v1";
 function canonicalWindow(index: number) {
 	// Provider JSON may contain these ordinary own keys; every persistence and
@@ -47,6 +48,19 @@ try {
 		sm.appendMessage({ ...fauxAssistantMessage("", { timestamp: 4 }), provider: model.provider, api: model.api, model: model.id,
 			content: [{ type: "toolCall", id: "fixture_call|fixture_item", name: "read", arguments: { path: "synthetic.txt" } }], stopReason: "toolUse" });
 		sm.appendMessage({ role: "toolResult", toolCallId: "fixture_call|fixture_item", toolName: "read", content: [{ type: "text", text: "SYNTHETIC-TOOL-RESULT" }], isError: false, timestamp: 5 });
+	}
+	if (codemode) {
+		const calls = [
+			{ type: "toolCall" as const, id: "call_codemode|ctc_custom", name: "codemode", arguments: { code: "text(73921)" } },
+			{ type: "toolCall" as const, id: "call_function|fc_function", name: "read", arguments: { path: "synthetic.txt" } },
+			{ type: "toolCall" as const, id: "call_legacy", name: "read", arguments: { path: "legacy.txt" } },
+		];
+		sm.appendMessage({ ...fauxAssistantMessage("", { timestamp: 4 }), provider: model.provider, api: model.api, model: model.id,
+			content: calls, stopReason: "toolUse" });
+		for (const [index, call] of calls.entries()) {
+			sm.appendMessage({ role: "toolResult", toolCallId: call.id, toolName: call.name,
+				content: [{ type: "text", text: `SYNTHETIC-TOOL-RESULT-${index}` }], isError: false, timestamp: 5 + index });
+		}
 	}
 	const settings = SettingsManager.inMemory({ retry: { enabled: false, provider: { maxRetries: 0 } },
 		compaction: { enabled: false, keepRecentTokens: 128, reserveTokens: 2048 } }, { projectTrusted: true });
@@ -107,6 +121,21 @@ try {
 			let output: Array<Record<string, unknown>>;
 			if (synthetic || request.url.endsWith("/compact")) {
 				compact++;
+				if (codemode && compact === 1) {
+					const items = body.input as Array<Record<string, unknown>>;
+					const calls = items.filter((item) => item.type === "function_call");
+					if (calls.some((call) => typeof call.id === "string" && !call.id.startsWith("fc_"))) {
+						return Response.json({ error: { type: "invalid_request_error", code: "invalid_value",
+							message: "Invalid function_call item ID: expected an fc_ prefix." } }, { status: 400 });
+					}
+					assert.deepEqual(calls.map((call) => call.id), [undefined, "fc_function", undefined]);
+					assert.deepEqual(calls.map((call) => call.call_id), ["call_codemode", "call_function", "call_legacy"]);
+					assert.equal(calls[0].name, "codemode");
+					assert.equal(calls[0].arguments, JSON.stringify({ code: "text(73921)" }));
+					const results = items.filter((item) => item.type === "function_call_output");
+					assert.deepEqual(results.map((result) => result.call_id), ["call_codemode", "call_function", "call_legacy"]);
+					assert.deepEqual(results.map((result) => result.output), ["SYNTHETIC-TOOL-RESULT-0", "SYNTHETIC-TOOL-RESULT-1", "SYNTHETIC-TOOL-RESULT-2"]);
+				}
 				assert.equal(text.includes("FULL-TRANSCRIPT-PHASE"), hookSource);
 				if (compact === 1) assert(text.includes("REPLACEMENT-BEFORE-COMPACT"));
 				if (compact === 2) {
@@ -146,7 +175,7 @@ try {
 					assert.equal(text.split(`STANDALONE-RETAINED-USER-${compact}`).length - 1, 1);
 					assert(!text.includes("opaque compaction window") && !text.includes("SYNTHETIC-TOOL-RESULT"));
 				}
-				assert(JSON.stringify(body).includes("CANONICAL-SYSTEM-HEAD"));
+				assert(JSON.stringify(body).includes("CANONICAL-SYSTEM-HEAD"), "unexpected native-summary fallback or missing canonical system prompt");
 				assert(text.includes("CONVERSATION-PHASE") && text.includes("FULL-TRANSCRIPT-PHASE"));
 				assert.deepEqual((body.tools as Array<{ name: string }>).map((tool) => tool.name), ["read"]);
 				if (live === 1) assert(text.includes("REPLACEMENT-BEFORE-COMPACT"));
@@ -182,11 +211,16 @@ try {
 			await compactSession();
 			if (failure) throw failure;
 			assert.equal(compact, 1);
-			if (standalone) {
+			if (standalone || codemode) {
 				const disk = await readFile(sm.getSessionFile()!, "utf8");
 				const checkpoint = disk.trim().split("\n").map((line) => JSON.parse(line)).findLast((entry) => entry.type === "compaction");
-				assert.deepEqual(checkpoint.details.compactedWindow, canonicalWindow(1));
-				assert.equal(checkpoint.summary, "[OpenAI standalone opaque compaction window]");
+				assert.deepEqual(checkpoint.details.compactedWindow, standalone ? canonicalWindow(1) : [{ type: "compaction", encrypted_content: "opaque-1" }]);
+				if (standalone) assert.equal(checkpoint.summary, "[OpenAI standalone opaque compaction window]");
+				else {
+					assert.equal(checkpoint.fromHook, true);
+					assert.equal(checkpoint.details.strategy, "openai-remote-compaction-v2");
+					assert(disk.includes("call_codemode|ctc_custom"), "original persisted tool ID was rewritten");
+				}
 				const reopened = SessionManager.open(sm.getSessionFile()!);
 				assert.deepEqual(reopened.buildSessionProjection().messages, sm.buildSessionProjection().messages);
 				assert.deepEqual(reopened.getBranch().findLast((entry) => entry.type === "compaction")?.details, checkpoint.details);
@@ -223,7 +257,7 @@ try {
 				session.refreshContext();
 				if (scenario !== "retain-none") { await compactSession(); assert.equal(compact, 2); }
 				await session.prompt("After compaction");
-				assert.equal(live, standalone ? 3 : 2);
+				assert.equal(live, standalone || codemode ? 3 : 2);
 				if (standalone) assert.equal(v2, compact, "one V2 attempt per standalone operation");
 			}
 		} else { assert.equal(live, 2); assert.equal(compact, 0); }

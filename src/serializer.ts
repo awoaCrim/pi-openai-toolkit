@@ -661,7 +661,8 @@ function serializeAssistantMessage(message: AssistantMessage, messageIndex: numb
 		const [callId, rawItemId] = block.id.split("|");
 		items.push({
 			type: "function_call",
-			id: rawItemId,
+			// Custom-tool item IDs are invalid on function_call; call_id retains pairing.
+			id: rawItemId?.startsWith("fc_") ? rawItemId : undefined,
 			call_id: callId,
 			name: block.name,
 			arguments: JSON.stringify(block.arguments),

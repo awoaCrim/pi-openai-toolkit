@@ -14,7 +14,7 @@ const calls = [
 	{ type: "toolCall" as const, id: "call_a|fc_a", name: "read", arguments: { path: "a" } },
 	{ type: "toolCall" as const, id: "call_b|fc_b", name: "read", arguments: { path: "b" } },
 ];
-function assistant(stopReason: "toolUse" | "error" | "aborted" = "toolUse"): Message {
+function assistant(stopReason: "toolUse" | "error" | "aborted" = "toolUse"): Extract<Message, { role: "assistant" }> {
 	return {
 		role: "assistant", provider: model.provider, api: model.api, model: model.id,
 		content: structuredClone(calls), stopReason, timestamp: 1,
@@ -65,6 +65,43 @@ describe("Responses trailing tool pairing", () => {
 			expect(serializeMessagesToResponsesInput(model, messages).some((item) => item.type === "function_call_output")).toBe(false);
 		}
 	});
+});
+
+describe("Responses tool-call item IDs", () => {
+	for (const [source, serialize] of [
+		["agent messages", serializeMessagesToResponsesInput],
+		["normalized LLM messages", serializeLlmMessagesToResponsesInput],
+	] as const) {
+		test(`omits incompatible optional IDs and preserves mixed call/result pairs: ${source}`, () => {
+			const cases = [
+				{ id: "call_custom|ctc_custom", callId: "call_custom", itemId: undefined },
+				{ id: "call_function|fc_function", callId: "call_function", itemId: "fc_function" },
+				{ id: "call_legacy", callId: "call_legacy", itemId: undefined },
+				{ id: "call_empty|", callId: "call_empty", itemId: undefined },
+				{ id: "call_wrong|msg_wrong", callId: "call_wrong", itemId: undefined },
+			];
+			const message = assistant();
+			message.content = cases.map(({ id }, index) => ({
+				type: "toolCall", id, name: "codemode", arguments: { code: `text(${index})` },
+			}));
+			const messages: Message[] = [message, ...cases.map(({ id }, index): Message => ({
+				role: "toolResult", toolCallId: id, toolName: "codemode", isError: false,
+				content: [{ type: "text", text: `result-${index}` }], timestamp: 2 + index,
+			}))];
+			const before = structuredClone(messages);
+			const input = serialize(model, messages);
+			expect(JSON.parse(JSON.stringify(input))).toEqual([
+				...cases.map(({ callId, itemId }, index) => ({
+					type: "function_call", ...(itemId === undefined ? {} : { id: itemId }),
+					call_id: callId, name: "codemode", arguments: JSON.stringify({ code: `text(${index})` }),
+				})),
+				...cases.map(({ callId }, index) => ({
+					type: "function_call_output", call_id: callId, output: `result-${index}`,
+				})),
+			]);
+			expect(messages).toEqual(before);
+		});
+	}
 });
 
 describe("Responses image input limits", () => {
