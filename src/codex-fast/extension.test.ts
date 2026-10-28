@@ -23,7 +23,7 @@ function harness(options: { sm?: SessionManager; model?: ExtensionContext["model
 	const notices: string[] = [];
 	const ctx = { model: options.model ?? model(), sessionManager: options.sm ?? SessionManager.inMemory("/fixture"),
 		hasUI: true, mode: options.mode ?? "tui", ui: {
-			setStatus: (key: string, value: string | undefined) => statuses.set(key, value),
+			setStatus: (key: string, value: string | undefined) => value === undefined ? statuses.delete(key) : statuses.set(key, value),
 			notify: (text: string) => notices.push(text),
 		} };
 	let failSave = false;
@@ -111,16 +111,65 @@ describe("Codex Fast extension", () => {
 		expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe("Fast ON");
 	});
 
-	test("model switching shows N/A without erasing selection", async () => {
+	test("an ineligible initial model has no Fast status and starts OFF when eligible", async () => {
+		const h = harness({ model: model({ api: "anthropic-messages", id: "claude-fable-5" }) });
+		await h.fire("session_start");
+		expect(h.statuses.has(CODEX_FAST_STATUS_KEY)).toBe(false);
+		expect(h.statuses.get("other")).toBe("keep");
+		h.ctx.model = model();
+		await h.fire("model_select", { model: h.ctx.model });
+		expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe("Fast OFF");
+		expect(h.ctx.sessionManager.getBranch()).toHaveLength(0);
+	});
+
+	for (const enabled of [false, true]) {
+		test(`model switches and reload hide ineligible status without erasing ${enabled ? "ON" : "OFF"}`, async () => {
+			const h = harness();
+			await h.fire("session_start");
+			await h.toggle();
+			if (!enabled) await h.toggle();
+			const entries = h.ctx.sessionManager.getBranch();
+			h.ctx.model = model({ api: "anthropic-messages", id: "claude-fable-5" });
+			await h.fire("model_select", { model: h.ctx.model });
+			expect(h.statuses.has(CODEX_FAST_STATUS_KEY)).toBe(false);
+			expect(await h.wire()).toBeUndefined();
+			await h.toggle();
+			expect(h.notices.at(-1)).toContain("unavailable");
+			expect(h.ctx.sessionManager.getBranch()).toEqual(entries);
+			h.ctx.model = model();
+			await h.fire("model_select", { model: h.ctx.model });
+			expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe(enabled ? "Fast ON" : "Fast OFF");
+			const reloaded = harness({ sm: h.ctx.sessionManager, model: model({ api: "anthropic-messages", id: "claude-fable-5" }) });
+			await reloaded.fire("session_start");
+			expect(reloaded.statuses.has(CODEX_FAST_STATUS_KEY)).toBe(false);
+			reloaded.ctx.model = model();
+			await reloaded.fire("model_select", { model: reloaded.ctx.model });
+			expect(reloaded.statuses.get(CODEX_FAST_STATUS_KEY)).toBe(enabled ? "Fast ON" : "Fast OFF");
+			expect(await reloaded.wire()).toMatchObject({ service_tier: enabled ? "priority" : "default" });
+			expect(reloaded.ctx.sessionManager.getBranch()).toEqual(entries);
+			expect(reloaded.statuses.get("other")).toBe("keep");
+		});
+	}
+
+	test("branch navigation while hidden restores the active branch preference", async () => {
 		const h = harness();
+		const root = h.ctx.sessionManager.appendMessage({ role: "user", content: "root", timestamp: 1 });
 		await h.fire("session_start");
 		await h.toggle();
+		const onLeaf = h.ctx.sessionManager.getLeafId()!;
 		h.ctx.model = model({ api: "anthropic-messages", id: "claude-fable-5" });
 		await h.fire("model_select", { model: h.ctx.model });
-		expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe("Fast N/A");
-		expect(await h.wire()).toBeUndefined();
-		await h.toggle();
-		expect(h.notices.at(-1)).toContain("unavailable");
+		h.ctx.sessionManager.branch(root);
+		await h.fire("session_tree");
+		expect(h.statuses.has(CODEX_FAST_STATUS_KEY)).toBe(false);
+		h.ctx.model = model();
+		await h.fire("model_select", { model: h.ctx.model });
+		expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe("Fast OFF");
+		h.ctx.model = model({ api: "anthropic-messages", id: "claude-fable-5" });
+		await h.fire("model_select", { model: h.ctx.model });
+		h.ctx.sessionManager.branch(onLeaf);
+		await h.fire("session_tree");
+		expect(h.statuses.has(CODEX_FAST_STATUS_KEY)).toBe(false);
 		h.ctx.model = model();
 		await h.fire("model_select", { model: h.ctx.model });
 		expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe("Fast ON");
@@ -254,7 +303,7 @@ describe("Codex Fast extension", () => {
 				expect(h.ctx.sessionManager.getBranch()).toHaveLength(0);
 				if (operation === "command") expect(h.notices.at(-1)).toContain("unchanged");
 				await h.fire("session_start");
-				expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe(changed === "session" ? "Fast OFF" : "Fast N/A");
+				expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe(changed === "session" ? "Fast OFF" : undefined);
 			});
 		}
 	}
@@ -267,7 +316,7 @@ describe("Codex Fast extension", () => {
 			} });
 			await h.fire("session_start");
 			await h.toggle();
-			expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe("Fast N/A");
+			expect(h.statuses.has(CODEX_FAST_STATUS_KEY)).toBe(false);
 			expect(h.notices.at(-1)).toContain("unavailable");
 			expect(h.ctx.sessionManager.getBranch()).toHaveLength(0);
 			expect(await h.wire()).toBeUndefined();
@@ -283,19 +332,52 @@ describe("Codex Fast extension", () => {
 		expect(await h.wire(request(), older)).toMatchObject({ service_tier: "priority" });
 	});
 
-	test("stale async status refresh cannot overwrite a newer model state", async () => {
-		let blockNext = true;
-		let release: (value: Awaited<ReturnType<typeof resolveEffectiveModel>>) => void = () => {};
-		const h = harness({ resolveModel: async (_ctx, selected) => {
-			if (blockNext) { blockNext = false; return new Promise((resolve) => { release = resolve; }); }
-			return { ok: true, model: selected!, virtual: false };
-		} });
-		const stale = h.fire("session_start");
-		const native = h.ctx.model;
-		h.ctx.model = model({ api: "anthropic-messages", id: "claude-fable-5" });
-		await h.fire("model_select", { model: h.ctx.model });
-		release({ ok: true, model: native, virtual: false });
-		await stale;
-		expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe("Fast N/A");
-	});
+	for (const staleEligible of [false, true]) {
+		test(`out-of-order ${staleEligible ? "eligible" : "ineligible"} refresh cannot overwrite a newer model state`, async () => {
+			let blockNext = false;
+			let release: (value: Awaited<ReturnType<typeof resolveEffectiveModel>>) => void = () => {};
+			const h = harness({ resolveModel: async (_ctx, selected) => {
+				if (blockNext) { blockNext = false; return new Promise((resolve) => { release = resolve; }); }
+				return { ok: true, model: selected!, virtual: false };
+			} });
+			await h.fire("session_start");
+			await h.toggle();
+			h.ctx.model = staleEligible ? model() : model({ api: "anthropic-messages", id: "claude-fable-5" });
+			const staleModel = h.ctx.model;
+			blockNext = true;
+			const stale = h.fire("model_select", { model: staleModel });
+			h.ctx.model = staleEligible ? model({ api: "anthropic-messages", id: "claude-fable-5" }) : model();
+			await h.fire("model_select", { model: h.ctx.model });
+			const expected = staleEligible ? undefined : "Fast ON";
+			expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe(expected);
+			release({ ok: true, model: staleModel, virtual: false });
+			await stale;
+			expect(h.statuses.get(CODEX_FAST_STATUS_KEY)).toBe(expected);
+			expect(h.ctx.sessionManager.getBranch()).toHaveLength(1);
+		});
+	}
+
+	for (const event of ["session_start", "session_tree", "session_shutdown"]) {
+		test(`a pending eligible refresh cannot restore hidden status after ${event}`, async () => {
+			let blockNext = false;
+			let release: (value: Awaited<ReturnType<typeof resolveEffectiveModel>>) => void = () => {};
+			const h = harness({ resolveModel: async (_ctx, selected) => {
+				if (blockNext) { blockNext = false; return new Promise((resolve) => { release = resolve; }); }
+				return { ok: true, model: selected!, virtual: false };
+			} });
+			await h.fire("session_start");
+			await h.toggle();
+			const original = h.ctx.model;
+			blockNext = true;
+			const stale = h.fire("model_select", { model: original });
+			h.ctx.model = model({ api: "anthropic-messages", id: "claude-fable-5" });
+			if (event === "session_start") h.ctx.sessionManager = SessionManager.inMemory("/resumed-session");
+			await h.fire(event);
+			expect(h.statuses.has(CODEX_FAST_STATUS_KEY)).toBe(false);
+			release({ ok: true, model: original, virtual: false });
+			await stale;
+			expect(h.statuses.has(CODEX_FAST_STATUS_KEY)).toBe(false);
+			expect(h.statuses.get("other")).toBe("keep");
+		});
+	}
 });

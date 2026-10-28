@@ -59,7 +59,7 @@ export function registerCodexFastExtension(
 		const id = currentSessionId;
 		const eligible = id && await eligibleModel(ctx, model);
 		if (epoch !== statusEpoch || sessionId(ctx) !== id) return;
-		if (ctx.hasUI) ctx.ui.setStatus(CODEX_FAST_STATUS_KEY, eligible ? "Fast " + (enabled ? "ON" : "OFF") : "Fast N/A");
+		if (ctx.hasUI) ctx.ui.setStatus(CODEX_FAST_STATUS_KEY, eligible ? "Fast " + (enabled ? "ON" : "OFF") : undefined);
 	}
 
 	pi.on("session_start", async (_event, ctx) => { restore(ctx); await refreshStatus(ctx); });
