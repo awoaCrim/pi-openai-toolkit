@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { observeContinuation } from "./notifications";
+import { clearSendStats, formatSendStats } from "./stats";
 import {
 	getApiProvider,
 	normalizeContext,
@@ -725,5 +726,9 @@ test("continuation diagnostics distinguish expected rebuilds from prefix changes
   await (await fetch(responsesUrl,directRequest())).text();
   await (await fetch(responsesUrl,directRequest({...directPayload,tools:[{type:"web_search"}]}))).text();
   expect(outcomes).toEqual(["expected-full","delta","prefix-mismatch","expected-full","expected-full"]);
+  expect(formatSendStats("diagnostics")).toContain("full 4, delta 1");
+  expect(formatSendStats("diagnostics")).toContain("history prefix mismatch");
+  expect(formatSendStats("diagnostics")).toContain("request settings changed");
+  clearSendStats("diagnostics");
  } finally { dispose(); }
 });

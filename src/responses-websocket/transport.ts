@@ -7,6 +7,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import type { ApiProvider } from "@earendil-works/pi-ai/compat";
 import { reportContinuation } from "./notifications";
+import { recordSend } from "./stats";
 
 const RESPONSES_WEBSOCKET_BETA = "responses_websockets=2026-02-06";
 const WEBSOCKET_OPEN = 1;
@@ -478,13 +479,15 @@ function replayComparableItem(item: unknown): unknown {
 	return item;
 }
 
-function buildCachedRequestBody(entry: CachedSocketEntry, body: ResponsesPayload): ResponsesPayload {
+function buildCachedRequestBody(entry: CachedSocketEntry, body: ResponsesPayload, decision: (reason: string) => void): ResponsesPayload {
 	const continuation = entry.continuation;
 	if (!continuation) {
+		decision("no cached baseline (new/reconnected socket)");
 		reportContinuation(entry.sessionId, "expected-full");
 		return body;
 	}
 	if (!requestBodiesMatchExceptInput(body, continuation.lastRequestBody)) {
+		decision("request settings changed");
 		reportContinuation(entry.sessionId, "expected-full");
 		entry.continuation = undefined;
 		return body;
@@ -494,15 +497,18 @@ function buildCachedRequestBody(entry: CachedSocketEntry, body: ResponsesPayload
 	if (currentInput.length < inputItems(continuation.lastRequestBody).length) {
 		// A shortened request history is an expected compaction/branch rebuild.
 		// Missing *response* items alone (e.g. hosted tools) are not compaction.
+		decision("history shortened");
 		reportContinuation(entry.sessionId, "expected-full");
 		entry.continuation = undefined;
 		return body;
 	}
 	if (!responseInputsEqual(currentInput.slice(0, baseline.length).map(replayComparableItem), baseline.map(replayComparableItem))) {
+		decision("history prefix mismatch");
 		reportContinuation(entry.sessionId, "prefix-mismatch");
 		entry.continuation = undefined;
 		return body;
 	}
+	decision("matched continuation");
 	reportContinuation(entry.sessionId, "delta");
 	return {
 		...body,
@@ -538,6 +544,7 @@ async function createSseResponse(
 	onTerminal: (event: Record<string, unknown>) => boolean,
 	onRelease: (keep: boolean) => void,
 	allowBootstrapFallback: boolean,
+	onSent: () => void,
 ): Promise<Response> {
 	const encoder = new TextEncoder();
 	let resolveReady!: () => void;
@@ -619,6 +626,7 @@ async function createSseResponse(
 			armIdleTimer();
 			try {
 				socket.send(requestFrame);
+				onSent();
 			} catch (error) {
 				fail(transportError(error));
 			}
@@ -692,7 +700,8 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 				lease.release(keep);
 			};
 			const fullPayload = payload;
-			const requestPayload = lease.entry ? buildCachedRequestBody(lease.entry, fullPayload) : fullPayload;
+			let reason = "uncached socket (no session/cache disabled/busy)";
+			const requestPayload = lease.entry ? buildCachedRequestBody(lease.entry, fullPayload, value => { reason = value; }) : fullPayload;
 			const requestFrame = JSON.stringify({ type: "response.create", ...requestPayload });
 			return await createSseResponse(
 				lease.socket,
@@ -702,10 +711,17 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 				(event) => completedContinuation(lease.entry, fullPayload, event),
 				release,
 				transportMode(options) === "auto",
+				() => recordSend(options.sessionId, {
+					transport: "websocket", mode: requestPayload.previous_response_id ? "delta" : "full",
+					reason, bytes: new TextEncoder().encode(requestFrame).byteLength,
+					items: inputItems(requestPayload).length, at: Date.now(),
+				}),
 			);
 		} catch (error) {
 			release?.(false);
 			if (error instanceof RecoverableWebSocketError && transportMode(options) === "auto" && !signals.some((signal) => signal.aborted)) {
+				recordSend(options.sessionId, { transport: "sse-fallback", mode: "full", reason: "WebSocket transport recovery",
+					bytes: new TextEncoder().encode(bodyText).byteLength, items: inputItems(payload).length, at: Date.now() });
 				return fallback(input, init);
 			}
 			throw error;

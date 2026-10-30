@@ -3,6 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadToolkitConfig, resolveToolkitConfig } from "../config";
 import { closeResponsesWebSocketSessions, createResponsesWebSocketProvider } from "./transport";
 import { createFallbackNotifier, observeContinuation } from "./notifications";
+import { clearSendStats, formatSendStats } from "./stats";
 
 const SOURCE_ID = "pi-openai-toolkit:openai-responses-websocket";
 type ApiProviderInternal = NonNullable<ReturnType<typeof getApiProvider>>;
@@ -63,6 +64,13 @@ export default function responsesWebSocketExtension(pi: ExtensionAPI): void {
 	installResponsesWebSocketTransport();
 	let dispose: (() => void) | undefined;
 	let sessionId: string | undefined;
+	pi.registerCommand("ws-status", {
+		description: "Show this session's observed full/delta transport sends (in memory).",
+		handler: async (args, ctx) => {
+			if (args.trim()) { ctx.ui.notify("Usage: /ws-status", "warning"); return; }
+			if (ctx.hasUI) ctx.ui.notify(formatSendStats(ctx.sessionManager.getSessionId()), "info");
+		},
+	});
 	pi.on("session_start", (_event, ctx) => {
 		dispose?.();
 		sessionId = ctx.sessionManager.getSessionId();
@@ -74,7 +82,10 @@ export default function responsesWebSocketExtension(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", () => {
 		dispose?.();
 		dispose = undefined;
-		if (sessionId) closeResponsesWebSocketSessions(sessionId);
+		if (sessionId) {
+			closeResponsesWebSocketSessions(sessionId);
+			clearSendStats(sessionId);
+		}
 		sessionId = undefined;
 	});
 }

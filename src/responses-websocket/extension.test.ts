@@ -26,7 +26,7 @@ afterEach(() => {
 describe("Responses WebSocket extension", () => {
 	test("routes warnings to the owning session and detaches on shutdown", async () => {
 		const handlers = new Map<string, Function>();
-		responsesWebSocketExtension({ on: (name: string, handler: Function) => handlers.set(name, handler) } as any);
+		responsesWebSocketExtension({ registerCommand: () => {}, on: (name: string, handler: Function) => handlers.set(name, handler) } as any);
 		const notices: string[] = [];
 		const ctx = { hasUI: true, sessionManager: { getSessionId: () => "ui-test" }, ui: { notify: (text: string) => notices.push(text) } };
 		await handlers.get("session_start")!({}, ctx);
