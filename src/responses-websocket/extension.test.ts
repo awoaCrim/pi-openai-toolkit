@@ -5,7 +5,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getApiProvider, resetApiProviders } from "@earendil-works/pi-ai/compat";
 import { loadToolkitConfig } from "../config";
-import { installResponsesWebSocketTransport } from "./extension";
+import responsesWebSocketExtension, { installResponsesWebSocketTransport } from "./extension";
+import { reportContinuation } from "./notifications";
 
 const tempDirs: string[] = [];
 
@@ -23,6 +24,21 @@ afterEach(() => {
 });
 
 describe("Responses WebSocket extension", () => {
+	test("routes warnings to the owning session and detaches on shutdown", async () => {
+		const handlers = new Map<string, Function>();
+		responsesWebSocketExtension({ on: (name: string, handler: Function) => handlers.set(name, handler) } as any);
+		const notices: string[] = [];
+		const ctx = { hasUI: true, sessionManager: { getSessionId: () => "ui-test" }, ui: { notify: (text: string) => notices.push(text) } };
+		await handlers.get("session_start")!({}, ctx);
+		reportContinuation("other-session", "prefix-mismatch");
+		expect(notices).toHaveLength(0);
+		reportContinuation("ui-test", "prefix-mismatch");
+		reportContinuation("ui-test", "prefix-mismatch");
+		expect(notices).toHaveLength(1);
+		await handlers.get("session_shutdown")!({}, ctx);
+		reportContinuation("ui-test", "prefix-mismatch");
+		expect(notices).toHaveLength(1);
+	});
 	test("does not replace the generic Responses adapter when the flag is omitted", () => {
 		const original = getApiProvider("openai-responses");
 		expect(original).toBeDefined();
