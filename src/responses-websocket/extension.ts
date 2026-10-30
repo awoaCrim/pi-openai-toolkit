@@ -65,9 +65,9 @@ export default function responsesWebSocketExtension(pi: ExtensionAPI): void {
 	let dispose: (() => void) | undefined;
 	let sessionId: string | undefined;
 	pi.registerCommand("ws-status", {
-		description: "Show this session's observed full/delta transport sends (in memory).",
+		description: "查看当前会话的全量／增量发送情况（内存统计）。",
 		handler: async (args, ctx) => {
-			if (args.trim()) { ctx.ui.notify("Usage: /ws-status", "warning"); return; }
+			if (args.trim()) { ctx.ui.notify("用法：/ws-status", "warning"); return; }
 			if (ctx.hasUI) ctx.ui.notify(formatSendStats(ctx.sessionManager.getSessionId()), "info");
 		},
 	});

@@ -29,6 +29,6 @@ export function createFallbackNotifier(notify: (message: string) => void): Liste
 		}
 		if (warned) return;
 		warned = true;
-		notify("Incremental upload unavailable: history prefix mismatch; sending full context.");
+		notify("增量未命中：历史前缀不匹配，本次全量上传。");
 	};
 }

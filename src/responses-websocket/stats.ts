@@ -23,12 +23,22 @@ export function recordSend(sessionId: string | undefined, record: SendRecord): v
 
 export function clearSendStats(sessionId: string): void { sessions.delete(sessionId); }
 
+const REASONS: Record<string, string> = {
+	"no cached baseline (new/reconnected socket)": "无缓存基线（新建或重连）",
+	"request settings changed": "请求设置发生变化",
+	"history shortened": "历史上下文缩短",
+	"history prefix mismatch": "历史前缀不匹配",
+	"matched continuation": "续传匹配成功",
+	"uncached socket (no session/cache disabled/busy)": "未缓存连接（无会话、缓存关闭或连接忙）",
+	"WebSocket transport recovery": "WebSocket 故障，回退 SSE",
+};
+
 export function formatSendStats(sessionId: string): string {
 	const stats = sessions.get(sessionId);
-	if (!stats) return "No transport samples for this session. Send a request after /reload. Ordinary SSE and other adapters are not observed; no samples does not mean incremental upload is working.";
+	if (!stats) return "当前会话暂无传输数据。请在 /reload 后执行一轮任务。普通 SSE 和其他适配器不在采集范围内；无数据不代表增量正常。";
 	return [
-		`Transport sends since load: full ${stats.full}, delta ${stats.delta}, SSE fallbacks ${stats.sseFallback}.`,
-		...stats.recent.map(r => `${new Date(r.at).toISOString()} | ${r.transport} | ${r.mode} | ${r.bytes} bytes | ${r.items} input items | ${r.reason}`),
-		"Payload bytes before TLS/compression, not token usage. Sends include retries, not only successful responses. In-memory samples reset on reload/shutdown; recent 5 shown.",
+		`本次加载以来：全量 ${stats.full} 次，增量 ${stats.delta} 次，SSE 回退 ${stats.sseFallback} 次。`,
+		...stats.recent.map(r => `${new Date(r.at).toLocaleTimeString("zh-CN", { hour12: false })} | ${r.transport === "websocket" ? "WebSocket" : "SSE 回退"} | ${r.mode === "full" ? "全量" : "增量"} | ${r.bytes} 字节 | ${r.items} 条输入 | ${REASONS[r.reason] ?? r.reason}`),
+		"字节数为 TLS／压缩前的请求数据量，不是 token 数；发送次数包含重试，不代表全部成功。只显示最近 5 次，内存统计在重载或关闭会话后清空。",
 	].join("\n");
 }
