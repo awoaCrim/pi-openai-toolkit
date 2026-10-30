@@ -7,6 +7,7 @@ import { getApiProvider, resetApiProviders } from "@earendil-works/pi-ai/compat"
 import { loadToolkitConfig } from "../config";
 import responsesWebSocketExtension, { installResponsesWebSocketTransport } from "./extension";
 import { reportContinuation } from "./notifications";
+import { recordSend, formatSendStats } from "./stats";
 
 const tempDirs: string[] = [];
 
@@ -24,6 +25,34 @@ afterEach(() => {
 });
 
 describe("Responses WebSocket extension", () => {
+	test("overlapping owners of one session keep state until the last owner exits", async () => {
+		const a = new Map<string, Function>(), b = new Map<string, Function>();
+		responsesWebSocketExtension({ registerCommand: () => {}, on: (n: string, fn: Function) => a.set(n, fn) } as any);
+		responsesWebSocketExtension({ registerCommand: () => {}, on: (n: string, fn: Function) => b.set(n, fn) } as any);
+		const id = randomUUID();
+		const ctx = { hasUI: false, sessionManager: { getSessionId: () => id } };
+		await a.get("session_start")!({}, ctx);
+		await b.get("session_start")!({}, ctx);
+		recordSend(id, { transport: "websocket", mode: "delta", reason: "matched continuation", bytes: 10, items: 1, at: 0 });
+		await a.get("session_shutdown")!({}, ctx);
+		expect(formatSendStats(id)).toContain("增量 1 次");
+		await a.get("session_shutdown")!({}, ctx);
+		expect(formatSendStats(id)).toContain("增量 1 次");
+		await b.get("session_shutdown")!({}, ctx);
+		expect(formatSendStats(id)).toContain("暂无传输数据");
+	});
+	test("closing one session does not clear another session's counters", async () => {
+		const handlers = new Map<string, Function>();
+		responsesWebSocketExtension({ registerCommand: () => {}, on: (n: string, fn: Function) => handlers.set(n, fn) } as any);
+		const id = randomUUID(), other = randomUUID();
+		const ctx = { hasUI: false, sessionManager: { getSessionId: () => id } };
+		await handlers.get("session_start")!({}, ctx);
+		recordSend(other, { transport: "websocket", mode: "delta", reason: "matched continuation", bytes: 10, items: 1, at: 0 });
+		await handlers.get("session_shutdown")!({}, ctx);
+		expect(formatSendStats(other)).toContain("增量 1 次");
+		const { clearSendStats } = await import("./stats");
+		clearSendStats(other);
+	});
 	test("routes warnings to the owning session and detaches on shutdown", async () => {
 		const handlers = new Map<string, Function>();
 		responsesWebSocketExtension({ registerCommand: () => {}, on: (name: string, handler: Function) => handlers.set(name, handler) } as any);

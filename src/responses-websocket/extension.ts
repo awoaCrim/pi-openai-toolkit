@@ -10,6 +10,7 @@ type ApiProviderInternal = NonNullable<ReturnType<typeof getApiProvider>>;
 type ResponsesWebSocketRegistryState = {
 	baseProvider?: ApiProviderInternal;
 	installedProvider?: ApiProviderInternal;
+	owners?: Map<string, Set<symbol>>;
 };
 
 const REGISTRY_STATE_KEY = Symbol.for("pi-openai-toolkit.responses-websocket.registry");
@@ -64,6 +65,20 @@ export default function responsesWebSocketExtension(pi: ExtensionAPI): void {
 	installResponsesWebSocketTransport();
 	let dispose: (() => void) | undefined;
 	let sessionId: string | undefined;
+	const owner = Symbol("websocket-session-owner");
+	const owners = registryState().owners ??= new Map<string, Set<symbol>>();
+	function releaseSession(): void {
+		dispose?.();
+		dispose = undefined;
+		if (!sessionId) return;
+		const group = owners.get(sessionId);
+		if (group?.delete(owner) && group.size === 0) {
+			owners.delete(sessionId);
+			closeResponsesWebSocketSessions(sessionId);
+			clearSendStats(sessionId);
+		}
+		sessionId = undefined;
+	}
 	pi.registerCommand("ws-status", {
 		description: "查看当前会话的全量／增量发送情况（内存统计）。",
 		handler: async (args, ctx) => {
@@ -72,20 +87,19 @@ export default function responsesWebSocketExtension(pi: ExtensionAPI): void {
 		},
 	});
 	pi.on("session_start", (_event, ctx) => {
+		const nextId = ctx.sessionManager.getSessionId();
+		if (sessionId && sessionId !== nextId) releaseSession();
 		dispose?.();
-		sessionId = ctx.sessionManager.getSessionId();
+		sessionId = nextId;
+		const group = owners.get(sessionId) ?? new Set<symbol>();
+		group.add(owner);
+		owners.set(sessionId, group);
 		const notify = createFallbackNotifier((message) => {
 			if (ctx.hasUI) ctx.ui.notify(message, "warning");
 		});
 		dispose = observeContinuation(sessionId, notify);
 	});
 	pi.on("session_shutdown", () => {
-		dispose?.();
-		dispose = undefined;
-		if (sessionId) {
-			closeResponsesWebSocketSessions(sessionId);
-			clearSendStats(sessionId);
-		}
-		sessionId = undefined;
+		releaseSession();
 	});
 }

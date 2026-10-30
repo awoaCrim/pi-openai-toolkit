@@ -1,15 +1,16 @@
 // Metadata only: never include payloads, credentials, or response IDs.
 export type ContinuationOutcome = "delta" | "expected-full" | "prefix-mismatch";
 type Listener = (outcome: ContinuationOutcome) => void;
-const listeners = new Map<string, Set<Listener>>();
+const LISTENERS_KEY = Symbol.for("pi-openai-toolkit.responses-websocket.listeners");
+const shared = globalThis as typeof globalThis & { [key: symbol]: Map<string, Set<Listener>> | undefined };
+const listeners = shared[LISTENERS_KEY] ??= new Map<string, Set<Listener>>();
 
 export function observeContinuation(sessionId: string, listener: Listener): () => void {
 	const group = listeners.get(sessionId) ?? new Set<Listener>();
 	group.add(listener);
 	listeners.set(sessionId, group);
 	return () => {
-		group.delete(listener);
-		if (group.size === 0) listeners.delete(sessionId);
+		if (group.delete(listener) && group.size === 0 && listeners.get(sessionId) === group) listeners.delete(sessionId);
 	};
 }
 

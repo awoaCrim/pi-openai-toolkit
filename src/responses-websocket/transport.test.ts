@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import { observeContinuation } from "./notifications";
 import { clearSendStats, formatSendStats } from "./stats";
 import {
@@ -205,6 +206,24 @@ afterEach(() => {
 });
 
 describe("Responses WebSocket transport", () => {
+	test("independent adapter instances reuse one session connection and continuation", async () => {
+		const { instances } = installFakeWebSocket();
+		const a = await import(`./transport.ts?instance=${randomUUID()}`);
+		const b = await import(`./transport.ts?instance=${randomUUID()}`);
+		const id = randomUUID();
+		const options = { apiKey: "test-key", sessionId: id, transport: "websocket-cached" as const };
+		await (await a.createResponsesWebSocketFetch(model(), options)(responsesUrl, directRequest())).text();
+		const output = (responseEvents("hello").at(-1)! as any).response.output;
+		const second = { ...directPayload, input: [...directPayload.input, ...output, { role: "user", content: "next" }] };
+		await (await b.createResponsesWebSocketFetch(model(), options)(responsesUrl, directRequest(second))).text();
+		expect(instances).toHaveLength(1);
+		const sent = JSON.parse(instances[0]!.sent[1]!);
+		expect(sent.previous_response_id).toBe("resp_1");
+		expect(sent.input).toEqual([{ role: "user", content: "next" }]);
+		expect(formatSendStats(id)).toContain("全量 1 次，增量 1 次");
+		a.closeResponsesWebSocketSessions(id);
+		clearSendStats(id);
+	});
 	test("requires the Toolkit feature flag and selects only GPT openai-responses models", () => {
 		expect(shouldUseResponsesWebSocket(model(), { transport: "auto" })).toBe(false);
 		expect(shouldUseResponsesWebSocket(model(), { transport: "auto" }, true)).toBe(true);

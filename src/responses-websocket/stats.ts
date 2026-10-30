@@ -2,12 +2,15 @@ export type SendRecord = {
 	transport: "websocket" | "sse-fallback";
 	mode: "full" | "delta";
 	reason: string;
+	changedFields?: string[];
 	bytes: number;
 	items: number;
 	at: number;
 };
 type Stats = { full: number; delta: number; sseFallback: number; recent: SendRecord[] };
-const sessions = new Map<string, Stats>();
+const STATS_KEY = Symbol.for("pi-openai-toolkit.responses-websocket.stats");
+const shared = globalThis as typeof globalThis & { [key: symbol]: Map<string, Stats> | undefined };
+const sessions = shared[STATS_KEY] ??= new Map<string, Stats>();
 
 export function recordSend(sessionId: string | undefined, record: SendRecord): void {
 	if (!sessionId) return;
@@ -37,8 +40,8 @@ export function formatSendStats(sessionId: string): string {
 	const stats = sessions.get(sessionId);
 	if (!stats) return "当前会话暂无传输数据。请在 /reload 后执行一轮任务。普通 SSE 和其他适配器不在采集范围内；无数据不代表增量正常。";
 	return [
-		`本次加载以来：全量 ${stats.full} 次，增量 ${stats.delta} 次，SSE 回退 ${stats.sseFallback} 次。`,
-		...stats.recent.map(r => `${new Date(r.at).toLocaleTimeString("zh-CN", { hour12: false })} | ${r.transport === "websocket" ? "WebSocket" : "SSE 回退"} | ${r.mode === "full" ? "全量" : "增量"} | ${r.bytes} 字节 | ${r.items} 条输入 | ${REASONS[r.reason] ?? r.reason}`),
-		"字节数为 TLS／压缩前的请求数据量，不是 token 数；发送次数包含重试，不代表全部成功。只显示最近 5 次，内存统计在重载或关闭会话后清空。",
+		`当前会话：全量 ${stats.full} 次，增量 ${stats.delta} 次，SSE 回退 ${stats.sseFallback} 次。`,
+		...stats.recent.map(r => `${new Date(r.at).toLocaleTimeString("zh-CN", { hour12: false })} | ${r.transport === "websocket" ? "WebSocket" : "SSE 回退"} | ${r.mode === "full" ? "全量" : "增量"} | ${r.bytes} 字节 | ${r.items} 条输入 | ${REASONS[r.reason] ?? r.reason}${r.changedFields?.length ? `（${r.changedFields.join(", ")}）` : ""}`),
+		"字节数为 TLS／压缩前的请求数据量，不是 token 数；发送次数包含重试，不代表全部成功。只显示最近 5 次；同进程的扩展实例共享统计，该会话资源全部释放或服务重启后清空。",
 	].join("\n");
 }

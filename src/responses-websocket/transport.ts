@@ -58,7 +58,9 @@ type AcquiredSocket = {
 	release(keep: boolean): void;
 };
 
-const cachedSockets = new Map<string, CachedSocketEntry>();
+const SOCKETS_KEY = Symbol.for("pi-openai-toolkit.responses-websocket.sockets");
+const shared = globalThis as typeof globalThis & { [key: symbol]: Map<string, CachedSocketEntry> | undefined };
+const cachedSockets = shared[SOCKETS_KEY] ??= new Map<string, CachedSocketEntry>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
@@ -479,7 +481,7 @@ function replayComparableItem(item: unknown): unknown {
 	return item;
 }
 
-function buildCachedRequestBody(entry: CachedSocketEntry, body: ResponsesPayload, decision: (reason: string) => void): ResponsesPayload {
+function buildCachedRequestBody(entry: CachedSocketEntry, body: ResponsesPayload, decision: (reason: string, changedFields?: string[]) => void): ResponsesPayload {
 	const continuation = entry.continuation;
 	if (!continuation) {
 		decision("no cached baseline (new/reconnected socket)");
@@ -487,7 +489,11 @@ function buildCachedRequestBody(entry: CachedSocketEntry, body: ResponsesPayload
 		return body;
 	}
 	if (!requestBodiesMatchExceptInput(body, continuation.lastRequestBody)) {
-		decision("request settings changed");
+		const current = requestBodyWithoutInput(body);
+		const previous = requestBodyWithoutInput(continuation.lastRequestBody);
+		const changedFields = [...new Set([...Object.keys(current), ...Object.keys(previous)])]
+			.filter(key => !responseInputsEqual(current[key], previous[key])).sort();
+		decision("request settings changed", changedFields);
 		reportContinuation(entry.sessionId, "expected-full");
 		entry.continuation = undefined;
 		return body;
@@ -701,7 +707,8 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 			};
 			const fullPayload = payload;
 			let reason = "uncached socket (no session/cache disabled/busy)";
-			const requestPayload = lease.entry ? buildCachedRequestBody(lease.entry, fullPayload, value => { reason = value; }) : fullPayload;
+			let changedFields: string[] | undefined;
+			const requestPayload = lease.entry ? buildCachedRequestBody(lease.entry, fullPayload, (value, fields) => { reason = value; changedFields = fields; }) : fullPayload;
 			const requestFrame = JSON.stringify({ type: "response.create", ...requestPayload });
 			return await createSseResponse(
 				lease.socket,
@@ -713,7 +720,7 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 				transportMode(options) === "auto",
 				() => recordSend(options.sessionId, {
 					transport: "websocket", mode: requestPayload.previous_response_id ? "delta" : "full",
-					reason, bytes: new TextEncoder().encode(requestFrame).byteLength,
+					reason, changedFields, bytes: new TextEncoder().encode(requestFrame).byteLength,
 					items: inputItems(requestPayload).length, at: Date.now(),
 				}),
 			);
