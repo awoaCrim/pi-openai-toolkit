@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { registerHostedSearchHistory } from "./history-extension";
 import { assertConfigValid, loadToolkitConfig, resolveToolkitConfig, type ResolvedToolkitConfig } from "../config";
 import { notifyConfigIssues } from "../config/notifications";
 import { registerPhysicalModelObserver, resolveResponsesEnvironment, type ResponsesEnvironmentResolution } from "../runtime";
@@ -524,6 +525,7 @@ export function registerWebSearchExtension(
 
 export default function webSearchExtension(pi: ExtensionAPI): void {
 	registerWebSearchExtension(pi);
+	registerHostedSearchHistory(pi);
 }
 
 export const _extensionTest = {
