@@ -88,6 +88,8 @@
     "src/types.ts",
     "src/web-search/alpha-client.ts",
     "src/web-search/extension.ts",
+    "src/web-search/history.ts",
+    "src/web-search/history-extension.ts",
     "src/web-search/payload.ts",
     "src/web-search/prompt.ts",
     "src/web-search/types.ts",
