@@ -112,6 +112,8 @@ Toolkit 的 WebSocket adapter 默认关闭。对使用 Pi `openai-responses` API
 
 它沿用当前模型的 provider、base URL、凭据、headers 和 model ID，不注册新的 provider。Pi 的 `transport: "auto"` 会先尝试 WebSocket，并在开始流式输出前回退到 SSE；会话 ID 稳定时还会复用连接，并在历史匹配时只发送新的 continuation 输入。使用 `transport: "websocket-cached"` 可强制要求缓存连接路径，使用 `transport: "sse"` 则保持原有 HTTP/SSE 路径。修改 Toolkit 配置后请重启或 reload Pi。详见[WebSocket 配置](docs/configuration.md#responses-websocket-transport)。
 
+大小保护优先于 WebSocket 传输偏好：实际 UTF-8 `response.create` 帧达到 15 MiB 时，直接使用原始完整 HTTP/SSE 请求。该值是安全余量，不是后端公开承诺的限制；大历史若有有效的小增量，仍走 WebSocket。不因此触发压缩或删除图片、推理，HTTP 响应也不建立 WebSocket 续传基线。`/ws-status` 将“大请求 HTTP”与网络故障后的 SSE 回退分开统计。没有可用续传缓存时，大请求不会先建立 WebSocket。
+
 ## 兼容性与排查
 
 Auto Mode、`/auto` 和 `--auto` 已移除，Toolkit 不再通过此功能审查工具调用。旧 `autoMode` 配置会被忽略并提示警告，可手动删除；其他有效设置继续正常工作。详见[移除说明](docs/configuration.md#removed-auto-mode)。

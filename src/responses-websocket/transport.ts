@@ -9,12 +9,16 @@ import type { ApiProvider } from "@earendil-works/pi-ai/compat";
 import { reportContinuation } from "./notifications";
 import { recordSend } from "./stats";
 import { recordWireRequest } from "./wire-diagnostics";
+import { Buffer } from "node:buffer";
 
 const RESPONSES_WEBSOCKET_BETA = "responses_websockets=2026-02-06";
 const WEBSOCKET_OPEN = 1;
 const WEBSOCKET_CONNECTING = 0;
 const CACHE_IDLE_TTL_MS = 5 * 60 * 1000;
 const CACHE_MAX_AGE_MS = 55 * 60 * 1000;
+// An operational margin below the observed Codex upstream message limit.
+// Applies after continuation slicing, not to the size of the whole transcript.
+export const RESPONSES_WEBSOCKET_HTTP_THRESHOLD_BYTES = 15 * 1024 * 1024;
 const TERMINAL_EVENTS = new Set([
 	"response.completed",
 	"response.done",
@@ -687,10 +691,31 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 		recordWireRequest(options.sessionId, model, payload);
 
 		const signals = liveSignals(options, input, init);
+		if (signals.some(signal => signal.aborted)) throw new Error("Request was aborted");
 		const requestId = options.sessionId?.slice(0, 64) || crypto.randomUUID();
 		const fetchHeaders = requestHeaders(input, init);
 		const headers = buildWebSocketHeaders(model, options, fetchHeaders, requestId);
 		const cacheKey = shouldCacheSocket(options) ? buildCacheKey(model, options, fetchHeaders) : undefined;
+		const cached = cacheKey ? cachedSockets.get(cacheKey) : undefined;
+		const canTryDelta = cached && !cached.busy && cached.continuation &&
+			socketReusable(cached.socket) && Date.now() - cached.createdAt < CACHE_MAX_AGE_MS;
+		// Do not serialize a large full history again when a live continuation
+		// can send a small delta. Its actual frame is checked after slicing.
+		const fullRequestFrame = canTryDelta ? undefined : JSON.stringify({ type: "response.create", ...payload });
+		const sendLargeRequestViaHttp = () => {
+			recordSend(options.sessionId, {
+				transport: "http-size", mode: "full", reason: "request exceeds WebSocket size threshold",
+				bytes: Buffer.byteLength(bodyText, "utf8"), items: inputItems(payload).length, at: Date.now(),
+			});
+			// Send the original full HTTP body, headers and signal. This response
+			// never creates a WebSocket continuation baseline.
+			return fallback(input, init);
+		};
+		if (fullRequestFrame && Buffer.byteLength(fullRequestFrame, "utf8") >= RESPONSES_WEBSOCKET_HTTP_THRESHOLD_BYTES) {
+			// Do not close another in-flight turn's socket.
+			if (cached && !cached.busy) removeCachedSocket(cached, "large_request_http");
+			return sendLargeRequestViaHttp();
+		}
 		let release: ((keep: boolean) => void) | undefined;
 		try {
 			const lease = await acquireWebSocket(
@@ -711,7 +736,15 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 			let reason = "uncached socket (no session/cache disabled/busy)";
 			let changedFields: string[] | undefined;
 			const requestPayload = lease.entry ? buildCachedRequestBody(lease.entry, fullPayload, (value, fields) => { reason = value; changedFields = fields; }) : fullPayload;
-			const requestFrame = JSON.stringify({ type: "response.create", ...requestPayload });
+			const requestFrame = requestPayload === fullPayload && fullRequestFrame ? fullRequestFrame :
+				JSON.stringify({ type: "response.create", ...requestPayload });
+			const frameBytes = Buffer.byteLength(requestFrame, "utf8");
+			if (frameBytes >= RESPONSES_WEBSOCKET_HTTP_THRESHOLD_BYTES) {
+				// A large delta, changed settings or changed history can still
+				// produce an oversized frame on an existing connection.
+				release(false);
+				return sendLargeRequestViaHttp();
+			}
 			return await createSseResponse(
 				lease.socket,
 				signals,
@@ -722,7 +755,7 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 				transportMode(options) === "auto",
 				() => recordSend(options.sessionId, {
 					transport: "websocket", mode: requestPayload.previous_response_id ? "delta" : "full",
-					reason, changedFields, bytes: new TextEncoder().encode(requestFrame).byteLength,
+					reason, changedFields, bytes: frameBytes,
 					items: inputItems(requestPayload).length, at: Date.now(),
 				}),
 			);
