@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { observeContinuation } from "./notifications";
 import {
 	getApiProvider,
 	normalizeContext,
@@ -683,4 +684,46 @@ describe("Responses WebSocket transport", () => {
 		for await (const event of stream) events.push(event);
 		expect(events.some((event) => event.type === "text_delta" && event.delta === "sse")).toBe(true);
 	});
+});
+
+
+describe("Responses replay metadata", () => {
+ const cases: Array<{name:string; original:Record<string,unknown>; replay:Record<string,unknown>; delta:boolean}> = [
+  {name:"completed function status",original:{type:"function_call",id:"fc_1",call_id:"call_1",name:"bash",arguments:'{"command":"pwd"}',status:"completed"},replay:{type:"function_call",id:"fc_1",call_id:"call_1",name:"bash",arguments:'{"command":"pwd"}'},delta:true},
+  {name:"completed custom tool status",original:{type:"custom_tool_call",id:"ctc_1",call_id:"call_1",name:"patch",input:"patch text",status:"completed"},replay:{type:"custom_tool_call",id:"ctc_1",call_id:"call_1",name:"patch",input:"patch text"},delta:true},
+  {name:"output text logprobs",original:{type:"message",role:"assistant",id:"msg_1",status:"completed",content:[{type:"output_text",text:"hello",annotations:[],logprobs:[]}]},replay:{type:"message",role:"assistant",id:"msg_1",status:"completed",content:[{type:"output_text",text:"hello",annotations:[]}]},delta:true},
+  {name:"changed arguments",original:{type:"function_call",id:"fc_1",call_id:"call_1",name:"bash",arguments:'{"command":"pwd"}',status:"completed"},replay:{type:"function_call",id:"fc_1",call_id:"call_1",name:"bash",arguments:'{"command":"ls"}'},delta:false},
+  {name:"unfinished tool status",original:{type:"function_call",id:"fc_1",call_id:"call_1",name:"bash",arguments:"{}",status:"in_progress"},replay:{type:"function_call",id:"fc_1",call_id:"call_1",name:"bash",arguments:"{}"},delta:false},
+ ];
+ for (const c of cases) test(c.name, async () => {
+  const events=[{type:"response.completed",response:{id:"resp_metadata",status:"completed",output:[c.original]}}];
+  const {instances}=installFakeWebSocket({onSend:socket=>emitEvents(socket,events)});
+  const fetch=directFetch({transport:"websocket-cached",sessionId:"metadata"});
+  await (await fetch(responsesUrl,directRequest())).text();
+  const payload={...directPayload,input:[...directPayload.input,c.replay,{role:"user",content:"next"}]};
+  await (await fetch(responsesUrl,directRequest(payload))).text();
+  const sent=JSON.parse(instances[0]!.sent[1]!);
+  expect(!!sent.previous_response_id).toBe(c.delta);
+  expect(sent.input).toEqual(c.delta?[{role:"user",content:"next"}]:payload.input);
+  expect(c.original).toEqual(events[0]!.response.output[0]);
+ });
+});
+
+
+test("continuation diagnostics distinguish expected rebuilds from prefix changes", async () => {
+ const outcomes: string[] = [];
+ const dispose = observeContinuation("diagnostics", outcome => outcomes.push(outcome));
+ try {
+  installFakeWebSocket({onSend: socket => emitEvents(socket, responseEvents("hello"))});
+  const fetch = directFetch({transport:"websocket-cached",sessionId:"diagnostics"});
+  await (await fetch(responsesUrl,directRequest())).text();
+  const output = (responseEvents("hello").at(-1)! as any).response.output;
+  const full = {...directPayload,input:[...directPayload.input,...output,{role:"user",content:"next"}]};
+  await (await fetch(responsesUrl,directRequest(full))).text();
+  const changed = {...full,input:[{role:"user",content:"edited"},...full.input.slice(1),...output,{role:"user",content:"tail"}]};
+  await (await fetch(responsesUrl,directRequest(changed))).text();
+  await (await fetch(responsesUrl,directRequest())).text();
+  await (await fetch(responsesUrl,directRequest({...directPayload,tools:[{type:"web_search"}]}))).text();
+  expect(outcomes).toEqual(["expected-full","delta","prefix-mismatch","expected-full","expected-full"]);
+ } finally { dispose(); }
 });
