@@ -10,8 +10,25 @@ import {
 } from "../types";
 import { registerWebSearchExtension } from "./extension";
 import { WEB_SEARCH_SOURCE_INCLUDE } from "./types";
+import { _promptTest } from "./prompt";
 
 type Handler = (event: any, ctx: any) => unknown;
+
+// Existing route tests assert the rendered prompt. Simulate Pi's structured
+// section rendering for those fixtures; never allow a forced-prompt result.
+function renderedPromptHandler(event: string, handler: Handler): Handler {
+	if (event !== "before_agent_start") return handler;
+	return (input, ctx) => {
+		if (input.systemPromptOptions) return handler(input, ctx);
+		const sections: Record<string, string> = {};
+		const result = handler({ ...input, systemPromptOptions: { sections } }, ctx);
+		expect(result).toBeUndefined();
+		const base = _promptTest.removeToolkitWebSearchPrompt(input.systemPrompt);
+		const section = sections["pi_openai_toolkit_web_search"];
+		const rendered = section ? `${base.trimEnd()}\n\n${section}` : base;
+		return rendered === input.systemPrompt ? undefined : { systemPrompt: rendered };
+	};
+}
 
 function createHarness(args: {
 	activeTools?: string[];
@@ -20,7 +37,7 @@ function createHarness(args: {
 	const handlers = new Map<string, Handler>();
 	let activeTools = [...(args.activeTools ?? [])];
 	const pi = {
-		on: (event: string, handler: Handler) => handlers.set(event, handler),
+		on: (event: string, handler: Handler) => handlers.set(event, renderedPromptHandler(event, handler)),
 		getActiveTools: () => activeTools,
 		setActiveTools: (names: string[]) => {
 			activeTools = [...names];
@@ -55,6 +72,23 @@ function createHarness(args: {
 }
 
 describe("Web Search extension", () => {
+	test("owns only its structured section and never forces a flattened system prompt", () => {
+		const { handlers, ctx } = createHarness({ activeTools: ["read", "web_search"] });
+		const sections = { unrelated: "Another extension's instructions" } as Record<string, string>;
+		const event = { systemPrompt: "Rendered prompt", systemPromptOptions: { sections, selectedTools: ["read"] } };
+		const handler = handlers.get("before_agent_start")!;
+		expect(handler(event, ctx)).toBeUndefined();
+		expect(sections["pi_openai_toolkit_web_search"]).toContain("The hosted `web_search`");
+		expect(sections.unrelated).toBe("Another extension's instructions");
+		expect(event.systemPromptOptions.selectedTools).toEqual(["read"]);
+		const first = { ...sections };
+		expect(handler(event, ctx)).toBeUndefined();
+		expect(sections).toEqual(first);
+		ctx.model = { provider: "other", api: "openai-responses", id: "other" };
+		expect(handler(event, ctx)).toBeUndefined();
+		expect(sections["pi_openai_toolkit_web_search"]).toBeUndefined();
+		expect(sections.unrelated).toBe("Another extension's instructions");
+	});
 	test("gives toolkit ownership to an eligible model", () => {
 		const { handlers, ctx, getActiveTools } = createHarness({ activeTools: ["read", "web_search"] });
 		const sessionStart = handlers.get("session_start")!;
@@ -161,7 +195,7 @@ function createStandaloneHarness(args: {
 		imageGeneration: { ...DEFAULT_IMAGE_GENERATION_CONFIG },
 	};
 	const pi = {
-		on: (event: string, handler: Handler) => handlers.set(event, handler),
+		on: (event: string, handler: Handler) => handlers.set(event, renderedPromptHandler(event, handler)),
 		registerTool: (tool: unknown) => registered.push(tool),
 		getAllTools: () => registered,
 		getActiveTools: () => activeTools,
