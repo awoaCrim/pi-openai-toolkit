@@ -205,6 +205,209 @@ afterEach(() => {
 	globalThis.WebSocket = originalWebSocket;
 });
 
+describe("missing previous response recovery", () => {
+	const message = "Previous response is not available on this websocket; resend the full conversation input without previous_response_id";
+	function missingFrame(shape = "nested", overrides: Record<string, unknown> = {}) {
+		const error = { code: "previous_response_not_found", type: "invalid_request_error", message, ...overrides };
+		return shape === "nested" ? { type: "error", error }
+			: shape === "failed" ? { type: "response.failed", response: { status: "failed", error } }
+			: { ...error, type: "error" };
+	}
+	async function rejectedDelta(frame: Record<string, unknown>, prefix: Record<string, unknown>[] = [], tools?: unknown[]) {
+		let sends = 0, fallbacks = 0;
+		const { instances } = installFakeWebSocket({ onSend: socket => {
+			emitEvents(socket, ++sends === 1 ? responseEvents("hello") : [...prefix, frame]);
+		} });
+		const id = randomUUID();
+		const fetch = directFetch({ sessionId: id, transport: "auto", fetch: async () => { fallbacks++; return textResponse("fallback"); } });
+		const first = { ...directPayload, ...(tools ? { tools } : {}) };
+		await (await fetch(responsesUrl, directRequest(first))).text();
+		const output = (responseEvents("hello").at(-1)!.response as any).output;
+		const next = { ...first, input: [...first.input, ...output, { role: "user", content: "continue" }] };
+		const text = await (await fetch(responsesUrl, directRequest(next))).text();
+		expect(JSON.parse(instances[0]!.sent[1]!).previous_response_id).toBe("resp_1");
+		expect(instances[0]!.closeCalls).toBe(1);
+		expect(fallbacks).toBe(0);
+		return text;
+	}
+
+	for (const shape of ["nested", "flat", "failed"]) {
+		test(`marks only the rejected delta retryable (${shape})`, async () => {
+			const text = await rejectedDelta(missingFrame(shape));
+			expect(text).toContain("WebSocket error [previous_response_not_found]");
+			expect(text).toContain(message);
+			expect(text).toContain('"code":"previous_response_not_found"');
+		});
+	}
+
+	test("native retry sends full history on a new socket, without a private HTTP retry", async () => {
+		let sends = 0, fallbacks = 0;
+		const { instances } = installFakeWebSocket({ onSend: socket => {
+			emitEvents(socket, ++sends === 2 ? [missingFrame()] : responseEvents("hello", sends));
+		} });
+		const provider = createResponsesWebSocketProvider(originalResponsesProvider(), true);
+		const options = {
+			apiKey: "test-key", sessionId: randomUUID(), transport: "auto" as const, maxRetries: 0,
+			fetch: async () => { fallbacks++; return textResponse("fallback"); },
+		};
+		const first = await provider.stream(model(), context(), options).result();
+		const next = normalizeContext({ messages: [
+			{ role: "user", content: "hello", timestamp: 1 }, first,
+			{ role: "user", content: "continue", timestamp: 3 },
+		] });
+		let attempts = 0;
+		const result = await retryAssistantCall(async () => {
+			attempts++;
+			return provider.stream(model(), next, options).result();
+		}, { enabled: true, maxRetries: 1, baseDelayMs: 1 });
+		expect(result.stopReason).toBe("stop");
+		expect(attempts).toBe(2);
+		expect(fallbacks).toBe(0);
+		expect(instances).toHaveLength(2);
+		expect(instances[0]!.closeCalls).toBe(1);
+		const delta = JSON.parse(instances[0]!.sent[1]!);
+		const full = JSON.parse(instances[1]!.sent[0]!);
+		expect(delta.previous_response_id).toBe("resp_1");
+		expect(full.previous_response_id).toBeUndefined();
+		expect(full.input).toHaveLength(3);
+		expect(full.input.at(-1)).toEqual(delta.input.at(-1));
+	});
+
+	test("a pre-generation rejection is safe even when hosted tools are available", async () => {
+		expect(await rejectedDelta(missingFrame(), [], [{ type: "computer" }]))
+			.toContain("WebSocket error [previous_response_not_found]");
+	});
+
+	for (const overrides of [
+		{ code: undefined }, { code: "unknown" }, { code: "misalignment_policy_violation" },
+		{ type: "authentication_error" }, { status: 403 }, { status_code: 429 },
+		{ message: "This request was blocked by our safety systems." },
+		{ message: "quota exceeded" }, { message: "Request aborted" },
+		{ param: "tools" }, { error: { code: "invalid_api_key" } },
+	]) {
+		test(`does not override fatal or unrelated metadata ${JSON.stringify(overrides)}`, async () => {
+			// A policy refusal without the word "policy" must still not be made retryable.
+			const text = await rejectedDelta(missingFrame("nested", overrides));
+			expect(text).not.toContain("WebSocket error [previous_response_not_found]");
+		});
+	}
+
+	test("does not override fatal enclosing metadata", async () => {
+		expect(await rejectedDelta({ ...missingFrame(), status: 403 }))
+			.not.toContain("WebSocket error [previous_response_not_found]");
+	});
+
+	for (const prefix of [
+		[responseEvents("hello")[0]!],
+		[{ type: "response.output_text.delta", delta: "started" }],
+		[{ type: "response.output_item.added", item: { type: "mcp_call" } }],
+	]) {
+		test(`does not retry a turn that already emitted ${prefix[0]!.type}`, async () => {
+			expect(await rejectedDelta(missingFrame(), prefix))
+				.not.toContain("WebSocket error [previous_response_not_found]");
+		});
+	}
+
+	test("a full request is not retried merely because the error code matches", async () => {
+		installFakeWebSocket({ onSend: socket => emitEvents(socket, [missingFrame()]) });
+		const events = await collect({ transport: "websocket" });
+		const last = events.at(-1)!;
+		expect(last.type).toBe("error");
+		if (last.type !== "error") throw new Error("Expected failure");
+		expect(last.error.errorMessage).toBe(message);
+		expect(isRetryableAssistantError(last.error)).toBe(false);
+	});
+
+	test("cancellation stops native retry after an expired delta", async () => {
+		let sends = 0;
+		const { instances } = installFakeWebSocket({ onSend: socket => {
+			emitEvents(socket, ++sends === 1 ? responseEvents("hello") : [missingFrame()]);
+		} });
+		const provider = createResponsesWebSocketProvider(originalResponsesProvider(), true);
+		const options = { apiKey: "test-key", sessionId: randomUUID(), transport: "websocket-cached" as const, maxRetries: 0 };
+		const first = await provider.stream(model(), context(), options).result();
+		const next = normalizeContext({ messages: [
+			{ role: "user", content: "hello", timestamp: 1 }, first,
+			{ role: "user", content: "continue", timestamp: 3 },
+		] });
+		const abort = new AbortController();
+		let attempts = 0;
+		const result = await retryAssistantCall(async () => {
+			attempts++;
+			return provider.stream(model(), next, options).result();
+		}, { enabled: true, maxRetries: 2, baseDelayMs: 1 }, abort.signal, { onRetryScheduled: () => abort.abort() });
+		expect(result.stopReason).toBe("aborted");
+		expect(attempts).toBe(1);
+		expect(instances).toHaveLength(1);
+	});
+
+	test("a repeated rejection of the full retry does not loop through the retry budget", async () => {
+		let sends = 0;
+		installFakeWebSocket({ onSend: socket => {
+			emitEvents(socket, ++sends === 1 ? responseEvents("hello") : [missingFrame()]);
+		} });
+		const provider = createResponsesWebSocketProvider(originalResponsesProvider(), true);
+		const options = { apiKey: "test-key", sessionId: randomUUID(), transport: "websocket-cached" as const, maxRetries: 0 };
+		const first = await provider.stream(model(), context(), options).result();
+		const next = normalizeContext({ messages: [
+			{ role: "user", content: "hello", timestamp: 1 }, first,
+			{ role: "user", content: "continue", timestamp: 3 },
+		] });
+		let attempts = 0;
+		const result = await retryAssistantCall(async () => {
+			attempts++;
+			return provider.stream(model(), next, options).result();
+		}, { enabled: true, maxRetries: 5, baseDelayMs: 1 });
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe(message);
+		expect(attempts).toBe(2);
+	});
+
+	test("native agent continuation retains an executed tool result without executing it twice", async () => {
+		let sends = 0, executions = 0;
+		const item = { type: "function_call", id: "fc_done", call_id: "call_done", name: "already_done", arguments: "{}", status: "completed" };
+		const { instances } = installFakeWebSocket({ onSend: socket => {
+			sends++;
+			emitEvents(socket, sends === 1 ? [
+				{ type: "response.created", response: { id: "resp_1", status: "in_progress", output: [] } },
+				{ type: "response.output_item.added", output_index: 0, item: { ...item, arguments: "" } },
+				{ type: "response.function_call_arguments.delta", output_index: 0, delta: "{}" },
+				{ type: "response.output_item.done", output_index: 0, item },
+				{ type: "response.completed", response: { id: "resp_1", status: "completed", output: [item],
+					usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } },
+			] : sends === 2 ? [missingFrame()] : responseEvents("finished", sends));
+		} });
+		const provider = createResponsesWebSocketProvider(originalResponsesProvider(), true);
+		const options = { apiKey: "test-key", sessionId: randomUUID(), transport: "websocket-cached" as const, maxRetries: 0 };
+		const agent = new Agent({
+			initialState: { model: model(), tools: [{
+				name: "already_done", label: "Test", description: "Synthetic local action",
+				parameters: { type: "object", properties: {} } as any,
+				execute: async () => { executions++; return { content: [{ type: "text", text: "retained tool result" }], details: undefined }; },
+			}] },
+			streamFn: (m, ctx, streamOptions) => provider.streamSimple(m, ctx, { ...streamOptions, ...options }),
+		});
+		let attempts = 0;
+		const result = await retryAssistantCall(async () => {
+			if (++attempts === 1) await agent.prompt("Run the synthetic action and finish.");
+			else {
+				// Same failed-message removal and continuation used by native Pi.
+				agent.state.messages = agent.state.messages.slice(0, -1);
+				await agent.continue();
+			}
+			return agent.state.messages.at(-1) as any;
+		}, { enabled: true, maxRetries: 1, baseDelayMs: 1 });
+		expect(result.stopReason).toBe("stop");
+		expect(attempts).toBe(2);
+		expect(executions).toBe(1);
+		expect(instances).toHaveLength(2);
+		expect(JSON.parse(instances[0]!.sent[1]!).previous_response_id).toBe("resp_1");
+		const full = JSON.parse(instances[1]!.sent[0]!);
+		expect(full.previous_response_id).toBeUndefined();
+		expect(full.input.some((entry: any) => entry.type === "function_call_output" && entry.output.includes("retained tool result"))).toBe(true);
+	});
+});
+
 describe("Responses WebSocket transport", () => {
 	const lostMessage = "Upstream websocket disconnected. The turn was not replayed and its outcome may be unknown. Send a new response.create with full conversation input without previous_response_id.";
 	function lostFrame(shape = "nested", overrides: Record<string, unknown> = {}) {

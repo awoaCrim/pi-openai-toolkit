@@ -301,6 +301,32 @@ function normalizeUpstreamWebsocketLoss(event: Record<string, unknown>): Record<
 	return nested ? { ...event, error: normalized } : normalized;
 }
 
+function normalizeMissingPreviousResponse(event: Record<string, unknown>): Record<string, unknown> | undefined {
+	const response = isRecord(event.response) ? event.response : undefined;
+	const nested = event.type === "error" && isRecord(event.error);
+	const error = event.type === "error" ? (nested ? event.error as Record<string, unknown> : event)
+		: event.type === "response.failed" && isRecord(response?.error) ? response.error : undefined;
+	if (!error || error.code !== "previous_response_not_found" || typeof error.message !== "string") return undefined;
+	const metadata = [{ ...event, type: undefined }, error === event ? { ...error, type: undefined } : error];
+	if (response) metadata.push({ ...response, type: undefined, status: response.status === "failed" ? undefined : response.status });
+	if (isRecord(error.error)) metadata.push(error.error);
+	for (const value of metadata) {
+		if (typeof value.message === "string" &&
+			(TERMINAL_FAILURE_TEXT.test(value.message) || /\bsafety\b|\bblocked\b/iu.test(value.message))) return undefined;
+		if (value.code != null && value.code !== "" && value.code !== "previous_response_not_found") return undefined;
+		if (value.type != null && value.type !== "" && value.type !== "invalid_request_error" && value.type !== "server_error") return undefined;
+		for (const field of ["status", "status_code"]) {
+			if (value[field] != null && ![400, 404, 409].includes(value[field] as number)) return undefined;
+		}
+		if (value.param != null && value.param !== "previous_response_id") return undefined;
+	}
+	// This request was rejected before generation, so even hosted tools have
+	// not run. Preserve the code/type; only expose native Pi's retry marker.
+	const normalized = { ...error, message: `WebSocket error [previous_response_not_found]: ${error.message}` };
+	if (event.type === "response.failed") return { ...event, response: { ...response, error: normalized } };
+	return nested ? { ...event, error: normalized } : normalized;
+}
+
 function socketReusable(socket: WebSocketLike): boolean {
 	return socket.readyState === WEBSOCKET_OPEN;
 }
@@ -564,6 +590,7 @@ async function createSseResponse(
 	onRelease: (keep: boolean) => void,
 	allowBootstrapFallback: boolean,
 	allowLostTurnReplay: boolean,
+	allowPreviousResponseReplay: boolean,
 ): Promise<Response> {
 	const encoder = new TextEncoder();
 	let resolveReady!: () => void;
@@ -619,7 +646,10 @@ async function createSseResponse(
 					allowLostTurnReplay = false;
 				}
 				const interruption = normalizeStreamInterruption(parsed);
-				const normalized = interruption ?? (allowLostTurnReplay ? normalizeUpstreamWebsocketLoss(parsed) : undefined);
+				// Only our own delta, rejected as its first event, can be retried
+				// this way. A full request or any started response is not covered.
+				const missingPrevious = !committed && allowPreviousResponseReplay ? normalizeMissingPreviousResponse(parsed) : undefined;
+				const normalized = interruption ?? missingPrevious ?? (allowLostTurnReplay ? normalizeUpstreamWebsocketLoss(parsed) : undefined);
 				if (!committed && allowBootstrapFallback && interruption) {
 					fail(transportError("stream closed before response.completed"));
 					return;
@@ -735,6 +765,7 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 				release,
 				transportMode(options) === "auto",
 				canReplayLostTurn(fullPayload),
+				requestPayload !== fullPayload && fullPayload.previous_response_id === undefined,
 			);
 		} catch (error) {
 			release?.(false);
