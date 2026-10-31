@@ -202,6 +202,59 @@ afterEach(() => {
 	globalThis.WebSocket = originalWebSocket;
 });
 
+describe("response output budget continuation", () => {
+	for (const [before, after] of [[4096, 3072], [3072, 4096], [undefined, 2048], [2048, undefined], [null, 2048], [2048, null]]) {
+		test(`keeps continuation and sends the current limit (${before} -> ${after})`, async () => {
+			const { instances } = installFakeWebSocket();
+			const fetch = directFetch({ sessionId: crypto.randomUUID(), transport: "websocket-cached" });
+			const first = { ...directPayload, max_output_tokens: before };
+			await (await fetch(responsesUrl, directRequest(first))).text();
+			const output = (responseEvents("hello").at(-1)!.response as any).output;
+			const added = { role: "user", content: "continue" };
+			await (await fetch(responsesUrl, directRequest({
+				...first, max_output_tokens: after, input: [...first.input, ...output, added],
+			}))).text();
+			expect(instances).toHaveLength(1);
+			const frame = JSON.parse(instances[0]!.sent[1]!);
+			expect(frame.previous_response_id).toBe("resp_1");
+			expect(frame.input).toEqual([added]);
+			expect(frame.max_output_tokens).toBe(after);
+		});
+	}
+
+	for (const [field, before, after] of [
+		["reasoning", { effort: "low" }, { effort: "high" }],
+		["tools", [], [{ type: "function", name: "new_tool", parameters: { type: "object" } }]],
+		["tool_choice", "auto", "none"],
+	] as const) {
+		test(`still sends full input when ${field} also changes`, async () => {
+			const { instances } = installFakeWebSocket();
+			const fetch = directFetch({ sessionId: crypto.randomUUID(), transport: "websocket-cached" });
+			const first = { ...directPayload, max_output_tokens: 4096, [field]: before };
+			await (await fetch(responsesUrl, directRequest(first))).text();
+			const output = (responseEvents("hello").at(-1)!.response as any).output;
+			const input = [...first.input, ...output, { role: "user", content: "continue" }];
+			await (await fetch(responsesUrl, directRequest({ ...first, max_output_tokens: 3072, [field]: after, input }))).text();
+			const frame = JSON.parse(instances[0]!.sent[1]!);
+			expect(frame.previous_response_id).toBeUndefined();
+			expect(frame.input).toEqual(input);
+			expect(frame.max_output_tokens).toBe(3072);
+		});
+	}
+
+	test("still sends full input when the history prefix changes", async () => {
+		const { instances } = installFakeWebSocket();
+		const fetch = directFetch({ sessionId: crypto.randomUUID(), transport: "websocket-cached" });
+		await (await fetch(responsesUrl, directRequest({ ...directPayload, max_output_tokens: 4096 }))).text();
+		const output = (responseEvents("hello").at(-1)!.response as any).output;
+		const input = [{ role: "user", content: "edited" }, ...output, { role: "user", content: "continue" }];
+		await (await fetch(responsesUrl, directRequest({ ...directPayload, max_output_tokens: 3072, input }))).text();
+		const frame = JSON.parse(instances[0]!.sent[1]!);
+		expect(frame.previous_response_id).toBeUndefined();
+		expect(frame.input).toEqual(input);
+	});
+});
+
 describe("Responses WebSocket transport", () => {
 	test("requires the Toolkit feature flag and selects only GPT openai-responses models", () => {
 		expect(shouldUseResponsesWebSocket(model(), { transport: "auto" })).toBe(false);
