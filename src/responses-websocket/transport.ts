@@ -6,6 +6,9 @@ import type {
 	StreamOptions,
 } from "@earendil-works/pi-ai";
 import type { ApiProvider } from "@earendil-works/pi-ai/compat";
+import { reportContinuation } from "./notifications";
+import { recordSend } from "./stats";
+import { recordWireRequest } from "./wire-diagnostics";
 
 const RESPONSES_WEBSOCKET_BETA = "responses_websockets=2026-02-06";
 const WEBSOCKET_OPEN = 1;
@@ -56,7 +59,9 @@ type AcquiredSocket = {
 	release(keep: boolean): void;
 };
 
-const cachedSockets = new Map<string, CachedSocketEntry>();
+const SOCKETS_KEY = Symbol.for("pi-openai-toolkit.responses-websocket.sockets");
+const shared = globalThis as typeof globalThis & { [key: symbol]: Map<string, CachedSocketEntry> | undefined };
+const cachedSockets = shared[SOCKETS_KEY] ??= new Map<string, CachedSocketEntry>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
@@ -459,19 +464,59 @@ function inputItems(body: ResponsesPayload): unknown[] {
 	return Array.isArray(body.input) ? body.input : [];
 }
 
-function buildCachedRequestBody(entry: CachedSocketEntry, body: ResponsesPayload): ResponsesPayload {
+// Compare replay semantics, not response-only metadata. Do not strip IDs,
+// arguments, annotations, phases, reasoning signatures, or unknown fields.
+function replayComparableItem(item: unknown): unknown {
+	if (!isRecord(item)) return item;
+	if ((item.type === "function_call" || item.type === "custom_tool_call") && item.status === "completed") {
+		const { status: _status, ...rest } = item;
+		return rest;
+	}
+	if (item.type === "message" && item.role === "assistant" && Array.isArray(item.content)) {
+		return { ...item, content: item.content.map((part) => {
+			if (!isRecord(part) || part.type !== "output_text") return part;
+			const { logprobs: _logprobs, ...rest } = part;
+			return rest;
+		}) };
+	}
+	return item;
+}
+
+function buildCachedRequestBody(entry: CachedSocketEntry, body: ResponsesPayload, decision: (reason: string, changedFields?: string[]) => void): ResponsesPayload {
 	const continuation = entry.continuation;
-	if (!continuation) return body;
+	if (!continuation) {
+		decision("no cached baseline (new/reconnected socket)");
+		reportContinuation(entry.sessionId, "expected-full");
+		return body;
+	}
 	if (!requestBodiesMatchExceptInput(body, continuation.lastRequestBody)) {
+		const current = requestBodyWithoutInput(body);
+		const previous = requestBodyWithoutInput(continuation.lastRequestBody);
+		const changedFields = [...new Set([...Object.keys(current), ...Object.keys(previous)])]
+			.filter(key => !responseInputsEqual(current[key], previous[key])).sort();
+		decision("request settings changed", changedFields);
+		reportContinuation(entry.sessionId, "expected-full");
 		entry.continuation = undefined;
 		return body;
 	}
 	const currentInput = inputItems(body);
 	const baseline = [...inputItems(continuation.lastRequestBody), ...continuation.lastResponseItems];
-	if (currentInput.length < baseline.length || !responseInputsEqual(currentInput.slice(0, baseline.length), baseline)) {
+	if (currentInput.length < inputItems(continuation.lastRequestBody).length) {
+		// A shortened request history is an expected compaction/branch rebuild.
+		// Missing *response* items alone (e.g. hosted tools) are not compaction.
+		decision("history shortened");
+		reportContinuation(entry.sessionId, "expected-full");
 		entry.continuation = undefined;
 		return body;
 	}
+	if (!responseInputsEqual(currentInput.slice(0, baseline.length).map(replayComparableItem), baseline.map(replayComparableItem))) {
+		decision("history prefix mismatch");
+		reportContinuation(entry.sessionId, "prefix-mismatch");
+		entry.continuation = undefined;
+		return body;
+	}
+	decision("matched continuation");
+	reportContinuation(entry.sessionId, "delta");
 	return {
 		...body,
 		previous_response_id: continuation.lastResponseId,
@@ -506,6 +551,7 @@ async function createSseResponse(
 	onTerminal: (event: Record<string, unknown>) => boolean,
 	onRelease: (keep: boolean) => void,
 	allowBootstrapFallback: boolean,
+	onSent: () => void,
 ): Promise<Response> {
 	const encoder = new TextEncoder();
 	let resolveReady!: () => void;
@@ -587,6 +633,7 @@ async function createSseResponse(
 			armIdleTimer();
 			try {
 				socket.send(requestFrame);
+				onSent();
 			} catch (error) {
 				fail(transportError(error));
 			}
@@ -637,6 +684,7 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 			return fallback(input, init);
 		}
 		if (!isRecord(payload)) return fallback(input, init);
+		recordWireRequest(options.sessionId, model, payload);
 
 		const signals = liveSignals(options, input, init);
 		const requestId = options.sessionId?.slice(0, 64) || crypto.randomUUID();
@@ -660,7 +708,9 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 				lease.release(keep);
 			};
 			const fullPayload = payload;
-			const requestPayload = lease.entry ? buildCachedRequestBody(lease.entry, fullPayload) : fullPayload;
+			let reason = "uncached socket (no session/cache disabled/busy)";
+			let changedFields: string[] | undefined;
+			const requestPayload = lease.entry ? buildCachedRequestBody(lease.entry, fullPayload, (value, fields) => { reason = value; changedFields = fields; }) : fullPayload;
 			const requestFrame = JSON.stringify({ type: "response.create", ...requestPayload });
 			return await createSseResponse(
 				lease.socket,
@@ -670,10 +720,17 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 				(event) => completedContinuation(lease.entry, fullPayload, event),
 				release,
 				transportMode(options) === "auto",
+				() => recordSend(options.sessionId, {
+					transport: "websocket", mode: requestPayload.previous_response_id ? "delta" : "full",
+					reason, changedFields, bytes: new TextEncoder().encode(requestFrame).byteLength,
+					items: inputItems(requestPayload).length, at: Date.now(),
+				}),
 			);
 		} catch (error) {
 			release?.(false);
 			if (error instanceof RecoverableWebSocketError && transportMode(options) === "auto" && !signals.some((signal) => signal.aborted)) {
+				recordSend(options.sessionId, { transport: "sse-fallback", mode: "full", reason: "WebSocket transport recovery",
+					bytes: new TextEncoder().encode(bodyText).byteLength, items: inputItems(payload).length, at: Date.now() });
 				return fallback(input, init);
 			}
 			throw error;
