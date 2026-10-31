@@ -4,6 +4,7 @@ import { loadToolkitConfig, resolveToolkitConfig } from "../config";
 import { closeResponsesWebSocketSessions, createResponsesWebSocketProvider } from "./transport";
 import { createFallbackNotifier, observeContinuation } from "./notifications";
 import { clearSendStats, formatSendStats } from "./stats";
+import { clearWireDiagnostics, formatWireDiagnostics } from "./wire-diagnostics";
 
 const SOURCE_ID = "pi-openai-toolkit:openai-responses-websocket";
 type ApiProviderInternal = NonNullable<ReturnType<typeof getApiProvider>>;
@@ -76,6 +77,7 @@ export default function responsesWebSocketExtension(pi: ExtensionAPI): void {
 			owners.delete(sessionId);
 			closeResponsesWebSocketSessions(sessionId);
 			clearSendStats(sessionId);
+			clearWireDiagnostics(sessionId);
 		}
 		sessionId = undefined;
 	}
@@ -84,6 +86,13 @@ export default function responsesWebSocketExtension(pi: ExtensionAPI): void {
 		handler: async (args, ctx) => {
 			if (args.trim()) { ctx.ui.notify("用法：/ws-status", "warning"); return; }
 			if (ctx.hasUI) ctx.ui.notify(formatSendStats(ctx.sessionManager.getSessionId()), "info");
+		},
+	});
+	pi.registerCommand("ws-diagnostics", {
+		description: "查看实际发送位置的模型能力、工具位置和脱敏前缀指纹。",
+		handler: async (args, ctx) => {
+			if (args.trim()) { ctx.ui.notify("用法：/ws-diagnostics", "warning"); return; }
+			if (ctx.hasUI) ctx.ui.notify(formatWireDiagnostics(ctx.sessionManager.getSessionId()), "info");
 		},
 	});
 	pi.on("session_start", (_event, ctx) => {

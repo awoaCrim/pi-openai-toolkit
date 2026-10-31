@@ -8,6 +8,7 @@ import type {
 import type { ApiProvider } from "@earendil-works/pi-ai/compat";
 import { reportContinuation } from "./notifications";
 import { recordSend } from "./stats";
+import { recordWireRequest } from "./wire-diagnostics";
 
 const RESPONSES_WEBSOCKET_BETA = "responses_websockets=2026-02-06";
 const WEBSOCKET_OPEN = 1;
@@ -683,6 +684,7 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 			return fallback(input, init);
 		}
 		if (!isRecord(payload)) return fallback(input, init);
+		recordWireRequest(options.sessionId, model, payload);
 
 		const signals = liveSignals(options, input, init);
 		const requestId = options.sessionId?.slice(0, 64) || crypto.randomUUID();

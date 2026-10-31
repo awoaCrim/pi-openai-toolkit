@@ -77,6 +77,7 @@
     "src/responses-websocket/transport.ts",
     "src/responses-websocket/notifications.ts",
     "src/responses-websocket/stats.ts",
+    "src/responses-websocket/wire-diagnostics.ts",
     "src/model-scope.ts",
     "src/native-fallback.ts",
     "src/payload-rewrite.ts",
