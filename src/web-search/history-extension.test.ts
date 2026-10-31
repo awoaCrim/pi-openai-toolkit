@@ -32,7 +32,7 @@ function finish(h: ReturnType<typeof harness>, failed = false) {
 	h.emit("message_end", { message: failed ? { ...assistant, stopReason: "error" } : assistant });
 }
 
-test("persists before the assistant, emits a display entry once, and restores after reload", () => {
+test("persists before the assistant, keeps the entry hidden, and restores the exact prefix after reload", () => {
 	const h = harness();
 	finish(h);
 	expect(h.notices).toHaveLength(1);
@@ -40,14 +40,14 @@ test("persists before the assistant, emits a display entry once, and restores af
 	expect(h.entries[0].customType).toBe(SEARCH_HISTORY);
 	const boundary = h.emit("turn_end");
 	expect(boundary.entries[0].customType).toBe(SEARCH_DISPLAY);
-	expect(boundary.entries[0].display).toBe(true);
+	expect(boundary.entries[0].display).toBe(false);
 	expect(h.emit("turn_end")).toBeUndefined();
 	h.emit("session_shutdown"); h.emit("session_start");
 	const display = { role: "custom", ...boundary.entries[0], timestamp: 2 };
 	const context = h.emit("context", { messages: [assistant, display] });
 	expect(context.messages).toHaveLength(2); // One context summary, not two.
 	const payload = { input: [output, { role: "user", content: context.messages[1].content }] };
-	expect(h.emit("before_provider_request", { payload }).input[0].type).toBe("web_search_call");
+	expect(h.emit("before_provider_request", { payload }).input).toEqual([call, output]);
 });
 test("does not read an abandoned branch or resurrect compacted-away answers", () => {
 	const h = harness(); finish(h);
@@ -97,7 +97,9 @@ test("real session branches and compaction keep records scoped to surviving cont
 	finish(h);
 	const answerId = manager.appendMessage(assistant);
 	const display = h.emit("turn_end").entries[0];
-	const displayId = manager.appendCustomMessageEntry(display.customType, display.content, true, display.details);
+	const displayId = manager.appendCustomMessageEntry(display.customType, display.content, display.display, display.details);
+	expect(manager.buildSessionContext().messages.some((m: any) =>
+		m.role === "custom" && m.customType === SEARCH_DISPLAY && m.display === false)).toBe(true);
 	const nextUser = manager.appendMessage({ role: "user", content: "Next", timestamp: 3 });
 	manager.branch(answerId);
 	expect(manager.getBranch().some(e => e.type === "custom" && e.customType === SEARCH_HISTORY)).toBe(true);
