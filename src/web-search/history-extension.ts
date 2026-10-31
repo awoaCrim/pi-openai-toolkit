@@ -76,7 +76,7 @@ export function registerHostedSearchHistory(pi: ExtensionAPI): void {
 		pending = undefined;
 		return { entries: [{
 			type: "custom_message" as const, customType: SEARCH_DISPLAY,
-			content: displaySearchSummary(record), display: true,
+			content: displaySearchSummary(record), display: false,
 			details: { responseId: record.responseId, provider: record.provider },
 		}] };
 	});
