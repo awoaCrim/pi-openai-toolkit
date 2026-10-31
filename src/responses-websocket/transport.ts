@@ -6,12 +6,19 @@ import type {
 	StreamOptions,
 } from "@earendil-works/pi-ai";
 import type { ApiProvider } from "@earendil-works/pi-ai/compat";
+import { reportContinuation } from "./notifications";
+import { recordSend } from "./stats";
+import { recordWireRequest } from "./wire-diagnostics";
+import { Buffer } from "node:buffer";
 
 const RESPONSES_WEBSOCKET_BETA = "responses_websockets=2026-02-06";
 const WEBSOCKET_OPEN = 1;
 const WEBSOCKET_CONNECTING = 0;
 const CACHE_IDLE_TTL_MS = 5 * 60 * 1000;
 const CACHE_MAX_AGE_MS = 55 * 60 * 1000;
+// An operational margin below the observed Codex upstream message limit.
+// Applies after continuation slicing, not to the size of the whole transcript.
+export const RESPONSES_WEBSOCKET_HTTP_THRESHOLD_BYTES = 15 * 1024 * 1024;
 const TERMINAL_EVENTS = new Set([
 	"response.completed",
 	"response.done",
@@ -56,7 +63,9 @@ type AcquiredSocket = {
 	release(keep: boolean): void;
 };
 
-const cachedSockets = new Map<string, CachedSocketEntry>();
+const SOCKETS_KEY = Symbol.for("pi-openai-toolkit.responses-websocket.sockets");
+const shared = globalThis as typeof globalThis & { [key: symbol]: Map<string, CachedSocketEntry> | undefined };
+const cachedSockets = shared[SOCKETS_KEY] ??= new Map<string, CachedSocketEntry>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
@@ -459,19 +468,59 @@ function inputItems(body: ResponsesPayload): unknown[] {
 	return Array.isArray(body.input) ? body.input : [];
 }
 
-function buildCachedRequestBody(entry: CachedSocketEntry, body: ResponsesPayload): ResponsesPayload {
+// Compare replay semantics, not response-only metadata. Do not strip IDs,
+// arguments, annotations, phases, reasoning signatures, or unknown fields.
+function replayComparableItem(item: unknown): unknown {
+	if (!isRecord(item)) return item;
+	if ((item.type === "function_call" || item.type === "custom_tool_call") && item.status === "completed") {
+		const { status: _status, ...rest } = item;
+		return rest;
+	}
+	if (item.type === "message" && item.role === "assistant" && Array.isArray(item.content)) {
+		return { ...item, content: item.content.map((part) => {
+			if (!isRecord(part) || part.type !== "output_text") return part;
+			const { logprobs: _logprobs, ...rest } = part;
+			return rest;
+		}) };
+	}
+	return item;
+}
+
+function buildCachedRequestBody(entry: CachedSocketEntry, body: ResponsesPayload, decision: (reason: string, changedFields?: string[]) => void): ResponsesPayload {
 	const continuation = entry.continuation;
-	if (!continuation) return body;
+	if (!continuation) {
+		decision("no cached baseline (new/reconnected socket)");
+		reportContinuation(entry.sessionId, "expected-full");
+		return body;
+	}
 	if (!requestBodiesMatchExceptInput(body, continuation.lastRequestBody)) {
+		const current = requestBodyWithoutInput(body);
+		const previous = requestBodyWithoutInput(continuation.lastRequestBody);
+		const changedFields = [...new Set([...Object.keys(current), ...Object.keys(previous)])]
+			.filter(key => !responseInputsEqual(current[key], previous[key])).sort();
+		decision("request settings changed", changedFields);
+		reportContinuation(entry.sessionId, "expected-full");
 		entry.continuation = undefined;
 		return body;
 	}
 	const currentInput = inputItems(body);
 	const baseline = [...inputItems(continuation.lastRequestBody), ...continuation.lastResponseItems];
-	if (currentInput.length < baseline.length || !responseInputsEqual(currentInput.slice(0, baseline.length), baseline)) {
+	if (currentInput.length < inputItems(continuation.lastRequestBody).length) {
+		// A shortened request history is an expected compaction/branch rebuild.
+		// Missing *response* items alone (e.g. hosted tools) are not compaction.
+		decision("history shortened");
+		reportContinuation(entry.sessionId, "expected-full");
 		entry.continuation = undefined;
 		return body;
 	}
+	if (!responseInputsEqual(currentInput.slice(0, baseline.length).map(replayComparableItem), baseline.map(replayComparableItem))) {
+		decision("history prefix mismatch");
+		reportContinuation(entry.sessionId, "prefix-mismatch");
+		entry.continuation = undefined;
+		return body;
+	}
+	decision("matched continuation");
+	reportContinuation(entry.sessionId, "delta");
 	return {
 		...body,
 		previous_response_id: continuation.lastResponseId,
@@ -506,6 +555,7 @@ async function createSseResponse(
 	onTerminal: (event: Record<string, unknown>) => boolean,
 	onRelease: (keep: boolean) => void,
 	allowBootstrapFallback: boolean,
+	onSent: () => void,
 ): Promise<Response> {
 	const encoder = new TextEncoder();
 	let resolveReady!: () => void;
@@ -587,6 +637,7 @@ async function createSseResponse(
 			armIdleTimer();
 			try {
 				socket.send(requestFrame);
+				onSent();
 			} catch (error) {
 				fail(transportError(error));
 			}
@@ -637,12 +688,34 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 			return fallback(input, init);
 		}
 		if (!isRecord(payload)) return fallback(input, init);
+		recordWireRequest(options.sessionId, model, payload);
 
 		const signals = liveSignals(options, input, init);
+		if (signals.some(signal => signal.aborted)) throw new Error("Request was aborted");
 		const requestId = options.sessionId?.slice(0, 64) || crypto.randomUUID();
 		const fetchHeaders = requestHeaders(input, init);
 		const headers = buildWebSocketHeaders(model, options, fetchHeaders, requestId);
 		const cacheKey = shouldCacheSocket(options) ? buildCacheKey(model, options, fetchHeaders) : undefined;
+		const cached = cacheKey ? cachedSockets.get(cacheKey) : undefined;
+		const canTryDelta = cached && !cached.busy && cached.continuation &&
+			socketReusable(cached.socket) && Date.now() - cached.createdAt < CACHE_MAX_AGE_MS;
+		// Do not serialize a large full history again when a live continuation
+		// can send a small delta. Its actual frame is checked after slicing.
+		const fullRequestFrame = canTryDelta ? undefined : JSON.stringify({ type: "response.create", ...payload });
+		const sendLargeRequestViaHttp = () => {
+			recordSend(options.sessionId, {
+				transport: "http-size", mode: "full", reason: "request exceeds WebSocket size threshold",
+				bytes: Buffer.byteLength(bodyText, "utf8"), items: inputItems(payload).length, at: Date.now(),
+			});
+			// Send the original full HTTP body, headers and signal. This response
+			// never creates a WebSocket continuation baseline.
+			return fallback(input, init);
+		};
+		if (fullRequestFrame && Buffer.byteLength(fullRequestFrame, "utf8") >= RESPONSES_WEBSOCKET_HTTP_THRESHOLD_BYTES) {
+			// Do not close another in-flight turn's socket.
+			if (cached && !cached.busy) removeCachedSocket(cached, "large_request_http");
+			return sendLargeRequestViaHttp();
+		}
 		let release: ((keep: boolean) => void) | undefined;
 		try {
 			const lease = await acquireWebSocket(
@@ -660,8 +733,18 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 				lease.release(keep);
 			};
 			const fullPayload = payload;
-			const requestPayload = lease.entry ? buildCachedRequestBody(lease.entry, fullPayload) : fullPayload;
-			const requestFrame = JSON.stringify({ type: "response.create", ...requestPayload });
+			let reason = "uncached socket (no session/cache disabled/busy)";
+			let changedFields: string[] | undefined;
+			const requestPayload = lease.entry ? buildCachedRequestBody(lease.entry, fullPayload, (value, fields) => { reason = value; changedFields = fields; }) : fullPayload;
+			const requestFrame = requestPayload === fullPayload && fullRequestFrame ? fullRequestFrame :
+				JSON.stringify({ type: "response.create", ...requestPayload });
+			const frameBytes = Buffer.byteLength(requestFrame, "utf8");
+			if (frameBytes >= RESPONSES_WEBSOCKET_HTTP_THRESHOLD_BYTES) {
+				// A large delta, changed settings or changed history can still
+				// produce an oversized frame on an existing connection.
+				release(false);
+				return sendLargeRequestViaHttp();
+			}
 			return await createSseResponse(
 				lease.socket,
 				signals,
@@ -670,10 +753,17 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 				(event) => completedContinuation(lease.entry, fullPayload, event),
 				release,
 				transportMode(options) === "auto",
+				() => recordSend(options.sessionId, {
+					transport: "websocket", mode: requestPayload.previous_response_id ? "delta" : "full",
+					reason, changedFields, bytes: frameBytes,
+					items: inputItems(requestPayload).length, at: Date.now(),
+				}),
 			);
 		} catch (error) {
 			release?.(false);
 			if (error instanceof RecoverableWebSocketError && transportMode(options) === "auto" && !signals.some((signal) => signal.aborted)) {
+				recordSend(options.sessionId, { transport: "sse-fallback", mode: "full", reason: "WebSocket transport recovery",
+					bytes: new TextEncoder().encode(bodyText).byteLength, items: inputItems(payload).length, at: Date.now() });
 				return fallback(input, init);
 			}
 			throw error;
