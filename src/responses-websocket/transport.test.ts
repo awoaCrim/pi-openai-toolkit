@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
+import { Agent } from "@earendil-works/pi-agent-core";
 import { observeContinuation } from "./notifications";
 import {
 	getApiProvider,
@@ -6,7 +8,7 @@ import {
 	type Api,
 	type Model,
 } from "@earendil-works/pi-ai/compat";
-import { isRetryableAssistantError, type FetchFunction, type StreamOptions } from "@earendil-works/pi-ai";
+import { isRetryableAssistantError, retryAssistantCall, type FetchFunction, type StreamOptions } from "@earendil-works/pi-ai";
 import {
 	buildResponsesWebSocketUrl,
 	closeResponsesWebSocketSessions,
@@ -204,6 +206,148 @@ afterEach(() => {
 });
 
 describe("Responses WebSocket transport", () => {
+	const lostMessage = "Upstream websocket disconnected. The turn was not replayed and its outcome may be unknown. Send a new response.create with full conversation input without previous_response_id.";
+	function lostFrame(shape = "nested", overrides: Record<string, unknown> = {}) {
+		const error = { code: "upstream_websocket_lost", type: "server_error", message: lostMessage, ...overrides };
+		return shape === "nested" ? { type: "error", error }
+			: shape === "failed" ? { type: "response.failed", response: { status: "failed", error } }
+			: { ...error, type: "error" };
+	}
+
+	for (const shape of ["nested", "flat", "failed"]) {
+		test(`normalizes the exact lost-turn code (${shape}) without a private fallback retry`, async () => {
+			const { instances } = installFakeWebSocket({ onSend: socket => emitEvents(socket, [lostFrame(shape)]) });
+			let fallbacks = 0;
+			const events = await collect({ transport: "auto", fetch: async () => { fallbacks++; return textResponse("fallback"); } });
+			const last = events.at(-1)!;
+			expect(last.type).toBe("error");
+			if (last.type !== "error") throw new Error("Expected failure");
+			expect(last.error.errorMessage).toContain("WebSocket error [upstream_websocket_lost]");
+			expect(last.error.errorMessage).toContain(lostMessage);
+			expect(isRetryableAssistantError(last.error)).toBe(true);
+			expect(fallbacks).toBe(0);
+			expect(instances).toHaveLength(1);
+			expect(instances[0]!.closeCalls).toBe(1);
+		});
+	}
+
+	for (const stage of ["before-response", "thinking", "partial-tool"]) {
+		test(`native retry replaces the failed delta with full input after ${stage}`, async () => {
+			let sends = 0;
+			const { instances } = installFakeWebSocket({ onSend: socket => {
+				sends++;
+				if (sends !== 2) { emitEvents(socket, responseEvents("hello", sends)); return; }
+				const prefix: Record<string, unknown>[] = stage === "before-response" ? [] : [
+					{ type: "response.created", response: { id: "failed_response", status: "in_progress", output: [] } },
+					{ type: "response.output_item.added", output_index: 0, item: stage === "thinking"
+						? { type: "reasoning", id: "rs_failed", summary: [] }
+						: { type: "function_call", id: "fc_failed", call_id: "call_failed", name: "never_execute", arguments: "" } },
+				];
+				if (stage === "partial-tool") prefix.push({ type: "response.function_call_arguments.delta", output_index: 0, delta: '{"unfinished":' });
+				emitEvents(socket, [...prefix, lostFrame()]);
+			} });
+			const provider = createResponsesWebSocketProvider(originalResponsesProvider(), true);
+			const options = { apiKey: "test-key", sessionId: randomUUID(), transport: "websocket-cached" as const, maxRetries: 0 };
+			const first = await provider.stream(model(), context(), options).result();
+			const next = normalizeContext({ messages: [
+				{ role: "user", content: "hello", timestamp: 1 }, first,
+				{ role: "user", content: "continue", timestamp: 3 },
+			] });
+			let attempts = 0;
+			const result = await retryAssistantCall(async () => {
+				attempts++;
+				return provider.stream(model(), next, options).result();
+			}, { enabled: true, maxRetries: 1, baseDelayMs: 1 });
+			expect(result.stopReason).toBe("stop");
+			expect(attempts).toBe(2);
+			expect(instances).toHaveLength(2);
+			expect(instances[0]!.closeCalls).toBe(1);
+			const failedDelta = JSON.parse(instances[0]!.sent[1]!);
+			const retry = JSON.parse(instances[1]!.sent[0]!);
+			expect(failedDelta.previous_response_id).toBe("resp_1");
+			expect(retry.previous_response_id).toBeUndefined();
+			expect(retry.input.length).toBeGreaterThan(failedDelta.input.length);
+			expect(JSON.stringify(retry.input)).toContain("hello");
+			expect(JSON.stringify(retry.input)).not.toContain("fc_failed");
+		});
+	}
+
+	test("native retries stop at their configured budget and respect cancellation", async () => {
+		installFakeWebSocket({ onSend: socket => emitEvents(socket, [lostFrame()]) });
+		const provider = createResponsesWebSocketProvider(originalResponsesProvider(), true);
+		let attempts = 0;
+		const produce = async () => { attempts++; return provider.stream(model(), context(), { apiKey: "test-key", transport: "websocket", maxRetries: 0 }).result(); };
+		const result = await retryAssistantCall(produce, { enabled: true, maxRetries: 2, baseDelayMs: 1 });
+		expect(result.stopReason).toBe("error");
+		expect(attempts).toBe(3);
+		const abort = new AbortController();
+		attempts = 0;
+		const cancelled = await retryAssistantCall(produce, { enabled: true, maxRetries: 2, baseDelayMs: 1 }, abort.signal,
+			{ onRetryScheduled: () => abort.abort() });
+		expect(cancelled.stopReason).toBe("aborted");
+		expect(attempts).toBe(1);
+	});
+
+	for (const args of ['{"unfinished":', "{}"]) {
+		test(`the actual agent does not execute tools from a failed response (${args})`, async () => {
+			installFakeWebSocket({ onSend: socket => emitEvents(socket, [
+				{ type: "response.created", response: { id: "failed", status: "in_progress", output: [] } },
+				{ type: "response.output_item.added", output_index: 0,
+					item: { type: "function_call", id: "fc_failed", call_id: "call_failed", name: "never_execute", arguments: "" } },
+				{ type: "response.function_call_arguments.delta", output_index: 0, delta: args },
+				lostFrame(),
+			]) });
+			let executions = 0;
+			const provider = createResponsesWebSocketProvider(originalResponsesProvider(), true);
+			const agent = new Agent({
+				initialState: { model: model(), tools: [{
+					name: "never_execute", label: "Test", description: "Must not run on failed response",
+					parameters: { type: "object", properties: {} } as any,
+					execute: async () => { executions++; return { content: [{ type: "text", text: "unexpected" }], details: undefined }; },
+				}] },
+				streamFn: (m, ctx, options) => provider.streamSimple(m, ctx, { ...options, apiKey: "test-key", transport: "websocket", maxRetries: 0 }),
+			});
+			await agent.prompt("Call never_execute.");
+			expect(executions).toBe(0);
+			expect((agent.state.messages.at(-1) as any).stopReason).toBe("error");
+		});
+	}
+
+	for (const type of ["function", "custom", "web_search", "web_search_preview", "file_search"]) {
+		test(`allows lost-turn classification with a ${type} tool`, async () => {
+			installFakeWebSocket({ onSend: socket => emitEvents(socket, [lostFrame()]) });
+			const response = await directFetch()(responsesUrl, directRequest({ ...directPayload, tools: [{ type }] }));
+			expect(await response.text()).toContain("WebSocket error [upstream_websocket_lost]");
+		});
+	}
+
+	for (const overrides of [
+		{ code: "upstream_websocket_not_sent" }, { code: "unknown" }, { code: undefined },
+		{ type: "authentication_error" }, { status: 403 }, { message: "quota exceeded" }, { message: "Request aborted" },
+		{ message: "websocket: close 1009 (message too big)", code: "message_too_big" },
+	]) {
+		test(`does not reclassify unrelated or fatal errors ${JSON.stringify(overrides)}`, async () => {
+			installFakeWebSocket({ onSend: socket => emitEvents(socket, [lostFrame("nested", overrides)]) });
+			const response = await directFetch()(responsesUrl, directRequest());
+			expect(await response.text()).not.toContain("WebSocket error [upstream_websocket_lost]");
+		});
+	}
+
+	for (const type of ["mcp", "code_interpreter", "computer", "image_generation", "unknown_hosted"]) {
+		test(`does not enable lost-turn replay with a ${type} hosted tool`, async () => {
+			installFakeWebSocket({ onSend: socket => emitEvents(socket, [lostFrame()]) });
+			const response = await directFetch()(responsesUrl, directRequest({ ...directPayload, tools: [{ type }] }));
+			expect(await response.text()).not.toContain("WebSocket error [upstream_websocket_lost]");
+		});
+	}
+
+	test("an unexpected hosted call also disables lost-turn replay", async () => {
+		installFakeWebSocket({ onSend: socket => emitEvents(socket, [
+			{ type: "response.output_item.added", output_index: 0, item: { type: "mcp_call" } }, lostFrame(),
+		]) });
+		expect(await (await directFetch()(responsesUrl, directRequest())).text()).not.toContain("WebSocket error [upstream_websocket_lost]");
+	});
+
 	test("requires the Toolkit feature flag and selects only GPT openai-responses models", () => {
 		expect(shouldUseResponsesWebSocket(model(), { transport: "auto" })).toBe(false);
 		expect(shouldUseResponsesWebSocket(model(), { transport: "auto" }, true)).toBe(true);
