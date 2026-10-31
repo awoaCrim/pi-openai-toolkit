@@ -6,6 +6,7 @@ import type {
 	StreamOptions,
 } from "@earendil-works/pi-ai";
 import type { ApiProvider } from "@earendil-works/pi-ai/compat";
+import { reportContinuation } from "./notifications";
 
 const RESPONSES_WEBSOCKET_BETA = "responses_websockets=2026-02-06";
 const WEBSOCKET_OPEN = 1;
@@ -275,6 +276,31 @@ function closeSocket(socket: WebSocketLike | undefined, reason = "done"): void {
 	}
 }
 
+function canReplayLostTurn(body: ResponsesPayload): boolean {
+	// Function/custom tools run on the client only after a successful tool turn.
+	// Unknown hosted tools may already have changed external state.
+	const safeTools = new Set(["function", "custom", "web_search", "web_search_preview", "file_search"]);
+	return body.tools === undefined || (Array.isArray(body.tools) &&
+		body.tools.every(tool => isRecord(tool) && typeof tool.type === "string" && safeTools.has(tool.type)));
+}
+
+function normalizeUpstreamWebsocketLoss(event: Record<string, unknown>): Record<string, unknown> | undefined {
+	const response = isRecord(event.response) ? event.response : undefined;
+	const nested = event.type === "error" && isRecord(event.error);
+	const error = event.type === "error" ? (nested ? event.error as Record<string, unknown> : event)
+		: event.type === "response.failed" && isRecord(response?.error) ? response.error : undefined;
+	if (!error || error.code !== "upstream_websocket_lost" || typeof error.message !== "string") return undefined;
+	const metadata = [{ ...event, type: undefined }, error === event ? { ...error, type: undefined } : error];
+	if (response) metadata.push({ ...response, type: undefined, status: response.status === "failed" ? undefined : response.status });
+	if (isRecord(error.error)) metadata.push(error.error);
+	if (metadata.some(value => !compatibleFailureMetadata({
+		...value, code: value.code === "upstream_websocket_lost" ? "stream_error" : value.code,
+	}))) return undefined;
+	const normalized = { ...error, message: `WebSocket error [upstream_websocket_lost]: ${error.message}` };
+	if (event.type === "response.failed") return { ...event, response: { ...response, error: normalized } };
+	return nested ? { ...event, error: normalized } : normalized;
+}
+
 function socketReusable(socket: WebSocketLike): boolean {
 	return socket.readyState === WEBSOCKET_OPEN;
 }
@@ -459,19 +485,50 @@ function inputItems(body: ResponsesPayload): unknown[] {
 	return Array.isArray(body.input) ? body.input : [];
 }
 
+// Compare replay semantics, not response-only metadata. Do not strip IDs,
+// arguments, annotations, phases, reasoning signatures, or unknown fields.
+function replayComparableItem(item: unknown): unknown {
+	if (!isRecord(item)) return item;
+	if ((item.type === "function_call" || item.type === "custom_tool_call") && item.status === "completed") {
+		const { status: _status, ...rest } = item;
+		return rest;
+	}
+	if (item.type === "message" && item.role === "assistant" && Array.isArray(item.content)) {
+		return { ...item, content: item.content.map((part) => {
+			if (!isRecord(part) || part.type !== "output_text") return part;
+			const { logprobs: _logprobs, ...rest } = part;
+			return rest;
+		}) };
+	}
+	return item;
+}
+
 function buildCachedRequestBody(entry: CachedSocketEntry, body: ResponsesPayload): ResponsesPayload {
 	const continuation = entry.continuation;
-	if (!continuation) return body;
+	if (!continuation) {
+		reportContinuation(entry.sessionId, "expected-full");
+		return body;
+	}
 	if (!requestBodiesMatchExceptInput(body, continuation.lastRequestBody)) {
+		reportContinuation(entry.sessionId, "expected-full");
 		entry.continuation = undefined;
 		return body;
 	}
 	const currentInput = inputItems(body);
 	const baseline = [...inputItems(continuation.lastRequestBody), ...continuation.lastResponseItems];
-	if (currentInput.length < baseline.length || !responseInputsEqual(currentInput.slice(0, baseline.length), baseline)) {
+	if (currentInput.length < inputItems(continuation.lastRequestBody).length) {
+		// A shortened request history is an expected compaction/branch rebuild.
+		// Missing *response* items alone (e.g. hosted tools) are not compaction.
+		reportContinuation(entry.sessionId, "expected-full");
 		entry.continuation = undefined;
 		return body;
 	}
+	if (!responseInputsEqual(currentInput.slice(0, baseline.length).map(replayComparableItem), baseline.map(replayComparableItem))) {
+		reportContinuation(entry.sessionId, "prefix-mismatch");
+		entry.continuation = undefined;
+		return body;
+	}
+	reportContinuation(entry.sessionId, "delta");
 	return {
 		...body,
 		previous_response_id: continuation.lastResponseId,
@@ -506,6 +563,7 @@ async function createSseResponse(
 	onTerminal: (event: Record<string, unknown>) => boolean,
 	onRelease: (keep: boolean) => void,
 	allowBootstrapFallback: boolean,
+	allowLostTurnReplay: boolean,
 ): Promise<Response> {
 	const encoder = new TextEncoder();
 	let resolveReady!: () => void;
@@ -555,8 +613,14 @@ async function createSseResponse(
 				if (text === undefined) throw new Error("Invalid Responses WebSocket frame");
 				const parsed: unknown = JSON.parse(text);
 				if (!isRecord(parsed) || typeof parsed.type !== "string" || !parsed.type) throw new Error("Invalid Responses WebSocket event");
-				const normalized = normalizeStreamInterruption(parsed);
-				if (!committed && allowBootstrapFallback && normalized) {
+				if (parsed.type === "response.output_item.added" && isRecord(parsed.item) &&
+					typeof parsed.item.type === "string" && parsed.item.type.endsWith("_call") &&
+					!["function_call", "custom_tool_call", "web_search_call", "file_search_call"].includes(parsed.item.type)) {
+					allowLostTurnReplay = false;
+				}
+				const interruption = normalizeStreamInterruption(parsed);
+				const normalized = interruption ?? (allowLostTurnReplay ? normalizeUpstreamWebsocketLoss(parsed) : undefined);
+				if (!committed && allowBootstrapFallback && interruption) {
 					fail(transportError("stream closed before response.completed"));
 					return;
 				}
@@ -670,6 +734,7 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 				(event) => completedContinuation(lease.entry, fullPayload, event),
 				release,
 				transportMode(options) === "auto",
+				canReplayLostTurn(fullPayload),
 			);
 		} catch (error) {
 			release?.(false);
