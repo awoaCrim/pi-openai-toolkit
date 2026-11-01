@@ -8,7 +8,7 @@ import type {
 import type { ApiProvider } from "@earendil-works/pi-ai/compat";
 import { reportContinuation } from "./notifications";
 import { recordSend } from "./stats";
-import { recordWireRequest } from "./wire-diagnostics";
+import { recordWireFailure, recordWireRequest, recordWireResponse, recordWireSend, type WireDiagnostic } from "./wire-diagnostics";
 import { Buffer } from "node:buffer";
 
 const RESPONSES_WEBSOCKET_BETA = "responses_websockets=2026-02-06";
@@ -618,6 +618,7 @@ async function createSseResponse(
 	onSent: () => void,
 	allowLostTurnReplay: boolean,
 	allowPreviousResponseReplay: boolean,
+	onFailure: () => void,
 ): Promise<Response> {
 	const encoder = new TextEncoder();
 	let resolveReady!: () => void;
@@ -642,6 +643,7 @@ async function createSseResponse(
 				closed = true;
 				cleanup();
 				onRelease(false);
+				onFailure();
 				if (!committed) {
 					if (signals.some((signal) => signal.aborted) || (allowBootstrapFallback && error instanceof RecoverableWebSocketError)) {
 						rejectReady(error);
@@ -745,11 +747,12 @@ function shouldCacheSocket(options: StreamOptions): boolean {
  * previous_response_id plus only the input items after the cached response;
  * it falls back to the full payload when the transcript cannot be matched.
  */
-export function createResponsesWebSocketFetch(model: Model<Api>, options: StreamOptions): FetchFunction {
+export function createResponsesWebSocketFetch(model: Model<Api>, options: StreamOptions,
+	onDiagnostic?: (diagnostic: WireDiagnostic | undefined) => void): FetchFunction {
 	const fallback = options.fetch ?? globalThis.fetch;
 	if (typeof fallback !== "function") throw new Error("HTTP fetch is not available in this runtime");
 	return async (input, init) => {
-		if (!isResponsesPost(input, init) || transportMode(options) === "sse") return fallback(input, init);
+		if (!isResponsesPost(input, init)) return fallback(input, init);
 		const bodyText = await requestBody(input, init);
 		if (!bodyText) return fallback(input, init);
 		let payload: unknown;
@@ -759,10 +762,29 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 			return fallback(input, init);
 		}
 		if (!isRecord(payload)) return fallback(input, init);
-		recordWireRequest(options.sessionId, model, payload);
+		const diagnostic = recordWireRequest(options.sessionId, model, payload);
+		onDiagnostic?.(diagnostic);
 
 		const signals = liveSignals(options, input, init);
-		if (signals.some(signal => signal.aborted)) throw new Error("Request was aborted");
+		if (signals.some(signal => signal.aborted)) {
+			recordWireFailure(diagnostic, true);
+			throw new Error("Request was aborted");
+		}
+		const sendHttp = async (transport: "sse" | "sse-fallback" | "http-size", reason: string) => {
+			const record = { transport, mode: "full" as const, reason,
+				bytes: Buffer.byteLength(bodyText, "utf8"), items: inputItems(payload).length, at: Date.now() };
+			recordWireSend(diagnostic, record);
+			if (transport !== "sse") recordSend(options.sessionId, { ...record, transport });
+			try {
+				const response = await fallback(input, init);
+				if (!response.ok) recordWireFailure(diagnostic, false);
+				return response;
+			} catch (error) {
+				recordWireFailure(diagnostic, signals.some(signal => signal.aborted));
+				throw error;
+			}
+		};
+		if (transportMode(options) === "sse") return sendHttp("sse", "explicit SSE");
 		const requestId = options.sessionId?.slice(0, 64) || crypto.randomUUID();
 		const fetchHeaders = requestHeaders(input, init);
 		const headers = buildWebSocketHeaders(model, options, fetchHeaders, requestId);
@@ -774,13 +796,9 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 		// can send a small delta. Its actual frame is checked after slicing.
 		const fullRequestFrame = canTryDelta ? undefined : JSON.stringify({ type: "response.create", ...payload });
 		const sendLargeRequestViaHttp = () => {
-			recordSend(options.sessionId, {
-				transport: "http-size", mode: "full", reason: "request exceeds WebSocket size threshold",
-				bytes: Buffer.byteLength(bodyText, "utf8"), items: inputItems(payload).length, at: Date.now(),
-			});
 			// Send the original full HTTP body, headers and signal. This response
 			// never creates a WebSocket continuation baseline.
-			return fallback(input, init);
+			return sendHttp("http-size", "request exceeds WebSocket size threshold");
 		};
 		if (fullRequestFrame && Buffer.byteLength(fullRequestFrame, "utf8") >= RESPONSES_WEBSOCKET_HTTP_THRESHOLD_BYTES) {
 			// Do not close another in-flight turn's socket.
@@ -821,47 +839,76 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 				signals,
 				options.timeoutMs ?? 0,
 				requestFrame,
-				(event) => completedContinuation(lease.entry, fullPayload, event),
+				(event) => {
+					recordWireResponse(options.sessionId, diagnostic, event);
+					return completedContinuation(lease.entry, fullPayload, event);
+				},
 				release,
 				transportMode(options) === "auto",
-				() => recordSend(options.sessionId, {
-					transport: "websocket", mode: requestPayload.previous_response_id ? "delta" : "full",
-					reason, changedFields, bytes: frameBytes,
-					items: inputItems(requestPayload).length, at: Date.now(),
-				}),
+				() => {
+					const record = {
+						transport: "websocket" as const, mode: requestPayload.previous_response_id ? "delta" as const : "full" as const,
+						reason, changedFields, bytes: frameBytes,
+						items: inputItems(requestPayload).length, at: Date.now(),
+					};
+					recordSend(options.sessionId, record);
+					recordWireSend(diagnostic, record, lease.socket);
+				},
 				canReplayLostTurn(fullPayload),
 				requestPayload !== fullPayload && fullPayload.previous_response_id === undefined,
+				() => recordWireFailure(diagnostic, signals.some(signal => signal.aborted)),
 			);
 		} catch (error) {
 			release?.(false);
 			if (error instanceof RecoverableWebSocketError && transportMode(options) === "auto" && !signals.some((signal) => signal.aborted)) {
-				recordSend(options.sessionId, { transport: "sse-fallback", mode: "full", reason: "WebSocket transport recovery",
-					bytes: new TextEncoder().encode(bodyText).byteLength, items: inputItems(payload).length, at: Date.now() });
-				return fallback(input, init);
+				return sendHttp("sse-fallback", "WebSocket transport recovery");
 			}
+			recordWireFailure(diagnostic, signals.some(signal => signal.aborted));
 			throw error;
 		}
 	};
 }
 
-function withWebSocketFetch<T extends StreamOptions>(model: Model<Api>, options?: T): T {
+function withWebSocketFetch<T extends StreamOptions>(model: Model<Api>, options: T | undefined,
+	onDiagnostic: (diagnostic: WireDiagnostic | undefined) => void): T {
 	const effective = options ?? ({} as T);
+	let diagnostic: WireDiagnostic | undefined;
 	return {
 		...effective,
-		fetch: createResponsesWebSocketFetch(model, effective),
+		fetch: createResponsesWebSocketFetch(model, effective, value => { diagnostic = value; onDiagnostic(value); }),
+		onProviderStreamEvent: async (data, m) => {
+			recordWireResponse(effective.sessionId, diagnostic, data);
+			await effective.onProviderStreamEvent?.(data, m);
+		},
 	};
+}
+
+function streamWithDiagnostics<T extends StreamOptions>(model: Model<Api>, options: T | undefined,
+	start: (options: T) => ReturnType<ApiProvider["stream"]>): ReturnType<ApiProvider["stream"]> {
+	let diagnostic: WireDiagnostic | undefined;
+	const stream = start(withWebSocketFetch(model, options, value => { diagnostic = value; }));
+	// Observe settlement without consuming or replacing the caller's event stream.
+	void stream.result().then(message => {
+		if (!diagnostic || diagnostic.finishedAt !== undefined) return;
+		if (message.stopReason === "error" || message.stopReason === "aborted") {
+			recordWireFailure(diagnostic, message.stopReason === "aborted");
+		} else {
+			recordWireResponse(options?.sessionId, diagnostic, { type: message.stopReason === "length" ? "response.incomplete" : "response.completed" });
+		}
+	}, () => recordWireFailure(diagnostic, options?.signal?.aborted === true));
+	return stream;
 }
 
 export function createResponsesWebSocketProvider(original: ApiProvider, enabled = false): ApiProvider {
 	return {
 		api: "openai-responses",
 		stream(model, context, options) {
-			if (!shouldUseResponsesWebSocket(model, options, enabled)) return original.stream(model, context, options);
-			return original.stream(model, context, withWebSocketFetch(model, options));
+			if (!enabled || !isGptResponsesModel(model)) return original.stream(model, context, options);
+			return streamWithDiagnostics(model, options, value => original.stream(model, context, value));
 		},
 		streamSimple(model, context, options) {
-			if (!shouldUseResponsesWebSocket(model, options, enabled)) return original.streamSimple(model, context, options);
-			return original.streamSimple(model, context, withWebSocketFetch(model, options));
+			if (!enabled || !isGptResponsesModel(model)) return original.streamSimple(model, context, options);
+			return streamWithDiagnostics(model, options, value => original.streamSimple(model, context, value));
 		},
 	};
 }

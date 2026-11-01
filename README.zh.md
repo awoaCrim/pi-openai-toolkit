@@ -118,6 +118,8 @@ Toolkit 的 WebSocket adapter 默认关闭。对使用 Pi `openai-responses` API
 
 大小保护优先于 WebSocket 传输偏好：实际 UTF-8 `response.create` 帧达到 15 MiB 时，直接使用原始完整 HTTP/SSE 请求。该值是安全余量，不是后端公开承诺的限制；大历史若有有效的小增量，仍走 WebSocket。不因此触发压缩或删除图片、推理，HTTP 响应也不建立 WebSocket 续传基线。`/ws-status` 将“大请求 HTTP”与网络故障后的 SSE 回退分开统计。没有可用续传缓存时，大请求不会先建立 WebSocket。
 
+`/ws-diagnostics [会话 ID] [json]` 将最终请求指纹与传输、全量／增量、本地 WebSocket 连接序号、请求／返回档位及原始响应 token usage 逐请求关联。启用 Responses 适配器时，覆盖 WebSocket、大请求 HTTP、SSE 回退及显式 SSE。每会话保留最近 64 次请求，并单独保留最多 32 次严重 miss（输入至少 50000 token 且缓存比例低于 10%）；最长 24 小时、最多 100 会话。会话重载保留这些证据，进程重启清空。仅在内存保存哈希、计数及脱敏元数据，不保存请求／响应正文、上游 response ID、URL、凭据或 cache key；缺少 usage 保持未知，不当作零，请求档位也不等于返回档位。此功能仅观测，不修改缓存、重试、压缩或档位策略。
+
 ## 兼容性与排查
 
 Auto Mode、`/auto` 和 `--auto` 已移除，Toolkit 不再通过此功能审查工具调用。旧 `autoMode` 配置会被忽略并提示警告，可手动删除；其他有效设置继续正常工作。详见[移除说明](docs/configuration.md#removed-auto-mode)。

@@ -8,6 +8,7 @@ import { loadToolkitConfig } from "../config";
 import responsesWebSocketExtension, { installResponsesWebSocketTransport } from "./extension";
 import { reportContinuation } from "./notifications";
 import { recordSend, formatSendStats } from "./stats";
+import { clearCacheDiagnostics, getCacheDiagnostics, recordWireRequest, recordWireResponse } from "./wire-diagnostics";
 
 const tempDirs: string[] = [];
 
@@ -25,6 +26,35 @@ afterEach(() => {
 });
 
 describe("Responses WebSocket extension", () => {
+	test("diagnostic commands can inspect a retained session without prompting or loading that session", async () => {
+		const handlers = new Map<string, any>(), notices: string[] = [];
+		responsesWebSocketExtension({ registerCommand: (name: string, value: any) => handlers.set(name, value), on: () => {} } as any);
+		const target = randomUUID();
+		const receipt = recordWireRequest(target, { provider: "test", id: "gpt-test" }, { input: [] })!;
+		recordWireResponse(target, receipt, { type: "response.completed", response: {
+			usage: { input_tokens: 100_000, input_tokens_details: { cached_tokens: 0 } },
+		} });
+		const ctx = { hasUI: true, sessionManager: { getSessionId: () => randomUUID() },
+			ui: { notify: (text: string) => notices.push(text) } };
+		await handlers.get("ws-diagnostics").handler(`${target} json`, ctx);
+		expect(JSON.parse(notices[0]!).misses).toHaveLength(1);
+		await handlers.get("ws-diagnostics").handler("../private json", ctx);
+		expect(notices[1]).toContain("用法");
+		clearCacheDiagnostics(target);
+	});
+	test("session shutdown clears transient wire state but preserves bounded severe-miss evidence", async () => {
+		const handlers = new Map<string, Function>(), id = randomUUID();
+		responsesWebSocketExtension({ registerCommand: () => {}, on: (name: string, handler: Function) => handlers.set(name, handler) } as any);
+		const ctx = { hasUI: false, sessionManager: { getSessionId: () => id } };
+		await handlers.get("session_start")!({}, ctx);
+		const receipt = recordWireRequest(id, { provider: "test", id: "gpt-test" }, { input: [] })!;
+		recordWireResponse(id, receipt, { type: "response.completed", response: {
+			usage: { input_tokens: 100_000, input_tokens_details: { cached_tokens: 0 } },
+		} });
+		await handlers.get("session_shutdown")!({}, ctx);
+		expect(getCacheDiagnostics(id).misses).toHaveLength(1);
+		clearCacheDiagnostics(id);
+	});
 	test("overlapping owners of one session keep state until the last owner exits", async () => {
 		const a = new Map<string, Function>(), b = new Map<string, Function>();
 		responsesWebSocketExtension({ registerCommand: () => {}, on: (n: string, fn: Function) => a.set(n, fn) } as any);
