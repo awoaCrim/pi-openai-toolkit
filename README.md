@@ -112,6 +112,8 @@ The Toolkit WebSocket adapter is disabled by default. Enable it globally for GPT
 
 It reuses the selected model's provider, base URL, credentials, headers, and model ID without registering another provider. Pi's `transport: "auto"` tries WebSocket first and falls back to SSE before streaming starts; with a stable session it also reuses the socket and sends only the new continuation input when the transcript matches. Use `transport: "websocket-cached"` to require that cached path, or `transport: "sse"` to keep the original HTTP/SSE path. Restart or reload Pi after changing the Toolkit setting. See [WebSocket configuration](docs/configuration.md#responses-websocket-transport).
 
+Size safety takes precedence over WebSocket transport preferences: an actual UTF-8 `response.create` frame at or above 15 MiB uses the original full HTTP/SSE request directly. The threshold is a safety margin, not an advertised backend limit. A large transcript with a small valid continuation delta still uses WebSocket. This does not trigger compaction or remove images/reasoning; HTTP responses do not establish WebSocket continuation state. `/ws-status` counts size-routed HTTP separately from transport-error SSE recovery. Without a usable cached continuation, oversized requests do not open a WebSocket first.
+
 ## Compatibility and troubleshooting
 
 Auto Mode, `/auto`, and `--auto` have been removed. Toolkit no longer reviews tool calls through this feature. Existing `autoMode` configuration is ignored with a warning and can be deleted; other valid settings keep working. See [removal guidance](docs/configuration.md#removed-auto-mode).
