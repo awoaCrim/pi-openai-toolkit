@@ -91,16 +91,24 @@ The Responses WebSocket extension is disabled by default. Enable it globally wit
 
 The extension is an API-adapter override, not a provider registration. For requests dispatched through this API adapter, it applies to GPT model IDs whose Pi API is `openai-responses`, regardless of provider name. Providers that bypass the compat API adapter keep their own transport behavior. The active model's `baseUrl`, `apiKey`, configured headers, session id, and payload remain the source of truth.
 
-The extension honors Pi's global `transport` setting:
+The extension uses Pi's global `transport` setting, subject to the size-safety exception below:
 
 | Pi `transport` | Behavior |
 | --- | --- |
 | `auto` | Try `wss://.../responses?model=...` first; allow one original HTTP/SSE fallback per fetch call for a recoverable WS failure before the first valid event is exposed. With a stable session id, reuse the WebSocket and send a continuation delta when possible. |
-| `websocket` | Require the WebSocket path; do not fall back to SSE. This mode opens a request-scoped connection. |
-| `websocket-cached` | Require the WebSocket path and keep a session-scoped connection for later turns. |
+| `websocket` | Use a request-scoped WebSocket; no transport-error SSE fallback. Oversized frames use HTTP as described below. |
+| `websocket-cached` | Keep a session-scoped WebSocket for later turns; no transport-error SSE fallback. Oversized frames use HTTP as described below. |
 | `sse` | Bypass the extension and use the original HTTP/SSE adapter. |
 
 The endpoint is derived from the model's base URL by appending `/responses` when needed and switching `https:`/`http:` to `wss:`/`ws:`. The first frame is a standard `response.create` object and incoming frames are passed through Pi's existing Responses event normalizer. For `auto` and `websocket-cached`, Toolkit caches an open socket by session/model/endpoint/auth identity for up to five minutes idle or 55 minutes of age. When the current transcript has the cached request and response as a prefix, the next frame uses `previous_response_id` and only the new input items; if it cannot prove that relationship, it sends the full payload instead. A missing session id or `cacheRetention: "none"` disables reuse. The upstream must support the standard Responses WebSocket contract, including continuation semantics for `previous_response_id`; this does not rewrite a server that only exposes Codex's `/codex/responses` path or Codex-only authentication.
+
+Continuation comparison ignores changes to `max_output_tokens`, completed function/custom-call status, and output-text `logprobs`. The current output limit is still sent unchanged. Other request settings and semantic history fields (including IDs, arguments, annotations, phases, and reasoning signatures) must match. An unexpected prefix mismatch sends full input and warns once until a subsequent successful comparison or expected rebuild rearms the warning.
+
+Size safety takes precedence over all WebSocket modes: an actual UTF-8 `response.create` frame of **15 MiB or more**, measured after continuation slicing, uses the original full HTTP/SSE request. This is an operational safety margin, not a universal provider limit. A large full history with a small valid delta stays on WebSocket. Size routing preserves the original body, headers, signal, images, and reasoning; it neither compacts history nor creates a WebSocket continuation baseline. Without a usable continuation, an oversized request does not open a socket first. A discarded continuation is evicted without closing another request's busy socket. HTTP failures propagate through the original HTTP path.
+
+`/ws-status` shows full/delta send counts and distinguishes size-routed HTTP from transport-error SSE fallback. `/ws-diagnostics` shows model compatibility flags, tool positions, and comparisons of hashed request inputs/settings after extension rewriting and before delta slicing. Both commands inspect the current session and take no arguments. They are diagnostics, not evidence of provider billing-cache hits or successful completion; failed/cancelled requests can appear. Direct SSE and other adapters are not observed.
+
+Sockets, notification listeners, and diagnostics are shared by extension instances in the same process. Session ownership keeps resources alive until its last owner releases them. Statistics and fingerprints retain five recent records per session and at most 100 sessions, with no raw prompts, tool arguments, response IDs, credentials, or cache-key values. They clear when the session's last owner releases it or the process exits; they are not persisted across a restart. The commands currently display Chinese text.
 
 The first valid exposed event commits the WS attempt, including `response.created` even before text or tool arguments arrive. After that boundary, Toolkit never switches transport or splices a new generation into the same stream. Local transient WS failures and compatible WS error envelopes containing `stream closed before response.completed` retain their diagnostics with a Pi-recognized transport indication; Pi's native retry settings and budget decide whether to retry the failed step. Authentication, quota/billing, context/invalid-request/policy errors, malformed frames, and cancellation do not authorize Toolkit fallback. An SDK request deadline can cancel startup before a fallback is possible.
 
@@ -193,6 +201,8 @@ The exact model must still be registered in Pi's model catalog and authenticated
 | `local` | Restore the original local tool state and remove native/standalone search conflicts from provider payloads. Never activate a previously inactive local tool. |
 | `hosted` | Use native Responses search with source annotations; suppress conflicting local and standalone tools. |
 | `standalone-alpha` | Experimental, explicit opt-in. Expose sequential `web_run` and call the provider-relative `/alpha/search` endpoint once per execution. |
+
+Toolkit supplies search instructions through its `pi_openai_toolkit_web_search` structured system-prompt section. It updates or removes only that section, preserving other extensions' sections and Pi's incremental prompt/tool updates.
 
 There is no v2 search master switch. `local` and `unmanaged` differ in payload cleanup and ownership. Missing auth, an unavailable route, a tool conflict, or invalid selected policy does not trigger another route. Hosted Responses search also accepts Pi's Azure Responses API; standalone-alpha remains restricted to the verified OpenAI/Codex `/alpha/search` routes. Standalone supports `search_query`, `image_query`, `open`, `click`, `find`, `screenshot`, `finance`, `weather`, `sports`, and `time`, with `response_length`. It sends a bounded command envelope rather than the full transcript; follow-up references depend on the provider's session/reference handling. The gateway must expose the endpoint and its standalone-search capability.
 
