@@ -1,7 +1,8 @@
 import { getApiProvider, registerApiProvider, unregisterApiProviders } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadToolkitConfig, resolveToolkitConfig } from "../config";
-import { createResponsesWebSocketProvider } from "./transport";
+import { closeResponsesWebSocketSessions, createResponsesWebSocketProvider } from "./transport";
+import { createFallbackNotifier, observeContinuation } from "./notifications";
 
 const SOURCE_ID = "pi-openai-toolkit:openai-responses-websocket";
 type ApiProviderInternal = NonNullable<ReturnType<typeof getApiProvider>>;
@@ -58,6 +59,22 @@ export function installResponsesWebSocketTransport(
 	return true;
 }
 
-export default function responsesWebSocketExtension(_pi: ExtensionAPI): void {
+export default function responsesWebSocketExtension(pi: ExtensionAPI): void {
 	installResponsesWebSocketTransport();
+	let dispose: (() => void) | undefined;
+	let sessionId: string | undefined;
+	pi.on("session_start", (_event, ctx) => {
+		dispose?.();
+		sessionId = ctx.sessionManager.getSessionId();
+		const notify = createFallbackNotifier((message) => {
+			if (ctx.hasUI) ctx.ui.notify(message, "warning");
+		});
+		dispose = observeContinuation(sessionId, notify);
+	});
+	pi.on("session_shutdown", () => {
+		dispose?.();
+		dispose = undefined;
+		if (sessionId) closeResponsesWebSocketSessions(sessionId);
+		sessionId = undefined;
+	});
 }
