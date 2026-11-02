@@ -447,7 +447,10 @@ function responseInputsEqual(a: unknown, b: unknown): boolean {
 }
 
 function requestBodyWithoutInput(body: ResponsesPayload): ResponsesPayload {
-	const { input: _input, previous_response_id: _previousResponseId, ...rest } = body;
+	// Pi adjusts the output budget as context fills up. It limits this response,
+	// not the replayed history: ignore it for comparison, but send its current
+	// value unchanged when constructing the delta.
+	const { input: _input, previous_response_id: _previousResponseId, max_output_tokens: _maxOutputTokens, ...rest } = body;
 	return rest;
 }
 
