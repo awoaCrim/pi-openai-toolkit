@@ -454,13 +454,17 @@ export function registerWebSearchExtension(
 			: undefined;
 		const promptRouteReady = routeReadyForPrompt(resolution, standaloneReady()) &&
 			(resolution.route !== "local" || localToolIsActive === true);
-		const systemPrompt = appendWebSearchPrompt({
+		const section = appendWebSearchPrompt({
 			model: ctx.model,
 			config: config.webSearch,
-			systemPrompt: event.systemPrompt,
+			systemPrompt: "",
 			...(promptRouteReady ? {} : { routeAvailable: false }),
-		});
-		return systemPrompt === event.systemPrompt ? undefined : { systemPrompt };
+		}).trim();
+		// Returning systemPrompt forces Pi to collapse every system/tool update
+		// into a new head. Own one structured section instead, preserving the
+		// transcript prefix when deferred tools are loaded mid-run.
+		if (section) event.systemPromptOptions.sections["pi_openai_toolkit_web_search"] = section;
+		else delete event.systemPromptOptions.sections["pi_openai_toolkit_web_search"];
 	});
 
 	pi.on("before_provider_request", (event, ctx) => {
