@@ -444,6 +444,51 @@ describe("Responses WebSocket transport", () => {
 			: { ...error, type: "error" };
 	}
 
+	for (const tools of [
+		[{ type: "mcp", server_label: "remote" }],
+		[{ type: "namespace", name: "remote", tools: [{ type: "mcp" }] }],
+		null,
+		[{ type: "unknown_hosted" }],
+	]) {
+		test(`does not replay loss before output when incremental tools are unsafe: ${JSON.stringify(tools)}`, async () => {
+			installFakeWebSocket({ onSend: socket => emitEvents(socket, [lostFrame()]) });
+			const response = await directFetch()(responsesUrl, directRequest({
+				...directPayload, tools: [],
+				input: [{ type: "additional_tools", role: "developer", tools }, ...directPayload.input],
+			}));
+			expect(await response.text()).not.toContain("WebSocket error [upstream_websocket_lost]");
+		});
+	}
+
+	for (const tools of [
+		[{ type: "function", name: "local_only" }],
+		[{ type: "custom", name: "local_custom" }],
+		[{ type: "namespace", name: "functions", tools: [{ type: "function", name: "local_only" }] }],
+	]) {
+		test(`retains safe replay for incremental client tools: ${JSON.stringify(tools)}`, async () => {
+			installFakeWebSocket({ onSend: socket => emitEvents(socket, [lostFrame()]) });
+			const response = await directFetch()(responsesUrl, directRequest({
+				...directPayload, tools: [],
+				input: [{ type: "additional_tools", role: "developer", tools }, ...directPayload.input],
+			}));
+			expect(await response.text()).toContain("WebSocket error [upstream_websocket_lost]");
+		});
+	}
+
+	for (const shape of ["nested", "flat", "failed"]) {
+		for (const enclosing of [false, true]) {
+			test(`never marks a safety refusal retryable (${shape}, enclosing=${enclosing})`, async () => {
+				const refusal = "This request was blocked by our safety systems.";
+				const frame = enclosing
+					? { ...lostFrame(shape), message: refusal }
+					: lostFrame(shape, { message: refusal });
+				installFakeWebSocket({ onSend: socket => emitEvents(socket, [frame]) });
+				const response = await directFetch()(responsesUrl, directRequest());
+				expect(await response.text()).not.toContain("WebSocket error [upstream_websocket_lost]");
+			});
+		}
+	}
+
 	for (const shape of ["nested", "flat", "failed"]) {
 		test(`normalizes the exact lost-turn code (${shape}) without a private fallback retry`, async () => {
 			const { instances } = installFakeWebSocket({ onSend: socket => emitEvents(socket, [lostFrame(shape)]) });

@@ -213,6 +213,7 @@ class RecoverableWebSocketError extends Error {}
 
 const STREAM_INTERRUPTION = /\bstream closed before response\.completed\b/iu;
 const TERMINAL_FAILURE_TEXT = /quota|billing|budget|usage.?limit|api.?key|unauthori[sz]ed|forbidden|authenticat|permission|invalid|malformed|unsupported|policy|context.?length|context.?overflow|\babort(?:ed)?\b|\bcancell?ed\b/iu;
+const SAFETY_REFUSAL_TEXT = /\bsafety\b|\bblocked\b/iu;
 const TRANSIENT_ERROR_CODES = new Set(["stream_error", "server_error", "request_timeout"]);
 
 function transportError(error: unknown): Error {
@@ -241,7 +242,8 @@ function socketCloseError(event: WebSocketEvent, streaming: boolean): Error {
 }
 
 function compatibleFailureMetadata(error: Record<string, unknown>): boolean {
-	if (typeof error.message === "string" && TERMINAL_FAILURE_TEXT.test(error.message)) return false;
+	if (typeof error.message === "string" &&
+		(TERMINAL_FAILURE_TEXT.test(error.message) || SAFETY_REFUSAL_TEXT.test(error.message))) return false;
 	for (const field of ["code", "type"]) {
 		const value = error[field];
 		if (value !== undefined && value !== null && value !== "" &&
@@ -288,8 +290,12 @@ function canReplayLostTurn(body: ResponsesPayload): boolean {
 	// Function/custom tools run on the client only after a successful tool turn.
 	// Unknown hosted tools may already have changed external state.
 	const safeTools = new Set(["function", "custom", "web_search", "web_search_preview", "file_search"]);
-	return body.tools === undefined || (Array.isArray(body.tools) &&
-		body.tools.every(tool => isRecord(tool) && typeof tool.type === "string" && safeTools.has(tool.type)));
+	const safeDeclarations = (tools: unknown): boolean => Array.isArray(tools) && tools.every(tool =>
+		isRecord(tool) && (typeof tool.type === "string" && safeTools.has(tool.type) ||
+			tool.type === "namespace" && safeDeclarations(tool.tools)));
+	if (body.tools !== undefined && !safeDeclarations(body.tools)) return false;
+	return !Array.isArray(body.input) || body.input.every(item =>
+		!isRecord(item) || item.type !== "additional_tools" || safeDeclarations(item.tools));
 }
 
 function normalizeUpstreamWebsocketLoss(event: Record<string, unknown>): Record<string, unknown> | undefined {
