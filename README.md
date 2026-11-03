@@ -76,6 +76,10 @@ Set `defaults.webSearch.route` or an exact model's `webSearch.route`:
 
 `hosted` accepts the three Responses API types listed above, subject to backend support and account access. `standalone-alpha` is restricted to verified OpenAI/Codex routes; a gateway must expose the endpoint and capability. An unavailable route, missing authentication, or a tool conflict never causes an automatic switch to another route. See [search configuration](docs/configuration.md#web-search) for supported operations.
 
+On OpenAI/Codex Responses, server-side search calls and citations are saved in Pi's session as branch-scoped extension records. Summary entries remain hidden from the chat; live notifications are available on supported clients. Subsequent requests restore the original search items and citations only when the corresponding answer/history projection is unchanged and the provider/model matches. This preserves WebSocket continuation and full replay after reload without inserting duplicate summaries. If replay cannot be verified, the available evidence remains a labeled context summary instead; unknown or edited output is not overwritten. Only information actually returned by the API is recorded: `completed` does not prove that a page loaded successfully, and omitted HTTP status codes or page contents cannot be recovered. Existing sessions gain records for new searches after loading the extension, not retroactively.
+
+**Hosted-search history capture requires Pi 0.99.0 or newer**, where the official `provider_stream_event` hook is available. Pi 0.87.x remains supported for the package's other features. On an older runtime, a hosted-search request emits a warning once per session (UI notification, or stderr without UI): search still runs, but new search evidence is not persisted for reload/replay. Existing branch records can still be read and restored; unavailable evidence is never reconstructed from answer text.
+
 ### Image generation
 
 Image settings belong only under global `defaults.imageGeneration`. Replace `image-model-id` with an image model your backend supports:
@@ -135,9 +139,10 @@ npm ci
 npm run typecheck
 npm test
 npm run test:pi
+npm run test:search-compat
 npm pack --dry-run
 ```
 
-Tests use Bun, included in the development dependencies. Keep JSON examples identical in both READMEs; the documentation tests check this.
+Tests use Bun, included in the development dependencies. `test:search-compat` installs the published Pi 0.87.0 and 0.99.0 runtimes into disposable directories, verifies the warning on the older runtime and real SSE capture/replay on the feature minimum, and makes no live-provider requests. Keep JSON examples identical in both READMEs; the documentation tests check this.
 
 MIT © awoaCrim and contributors. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for third-party attribution.
