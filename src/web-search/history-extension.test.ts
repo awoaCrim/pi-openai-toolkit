@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test, spyOn } from "bun:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { registerHostedSearchHistory } from "./history-extension";
 import { SEARCH_HISTORY, SEARCH_DISPLAY } from "./history";
@@ -22,9 +22,45 @@ const output = { type: "message", role: "assistant", id: "msg_1", status: "compl
 const assistant: any = { role: "assistant", provider: "test", api: "openai-responses", model: "gpt-test",
 	responseId: "resp_1", stopReason: "stop", content: [{ type: "text", text: "Answer" }], timestamp: 1 };
 
+test("unsupported runtimes warn once on actual hosted requests, not on ordinary chat", () => {
+	const h = harness();
+	h.emit("turn_start");
+	h.emit("before_provider_request", { payload: { input: [] } });
+	h.emit("message_end", { message: assistant });
+	expect(h.notices).toHaveLength(0);
+	const event = { payload: { input: [], tools: [{ type: "web_search" }] } };
+	for (let i = 0; i < 2; i++) {
+		h.emit("turn_start"); h.emit("before_provider_request", event);
+		h.emit("message_end", { message: assistant });
+	}
+	expect(h.notices).toHaveLength(1);
+	expect(h.notices[0]).toContain(">=0.99.0");
+	expect(h.notices[0]).toContain("not persisted");
+	expect(h.entries).toHaveLength(0);
+	h.emit("session_start");
+	h.emit("turn_start"); h.emit("before_provider_request", event);
+	h.emit("message_end", { message: assistant });
+	expect(h.notices).toHaveLength(2);
+});
+
+test("unsupported non-UI runtimes report missing capture on stderr", () => {
+	const h = harness();
+	h.ctx.hasUI = false;
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	try {
+		h.emit("turn_start");
+		h.emit("before_provider_request", { payload: { tools: [{ type: "web_search_preview" }] } });
+		h.emit("message_end", { message: assistant });
+		expect(warn).toHaveBeenCalledTimes(1);
+		expect(String(warn.mock.calls[0]?.[0])).toContain("unavailable");
+	} finally { warn.mockRestore(); }
+});
+
 function finish(h: ReturnType<typeof harness>, failed = false) {
-	h.emit("message_start", { message: { role: "assistant" } });
+	h.emit("turn_start");
+	h.emit("before_provider_request", { payload: { input: [], tools: [{ type: "web_search" }] } });
 	h.stream({ type: "response.created", response: { id: "resp_1" } });
+	// The published Pi runtime emits this only after the raw response.created.
 	h.stream({ type: "response.output_item.added", output_index: 0, item: { ...call, status: "in_progress" } });
 	h.stream({ type: "response.output_item.done", output_index: 0, item: call });
 	h.stream({ type: failed ? "response.failed" : "response.completed",

@@ -108,6 +108,7 @@
     "test": "bun test",
     "test:coverage": "bun test --coverage --coverage-reporter=text --coverage-reporter=lcov && node ./scripts/check-lcov.mjs ./coverage/lcov.info",
     "test:pi": "bun test ./test/pi-smoke.test.ts",
+    "test:search-compat": "bun scripts/check-hosted-search-compat.ts",
     "typecheck": "tsc -p tsconfig.check.json"
   },
   "peerDependencies": {

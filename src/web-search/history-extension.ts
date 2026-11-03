@@ -13,19 +13,27 @@ function recordForMessage(records: SearchRecord[], message: any): SearchRecord |
 		r.api === message.api && r.model === message.model);
 }
 
+export const HOSTED_SEARCH_CAPTURE_MIN_PI = "0.99.0";
+
 export function registerHostedSearchHistory(pi: ExtensionAPI): void {
+	let warned = false;
+	let inTurn = false;
+	let expectsHostedSearch = false;
+	let sawProviderEvent = false;
 	let active = false;
 	let capture: { responseId: string; provider: string; api: string; model: string;
 		items: Map<number, JsonObject>; output?: JsonObject[]; completion: string; notified: boolean } | undefined;
 	let pending: SearchRecord | undefined;
-	const clear = () => { active = false; capture = undefined; pending = undefined; };
-	pi.on("session_start", clear);
+	const clear = () => {
+		inTurn = false; active = false; expectsHostedSearch = false; sawProviderEvent = false;
+		capture = undefined; pending = undefined;
+	};
+	pi.on("session_start", () => { clear(); warned = false; });
 	pi.on("session_shutdown", clear);
-	pi.on("message_start", event => {
-		if (event.message.role === "assistant") { active = true; capture = undefined; }
-	});
+	pi.on("turn_start", () => { inTurn = true; active = false; capture = undefined; });
 	pi.on("provider_stream_event", (event, ctx) => {
 		if (!active || !["openai-responses", "openai-codex-responses"].includes(event.api) || !isObject(event.data)) return;
+		sawProviderEvent = true;
 		const data = event.data;
 		if (data.type === "response.created" && typeof data.response?.id === "string") {
 			capture = { responseId: data.response.id, provider: event.provider, api: event.api, model: event.model,
@@ -53,6 +61,14 @@ export function registerHostedSearchHistory(pi: ExtensionAPI): void {
 		active = false;
 		const finished = capture;
 		capture = undefined;
+		if (expectsHostedSearch && !sawProviderEvent && !warned) {
+			warned = true;
+			const message = `Hosted search history capture requires Pi >=${HOSTED_SEARCH_CAPTURE_MIN_PI} ` +
+				`and raw provider stream events, which were unavailable for this request. ` +
+				`Search still runs, but new evidence is not persisted for reload/replay.`;
+			if (ctx.hasUI) ctx.ui.notify(message, "warning");
+			else console.warn(`[pi-openai-toolkit] ${message}`);
+		}
 		if (finished && finished.responseId === event.message.responseId && finished.provider === event.message.provider &&
 			finished.api === event.message.api && finished.model === event.message.model) {
 			const { provider, api, model, responseId } = finished;
@@ -71,6 +87,7 @@ export function registerHostedSearchHistory(pi: ExtensionAPI): void {
 		if (ctx.hasUI) ctx.ui.setStatus("toolkit-hosted-search", undefined);
 	});
 	pi.on("turn_end", () => {
+		inTurn = false;
 		if (!pending) return;
 		const record = pending;
 		pending = undefined;
@@ -108,6 +125,14 @@ export function registerHostedSearchHistory(pi: ExtensionAPI): void {
 	});
 	pi.on("before_provider_request", (event, ctx) => {
 		if (!ctx.model || !["openai-responses", "openai-codex-responses"].includes(ctx.model.api)) return;
+		// The raw response.created can precede normalized assistant message_start.
+		// Arm capture at the request boundary, scoped to an active agent turn.
+		if (inTurn) {
+			active = true; capture = undefined; sawProviderEvent = false;
+			expectsHostedSearch = isObject(event.payload) && Array.isArray(event.payload.tools) &&
+				event.payload.tools.some((tool: unknown) =>
+					isObject(tool) && ["web_search", "web_search_preview"].includes(tool.type));
+		}
 		const payload = restoreSearchHistory(event.payload, branchRecords(ctx), ctx.model);
 		return payload === event.payload ? undefined : payload;
 	});
