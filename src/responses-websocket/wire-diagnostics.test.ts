@@ -121,6 +121,45 @@ test("bounds severe-miss storage independently and expires it after 24 hours", (
 	} finally { now.mockRestore(); }
 });
 
+for (const read of ["json-then-text", "text-only", "next-request-only"]) {
+	test(`expiry removes transient text and the comparison baseline (${read})`, () => {
+		const sid = randomUUID(), now = spyOn(Date, "now").mockReturnValue(1000);
+		const body = { input: [{ role: "user", content: "expired-private-input" }], service_tier: "priority" };
+		try {
+			response(sid, request(sid, body));
+			now.mockReturnValue(1000 + CACHE_DIAGNOSTIC_TTL_MS + 1);
+			if (read === "json-then-text") expect(getCacheDiagnostics(sid)).toEqual({ recent: [], misses: [] });
+			if (read !== "next-request-only") expect(formatWireDiagnostics(sid)).toBe("暂无发送位置指纹。");
+			const next = request(sid, body);
+			expect(next.prefix).toBe("baseline");
+			expect(next.changedSettings).toEqual([]);
+			expect(getCacheDiagnostics(sid).recent.map(row => row.sequence)).toEqual([next.sequence]);
+		} finally { now.mockRestore(); }
+	});
+}
+
+test("clearing retained diagnostics also clears the transient comparison baseline", () => {
+	const sid = randomUUID();
+	request(sid);
+	clearCacheDiagnostics(sid);
+	expect(formatWireDiagnostics(sid)).toBe("暂无发送位置指纹。");
+	expect(request(sid).prefix).toBe("baseline");
+});
+
+test("a late completion cannot reinsert an expired request into recent history", () => {
+	const sid = randomUUID(), now = spyOn(Date, "now").mockReturnValue(1000);
+	try {
+		const receipt = request(sid);
+		now.mockReturnValue(1000 + CACHE_DIAGNOSTIC_TTL_MS + 1);
+		response(sid, receipt);
+		const history = getCacheDiagnostics(sid);
+		expect(history.recent).toHaveLength(0);
+		expect(history.misses.map(row => row.sequence)).toEqual([receipt.sequence]);
+		expect(formatWireDiagnostics(sid)).not.toContain("实际能力");
+		expect(request(sid).prefix).toBe("baseline");
+	} finally { now.mockRestore(); }
+});
+
 test("bounds retained session histories and isolates their responses", () => {
 	const old = randomUUID();
 	response(old, request(old));

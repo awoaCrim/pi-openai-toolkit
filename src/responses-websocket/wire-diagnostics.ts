@@ -63,6 +63,7 @@ export function recordWireRequest(sessionId: string | undefined,
 	model: { provider: string; id: string; compat?: unknown },
 	body: ObjectValue): WireDiagnostic | undefined {
 	if (!sessionId || !Array.isArray(body.input)) return undefined;
+	expireDiagnostics();
 	const settings = Object.fromEntries(Object.entries(body)
 		.filter(([k, v]) => k !== "input" && k !== "previous_response_id" && v !== undefined)
 		.map(([k, v]) => [k, hash(v)]));
@@ -101,27 +102,44 @@ export function recordWireRequest(sessionId: string | undefined,
 
 export function clearWireDiagnostics(sessionId: string): void { sessions.delete(sessionId); }
 
-function history(sessionId: string): CacheHistory {
+function expireDiagnostics(): void {
 	const cutoff = Date.now() - CACHE_DIAGNOSTIC_TTL_MS;
+	for (const [id, value] of sessions) {
+		value.recent = value.recent.filter(d => d.at >= cutoff);
+		if (!value.recent.length) sessions.delete(id);
+	}
 	for (const [id, value] of cache.sessions) {
 		value.recent = value.recent.filter(d => d.at >= cutoff);
 		value.misses = value.misses.filter(d => (d.finishedAt ?? d.at) >= cutoff);
-		if (!value.recent.length && !value.misses.length) cache.sessions.delete(id);
+		if (!value.recent.length && !value.misses.length) {
+			cache.sessions.delete(id);
+			sessions.delete(id);
+		}
 	}
+}
+
+function history(sessionId: string): CacheHistory {
+	expireDiagnostics();
 	return cache.sessions.get(sessionId) ?? { recent: [], misses: [] };
 }
 
 function remember(sessionId: string, diagnostic: WireDiagnostic): void {
 	const state = history(sessionId);
-	if (!state.recent.includes(diagnostic)) state.recent.push(diagnostic);
+	if (diagnostic.at >= Date.now() - CACHE_DIAGNOSTIC_TTL_MS &&
+		!state.recent.includes(diagnostic)) state.recent.push(diagnostic);
 	state.recent.sort((a, b) => a.at - b.at || (a.sequence ?? 0) - (b.sequence ?? 0));
 	state.recent = state.recent.slice(-CACHE_DIAGNOSTIC_RECENT_LIMIT);
 	if (diagnostic.severeMiss && !state.misses.includes(diagnostic)) state.misses.push(diagnostic);
 	state.misses.sort((a, b) => (a.finishedAt ?? a.at) - (b.finishedAt ?? b.at));
 	state.misses = state.misses.slice(-CACHE_DIAGNOSTIC_MISS_LIMIT);
+	if (!state.recent.length && !state.misses.length) return;
 	cache.sessions.delete(sessionId);
 	cache.sessions.set(sessionId, state);
-	if (cache.sessions.size > MAX_SESSIONS) cache.sessions.delete(cache.sessions.keys().next().value!);
+	if (cache.sessions.size > MAX_SESSIONS) {
+		const oldest = cache.sessions.keys().next().value!;
+		cache.sessions.delete(oldest);
+		sessions.delete(oldest);
+	}
 }
 
 /** Updates the same receipt returned at finalized-payload time, never a "latest request" lookup. */
@@ -174,7 +192,10 @@ export function getCacheDiagnostics(sessionId: string): CacheHistory {
 	return JSON.parse(JSON.stringify(history(sessionId))) as CacheHistory;
 }
 
-export function clearCacheDiagnostics(sessionId: string): void { cache.sessions.delete(sessionId); }
+export function clearCacheDiagnostics(sessionId: string): void {
+	cache.sessions.delete(sessionId);
+	sessions.delete(sessionId);
+}
 
 function cacheLine(d: WireDiagnostic): string {
 	const usage = d.usage, rate = usage?.cached === undefined || !usage.input ? "未知" : `${(100 * usage.cached / usage.input).toFixed(2)}%`;
