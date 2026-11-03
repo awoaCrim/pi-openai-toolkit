@@ -89,10 +89,16 @@ export default function responsesWebSocketExtension(pi: ExtensionAPI): void {
 		},
 	});
 	pi.registerCommand("ws-diagnostics", {
-		description: "查看实际发送位置的模型能力、工具位置和脱敏前缀指纹。",
+		description: "查看脱敏请求、响应 usage、档位和低缓存现场；可加会话 ID 或 json。",
 		handler: async (args, ctx) => {
-			if (args.trim()) { ctx.ui.notify("用法：/ws-diagnostics", "warning"); return; }
-			if (ctx.hasUI) ctx.ui.notify(formatWireDiagnostics(ctx.sessionManager.getSessionId()), "info");
+			const parts = args.trim().split(/\s+/u).filter(Boolean);
+			const json = parts.at(-1) === "json";
+			if (json) parts.pop();
+			if (parts.length > 1 || (parts[0] !== undefined && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(parts[0]))) {
+				if (ctx.hasUI) ctx.ui.notify("用法：/ws-diagnostics [会话 ID] [json]", "warning");
+				return;
+			}
+			if (ctx.hasUI) ctx.ui.notify(formatWireDiagnostics(parts[0] ?? ctx.sessionManager.getSessionId(), json), "info");
 		},
 	});
 	pi.on("session_start", (_event, ctx) => {

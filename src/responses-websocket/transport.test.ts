@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { observeContinuation } from "./notifications";
 import { clearSendStats, formatSendStats } from "./stats";
+import { clearCacheDiagnostics, getCacheDiagnostics } from "./wire-diagnostics";
 import {
 	getApiProvider,
 	normalizeContext,
@@ -257,6 +258,180 @@ describe("response output budget continuation", () => {
 		const frame = JSON.parse(instances[0]!.sent[1]!);
 		expect(frame.previous_response_id).toBeUndefined();
 		expect(frame.input).toEqual(input);
+	});
+});
+
+describe("request-correlated cache diagnostics", () => {
+	function metered(text: string, turn: number, input: number, cached?: number, returnedTier?: string) {
+		const events = responseEvents(text, turn);
+		(events.at(-1)!.response as any).usage = {
+			input_tokens: input, output_tokens: 1,
+			...(cached !== undefined ? { input_tokens_details: { cached_tokens: cached } } : {}),
+		};
+		if (returnedTier !== undefined) (events.at(-1)!.response as any).service_tier = returnedTier;
+		return events;
+	}
+	function sse(events: Record<string, unknown>[]) {
+		return new Response(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""), {
+			headers: { "content-type": "text/event-stream" },
+		});
+	}
+	test("captures actual finalized tier and raw WS usage without replacing caller callbacks", async () => {
+		const id = randomUUID(), raw: unknown[] = [];
+		installFakeWebSocket({ onSend: socket => emitEvents(socket, metered("ok", 1, 100_000, 1000, "default")) });
+		const provider = createResponsesWebSocketProvider(originalResponsesProvider(), true);
+		const result = await provider.stream(model(), context(), {
+			apiKey: "test-key", sessionId: id, transport: "websocket-cached", maxRetries: 0,
+			onPayload: payload => ({ ...(payload as object), service_tier: "priority" }),
+			onProviderStreamEvent: event => { raw.push(event); },
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(raw).toHaveLength(responseEvents("ok").length);
+		const diagnostic = getCacheDiagnostics(id).recent[0]!;
+		expect(diagnostic).toMatchObject({ requestedTier: "priority", returnedTier: "default", transport: "websocket",
+			mode: "full", outcome: "completed", usage: { input: 100_000, cached: 1000, output: 1 }, severeMiss: true });
+		expect(getCacheDiagnostics(id).misses).toHaveLength(1);
+		clearCacheDiagnostics(id);
+	});
+
+	test("a tier change on the same socket correlates full replay with its own cache miss", async () => {
+		const id = randomUUID();
+		let sends = 0, selected = "default";
+		installFakeWebSocket({ onSend: socket => {
+			sends++;
+			emitEvents(socket, metered("ok", sends, 100_000, sends === 1 ? 99_000 : 0, "default"));
+		} });
+		const provider = createResponsesWebSocketProvider(originalResponsesProvider(), true);
+		const options = { apiKey: "test-key", sessionId: id, transport: "websocket-cached" as const, maxRetries: 0,
+			onPayload: (payload: unknown) => ({ ...(payload as object), service_tier: selected }) };
+		const first = await provider.stream(model(), context(), options).result();
+		selected = "priority";
+		const next = normalizeContext({ messages: [
+			{ role: "user", content: "hello", timestamp: 1 }, first, { role: "user", content: "continue", timestamp: 3 },
+		] });
+		await provider.stream(model(), next, options).result();
+		const rows = getCacheDiagnostics(id).recent;
+		expect(rows).toHaveLength(2);
+		expect(rows[0]!.connection).toBe(rows[1]!.connection);
+		expect(rows[1]).toMatchObject({ mode: "full", prefix: "preserved", changedSettings: ["service_tier"], severeMiss: true });
+		clearCacheDiagnostics(id);
+	});
+
+	test("interleaved streams in one session cannot attach usage to the latest unrelated request", async () => {
+		const id = randomUUID(), ready = deferred<void>();
+		let firstSocket: FakeSocketInstance | undefined;
+		installFakeWebSocket({ onSend: socket => {
+			if (!firstSocket) {
+				firstSocket = socket;
+				emitEvents(socket, [metered("first", 1, 100_000, 99_000)[0]!]);
+				ready.resolve();
+			} else emitEvents(socket, metered("second", 2, 200_000, 1000));
+		} });
+		const provider = createResponsesWebSocketProvider(originalResponsesProvider(), true);
+		const options = { apiKey: "test-key", sessionId: id, transport: "websocket-cached" as const, maxRetries: 0 };
+		const first = provider.stream(model(), context(), options).result();
+		await ready.promise;
+		const next = normalizeContext({ messages: [{ role: "user", content: "different concurrent task", timestamp: 2 }] });
+		await provider.stream(model(), next, options).result();
+		emitEvents(firstSocket!, metered("first", 1, 100_000, 99_000).slice(1));
+		await first;
+		const rows = getCacheDiagnostics(id);
+		expect(rows.recent.map(r => r.usage?.input)).toEqual([100_000, 200_000]);
+		expect(rows.misses.map(r => r.usage?.input)).toEqual([200_000]);
+		expect(rows.recent[0]!.connection).not.toBe(rows.recent[1]!.connection);
+		clearCacheDiagnostics(id);
+	});
+
+	for (const transport of ["sse", "sse-fallback", "http-size"] as const) {
+		test(`correlates ${transport} raw usage without consuming or altering the response stream`, async () => {
+			const id = randomUUID(), observed: unknown[] = [];
+			const { instances } = installFakeWebSocket({ fail: transport === "sse-fallback" });
+			let calls = 0;
+			const provider = createResponsesWebSocketProvider(originalResponsesProvider(), true);
+			const result = await provider.stream(model(), context(), {
+				apiKey: "test-key", sessionId: id, maxRetries: 0, transport: transport === "sse" ? "sse" : "auto",
+				onPayload: payload => ({ ...(payload as object), service_tier: "priority",
+					...(transport === "http-size" ? { input: [{ role: "user", content: "x".repeat(RESPONSES_WEBSOCKET_HTTP_THRESHOLD_BYTES) }] } : {}) }),
+				onProviderStreamEvent: event => { observed.push(event); },
+				fetch: async () => { calls++; return sse(metered("http result", 1, 100_000, 1000, "default")); },
+			}).result();
+			expect(result.stopReason).toBe("stop");
+			expect(result.content).toEqual([{ type: "text", text: "http result", textSignature: expect.any(String) }]);
+			expect(calls).toBe(1);
+			expect(observed).toHaveLength(responseEvents("http result").length);
+			expect(instances).toHaveLength(transport === "sse-fallback" ? 1 : 0);
+			const rows = getCacheDiagnostics(id);
+			expect(rows.recent).toHaveLength(1);
+			expect(rows.misses).toHaveLength(1);
+			expect(rows.recent[0]).toMatchObject({ transport, requestedTier: "priority", returnedTier: "default",
+				outcome: "completed", usage: { input: 100_000, cached: 1000 } });
+			clearCacheDiagnostics(id);
+		});
+	}
+
+	test("missing cached usage stays unknown rather than becoming a false 0% hit", async () => {
+		const id = randomUUID();
+		const provider = createResponsesWebSocketProvider(originalResponsesProvider(), true);
+		await provider.stream(model(), context(), { apiKey: "test-key", sessionId: id, transport: "sse", maxRetries: 0,
+			fetch: async () => sse(metered("unknown cached", 1, 100_000)),
+		}).result();
+		const rows = getCacheDiagnostics(id);
+		expect(rows.recent[0]!.usage?.cached).toBeUndefined();
+		expect(rows.recent[0]!.returnedTier).toBeUndefined();
+		expect(rows.misses).toHaveLength(0);
+		clearCacheDiagnostics(id);
+	});
+
+	test("HTTP rejection is a failed request with unknown usage, not a billed-token claim", async () => {
+		const id = randomUUID();
+		const provider = createResponsesWebSocketProvider(originalResponsesProvider(), true);
+		const result = await provider.stream(model(), context(), { apiKey: "test-key", sessionId: id, transport: "sse", maxRetries: 0,
+			fetch: async () => new Response(JSON.stringify({ error: { message: "rejected", type: "invalid_request_error" } }),
+				{ status: 400, headers: { "content-type": "application/json" } }),
+		}).result();
+		expect(result.stopReason).toBe("error");
+		expect(getCacheDiagnostics(id).recent[0]).toMatchObject({ outcome: "failed", transport: "sse" });
+		expect(getCacheDiagnostics(id).recent[0]!.usage).toBeUndefined();
+		clearCacheDiagnostics(id);
+	});
+
+	test("native HTTP retries get separate receipts and cannot inherit failed-attempt usage", async () => {
+		const id = randomUUID(), provider = createResponsesWebSocketProvider(originalResponsesProvider(), true);
+		let calls = 0;
+		const result = await provider.stream(model(), context(), { apiKey: "test-key", sessionId: id, transport: "sse", maxRetries: 1,
+			fetch: async () => ++calls === 1
+				? new Response(JSON.stringify({ error: { message: "busy" } }), { status: 503, headers: { "content-type": "application/json" } })
+				: sse(metered("recovered", 1, 100_000, 99_000, "default")),
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(calls).toBe(2);
+		const rows = getCacheDiagnostics(id).recent;
+		expect(rows).toHaveLength(2);
+		expect(rows[0]!.outcome).toBe("failed");
+		expect(rows[0]!.usage).toBeUndefined();
+		expect(rows[1]!.usage).toEqual({ input: 100_000, cached: 99_000, output: 1 });
+		expect(rows[0]!.sequence).not.toBe(rows[1]!.sequence);
+		clearCacheDiagnostics(id);
+	});
+
+	test("SDK cancellation records an aborted attempt, never a zero-token success", async () => {
+		const id = randomUUID(), abort = new AbortController(), ready = deferred<void>();
+		installFakeWebSocket({ onSend: socket => {
+			emitEvents(socket, [responseEvents("pending")[0]!]);
+			ready.resolve();
+		} });
+		const provider = createResponsesWebSocketProvider(originalResponsesProvider(), true);
+		const pending = provider.stream(model(), context(), {
+			apiKey: "test-key", sessionId: id, transport: "websocket-cached", maxRetries: 0, signal: abort.signal,
+		}).result();
+		await ready.promise;
+		abort.abort();
+		expect((await pending).stopReason).toBe("aborted");
+		const receipt = getCacheDiagnostics(id).recent[0]!;
+		expect(receipt.outcome).toBe("aborted");
+		expect(receipt.usage).toBeUndefined();
+		expect(getCacheDiagnostics(id).misses).toHaveLength(0);
+		clearCacheDiagnostics(id);
 	});
 });
 
