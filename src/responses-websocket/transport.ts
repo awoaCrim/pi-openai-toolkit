@@ -213,6 +213,7 @@ class RecoverableWebSocketError extends Error {}
 
 const STREAM_INTERRUPTION = /\bstream closed before response\.completed\b/iu;
 const TERMINAL_FAILURE_TEXT = /quota|billing|budget|usage.?limit|api.?key|unauthori[sz]ed|forbidden|authenticat|permission|invalid|malformed|unsupported|policy|context.?length|context.?overflow|\babort(?:ed)?\b|\bcancell?ed\b/iu;
+const SAFETY_REFUSAL_TEXT = /\bsafety\b|\bblocked\b/iu;
 const TRANSIENT_ERROR_CODES = new Set(["stream_error", "server_error", "request_timeout"]);
 
 function transportError(error: unknown): Error {
@@ -241,7 +242,8 @@ function socketCloseError(event: WebSocketEvent, streaming: boolean): Error {
 }
 
 function compatibleFailureMetadata(error: Record<string, unknown>): boolean {
-	if (typeof error.message === "string" && TERMINAL_FAILURE_TEXT.test(error.message)) return false;
+	if (typeof error.message === "string" &&
+		(TERMINAL_FAILURE_TEXT.test(error.message) || SAFETY_REFUSAL_TEXT.test(error.message))) return false;
 	for (const field of ["code", "type"]) {
 		const value = error[field];
 		if (value !== undefined && value !== null && value !== "" &&
@@ -282,6 +284,35 @@ function closeSocket(socket: WebSocketLike | undefined, reason = "done"): void {
 			// The provider socket is already gone.
 		}
 	}
+}
+
+function canReplayLostTurn(body: ResponsesPayload): boolean {
+	// Function/custom tools run on the client only after a successful tool turn.
+	// Unknown hosted tools may already have changed external state.
+	const safeTools = new Set(["function", "custom", "web_search", "web_search_preview", "file_search"]);
+	const safeDeclarations = (tools: unknown): boolean => Array.isArray(tools) && tools.every(tool =>
+		isRecord(tool) && (typeof tool.type === "string" && safeTools.has(tool.type) ||
+			tool.type === "namespace" && safeDeclarations(tool.tools)));
+	if (body.tools !== undefined && !safeDeclarations(body.tools)) return false;
+	return !Array.isArray(body.input) || body.input.every(item =>
+		!isRecord(item) || item.type !== "additional_tools" || safeDeclarations(item.tools));
+}
+
+function normalizeUpstreamWebsocketLoss(event: Record<string, unknown>): Record<string, unknown> | undefined {
+	const response = isRecord(event.response) ? event.response : undefined;
+	const nested = event.type === "error" && isRecord(event.error);
+	const error = event.type === "error" ? (nested ? event.error as Record<string, unknown> : event)
+		: event.type === "response.failed" && isRecord(response?.error) ? response.error : undefined;
+	if (!error || error.code !== "upstream_websocket_lost" || typeof error.message !== "string") return undefined;
+	const metadata = [{ ...event, type: undefined }, error === event ? { ...error, type: undefined } : error];
+	if (response) metadata.push({ ...response, type: undefined, status: response.status === "failed" ? undefined : response.status });
+	if (isRecord(error.error)) metadata.push(error.error);
+	if (metadata.some(value => !compatibleFailureMetadata({
+		...value, code: value.code === "upstream_websocket_lost" ? "stream_error" : value.code,
+	}))) return undefined;
+	const normalized = { ...error, message: `WebSocket error [upstream_websocket_lost]: ${error.message}` };
+	if (event.type === "response.failed") return { ...event, response: { ...response, error: normalized } };
+	return nested ? { ...event, error: normalized } : normalized;
 }
 
 function socketReusable(socket: WebSocketLike): boolean {
@@ -559,6 +590,7 @@ async function createSseResponse(
 	onRelease: (keep: boolean) => void,
 	allowBootstrapFallback: boolean,
 	onSent: () => void,
+	allowLostTurnReplay: boolean,
 ): Promise<Response> {
 	const encoder = new TextEncoder();
 	let resolveReady!: () => void;
@@ -608,8 +640,14 @@ async function createSseResponse(
 				if (text === undefined) throw new Error("Invalid Responses WebSocket frame");
 				const parsed: unknown = JSON.parse(text);
 				if (!isRecord(parsed) || typeof parsed.type !== "string" || !parsed.type) throw new Error("Invalid Responses WebSocket event");
-				const normalized = normalizeStreamInterruption(parsed);
-				if (!committed && allowBootstrapFallback && normalized) {
+				if (parsed.type === "response.output_item.added" && isRecord(parsed.item) &&
+					typeof parsed.item.type === "string" && parsed.item.type.endsWith("_call") &&
+					!["function_call", "custom_tool_call", "web_search_call", "file_search_call"].includes(parsed.item.type)) {
+					allowLostTurnReplay = false;
+				}
+				const interruption = normalizeStreamInterruption(parsed);
+				const normalized = interruption ?? (allowLostTurnReplay ? normalizeUpstreamWebsocketLoss(parsed) : undefined);
+				if (!committed && allowBootstrapFallback && interruption) {
 					fail(transportError("stream closed before response.completed"));
 					return;
 				}
@@ -761,6 +799,7 @@ export function createResponsesWebSocketFetch(model: Model<Api>, options: Stream
 					reason, changedFields, bytes: frameBytes,
 					items: inputItems(requestPayload).length, at: Date.now(),
 				}),
+				canReplayLostTurn(fullPayload),
 			);
 		} catch (error) {
 			release?.(false);
