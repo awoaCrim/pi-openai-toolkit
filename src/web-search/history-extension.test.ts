@@ -1,5 +1,5 @@
 import { expect, test, spyOn } from "bun:test";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { ExtensionRunner, SessionManager } from "@earendil-works/pi-coding-agent";
 import { registerHostedSearchHistory } from "./history-extension";
 import { SEARCH_HISTORY, SEARCH_DISPLAY } from "./history";
 
@@ -68,6 +68,36 @@ function finish(h: ReturnType<typeof harness>, failed = false) {
 	h.emit("message_end", { message: failed ? { ...assistant, stopReason: "error" } : assistant });
 }
 
+async function projectWithPi(h: ReturnType<typeof harness>, messages: any[]) {
+	const handlers = new Map([...h.hooks].map(([name, handler]) => [name, [handler]]));
+	const runner = new ExtensionRunner([{ path: "hosted-search-fixture", handlers }] as any,
+		{} as any, "/tmp", h.ctx.sessionManager, {} as any);
+	(runner as any).createContext = () => h.ctx;
+	(runner as any).emitError = (error: unknown) => { throw error; };
+	return runner.emitContext(messages);
+}
+
+test("Pi keeps historical system/tool updates in place when the first search evidence is added", async () => {
+	const h = harness();
+	const messages: any[] = [
+		{ role: "system", content: "", sections: { project_context: "Original project instructions" },
+			toolsAdded: [{ name: "fixture", description: "Fixture tool", parameters: { type: "object" } }], timestamp: 0 },
+		{ role: "user", content: "Earlier request", timestamp: 1 },
+		{ role: "system", content: "", sections: { project_context: "Updated project instructions" }, timestamp: 2 },
+		{ role: "user", content: "Search", timestamp: 3 },
+	];
+	const before = await projectWithPi(h, messages);
+	finish(h);
+	const display = { role: "custom", ...h.emit("turn_end").entries[0], timestamp: 4 };
+	const after = await projectWithPi(h, [...messages, assistant, display,
+		{ role: "user", content: "Continue", timestamp: 5 }]);
+	expect(after.slice(0, before.length)).toEqual(before);
+	expect(after.filter(message => message.role === "system")).toEqual(
+		before.filter(message => message.role === "system"));
+	expect(after.filter(message => message.role === "custom")).toHaveLength(1);
+	expect(JSON.stringify(after)).toContain("pi-hosted-search-record");
+});
+
 test("persists before the assistant, keeps the entry hidden, and restores the exact prefix after reload", () => {
 	const h = harness();
 	finish(h);
@@ -80,7 +110,7 @@ test("persists before the assistant, keeps the entry hidden, and restores the ex
 	expect(h.emit("turn_end")).toBeUndefined();
 	h.emit("session_shutdown"); h.emit("session_start");
 	const display = { role: "custom", ...boundary.entries[0], timestamp: 2 };
-	const context = h.emit("context", { messages: [assistant, display] });
+	const context = h.emit("context_with_system", { messages: [assistant, display] });
 	expect(context.messages).toHaveLength(2); // One context summary, not two.
 	const payload = { input: [output, { role: "user", content: context.messages[1].content }] };
 	expect(h.emit("before_provider_request", { payload }).input).toEqual([call, output]);
@@ -89,10 +119,10 @@ test("does not read an abandoned branch or resurrect compacted-away answers", ()
 	const h = harness(); finish(h);
 	const record = h.entries[0];
 	h.entries.length = 0;
-	expect(h.emit("context", { messages: [assistant] }).messages).toEqual([assistant]);
+	expect(h.emit("context_with_system", { messages: [assistant] }).messages).toEqual([assistant]);
 	h.entries.push(record);
 	const compacted = [{ role: "user", content: "Compacted summary", timestamp: 2 }];
-	expect(h.emit("context", { messages: compacted }).messages).toEqual(compacted);
+	expect(h.emit("context_with_system", { messages: compacted }).messages).toEqual(compacted);
 });
 test("retains search evidence on failure without making failed output replayable", () => {
 	const h = harness(); finish(h, true);
@@ -115,7 +145,7 @@ test("independent sessions do not share search evidence", () => {
 	finish(a);
 	expect(a.entries).toHaveLength(1);
 	expect(b.entries).toHaveLength(0);
-	expect(b.emit("context", { messages: [assistant] }).messages).toEqual([assistant]);
+	expect(b.emit("context_with_system", { messages: [assistant] }).messages).toEqual([assistant]);
 });
 
 test("notification failures do not discard the durable search record", () => {
@@ -139,17 +169,17 @@ test("real session branches and compaction keep records scoped to surviving cont
 	const nextUser = manager.appendMessage({ role: "user", content: "Next", timestamp: 3 });
 	manager.branch(answerId);
 	expect(manager.getBranch().some(e => e.type === "custom" && e.customType === SEARCH_HISTORY)).toBe(true);
-	expect(h.emit("context", { messages: manager.buildSessionContext().messages }).messages
+	expect(h.emit("context_with_system", { messages: manager.buildSessionContext().messages }).messages
 		.some((m: any) => m.role === "custom" && m.content.includes("pi-hosted-search-record"))).toBe(true);
 	manager.branch(user);
-	expect(h.emit("context", { messages: manager.buildSessionContext().messages }).messages
+	expect(h.emit("context_with_system", { messages: manager.buildSessionContext().messages }).messages
 		.some((m: any) => m.role === "custom")).toBe(false);
 	manager.branch(nextUser);
 	manager.appendCompaction("Summary", displayId, 10000);
-	const retained = h.emit("context", { messages: manager.buildSessionContext().messages }).messages;
+	const retained = h.emit("context_with_system", { messages: manager.buildSessionContext().messages }).messages;
 	expect(retained.some((m: any) => m.role === "assistant")).toBe(false);
 	expect(retained.filter((m: any) => m.role === "custom")).toHaveLength(1);
 	manager.appendCompaction("New summary", nextUser, 10000);
-	const compacted = h.emit("context", { messages: manager.buildSessionContext().messages }).messages;
+	const compacted = h.emit("context_with_system", { messages: manager.buildSessionContext().messages }).messages;
 	expect(compacted.some((m: any) => m.role === "custom")).toBe(false);
 });
