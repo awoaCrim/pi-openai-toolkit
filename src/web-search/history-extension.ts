@@ -97,7 +97,9 @@ export function registerHostedSearchHistory(pi: ExtensionAPI): void {
 			details: { responseId: record.responseId, provider: record.provider },
 		}] };
 	});
-	pi.on("context", (event, ctx) => {
+	// The conversation-only hook folds historical system/tool updates into a
+	// new head when messages change. Keep their positions while adding evidence.
+	pi.on("context_with_system", (event, ctx) => {
 		const records = branchRecords(ctx);
 		const seen = new Set<string>();
 		const messages: typeof event.messages = [];

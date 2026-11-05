@@ -19,6 +19,11 @@ try {
 	await writeFile(extension, `
 		import { registerHostedSearchHistory } from ${JSON.stringify(join(packageDir, "src/web-search/history-extension.ts"))};
 		export default function(pi) {
+			let turns = 0;
+			pi.on("before_agent_start", event => {
+				event.systemPromptOptions.sections.compat_fixture = ++turns === 1
+					? "Original fixture instructions." : "Updated fixture instructions.";
+			});
 			pi.on("provider_stream_event", e => pi.appendEntry("compat:raw-event", { type: e.data?.type }));
 			pi.on("before_provider_request", event => ({ ...event.payload, tools: [{ type: "web_search" }] }));
 			registerHostedSearchHistory(pi);
@@ -35,7 +40,8 @@ try {
 	const baseUrl = "https://hosted-history-compat.invalid/v1";
 	runtime.registerProvider("history-compat", { api: "openai-responses", apiKey: "synthetic-key", baseUrl,
 		models: [{ id: "gpt-5.5", name: "Compatibility fixture", reasoning: false, input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 64000, maxTokens: 256 }] });
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 64000, maxTokens: 256,
+			compat: { supportsMidConvoSystemMessages: true, supportsAdditionalTools: true } }] });
 	const resourceLoader = new sdk.DefaultResourceLoader({
 		cwd: env.cwd, agentDir: env.agentDir, settingsManager: settings,
 		additionalExtensionPaths: [extension], noSkills: true, noPromptTemplates: true,
@@ -53,6 +59,7 @@ try {
 	const answer = { type: "message", id: "msg_compat", role: "assistant", status: "completed",
 		content: [{ type: "output_text", text: "Fixture answer", annotations: [] }] };
 	let requests = 0;
+	let searchInput: unknown[] | undefined;
 	let failure: unknown;
 	const deniedFetch = globalThis.fetch;
 	globalThis.fetch = (async (input, init) => {
@@ -61,10 +68,19 @@ try {
 			if (request.url !== baseUrl + "/responses" || request.method !== "POST") return deniedFetch(input, init);
 			const body = JSON.parse(await request.text());
 			requests++;
-			if (requests === 2) assert.equal(
-				body.input.some((item: any) => item.type === "web_search_call"), supported);
-			const output = requests === 1 ? [call, answer] : [{ ...answer, id: "msg_next" }];
-			const response = { id: requests === 1 ? "resp_compat" : "resp_next", status: "completed", output,
+			if (requests === 2) {
+				assert(body.input.filter((item: any) => ["system", "developer"].includes(item.role)).length >= 2,
+					"Fixture must contain a historical system update before search");
+				searchInput = structuredClone(body.input);
+			}
+			if (requests === 3) {
+				assert.equal(body.input.some((item: any) => item.type === "web_search_call"), supported);
+				assert(searchInput);
+				assert.deepEqual(body.input.slice(0, searchInput.length), searchInput,
+					"Search evidence must not rewrite the previous system/tool prefix");
+			}
+			const output = requests === 2 ? [call, answer] : [{ ...answer, id: requests === 1 ? "msg_seed" : "msg_next" }];
+			const response = { id: requests === 2 ? "resp_compat" : requests === 1 ? "resp_seed" : "resp_next", status: "completed", output,
 				usage: { input_tokens: 100, output_tokens: 5, total_tokens: 105 } };
 			const events = [
 				{ type: "response.created", response: { id: response.id, status: "in_progress", output: [] } },
@@ -77,6 +93,8 @@ try {
 				{ headers: { "content-type": "text/event-stream" } });
 		} catch (error) { failure = error; throw error; }
 	}) as typeof fetch;
+	await session.prompt("Seed the offline fixture.");
+	if (failure) throw failure;
 	await session.prompt("Search the offline fixture.");
 	if (failure) throw failure;
 	assert.equal(session.messages.filter((message: any) => message.role === "assistant").at(-1)?.stopReason, "stop");
@@ -88,7 +106,7 @@ try {
 	if (supported) assert.equal(records[0].data.calls[0].id, call.id);
 	await session.prompt("Continue with the same fixture.");
 	if (failure) throw failure;
-	assert.equal(requests, 2);
+	assert.equal(requests, 3);
 	env.assertNoNetwork();
 	process.stdout.write(`OK Pi ${sdk.VERSION}: capture=${supported}\n`);
 } finally {
