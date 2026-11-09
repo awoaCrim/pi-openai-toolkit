@@ -1,12 +1,35 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { ExtensionRunner, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { AgentSession, ExtensionRunner, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { CompactionPayloadProjector } from "./compaction-request";
 
 /** Context property added by the toolkit's host patch. */
 export const PI_CONTEXT_PROJECTOR_FIELD = "projectContextForCompaction" as const;
 const PI_CONTEXT_PROJECTION_REPORTER_FIELD = "__piOpenAiToolkitReportContextProjectionFailure" as const;
 const PATCH_MARKER_FIELD = "__piOpenAiToolkitContextHookPatch" as const;
-const PATCH_VERSION = 2;
+const PATCH_VERSION = 3;
+const HOST_SESSION = Symbol.for("pi-openai-toolkit.compaction-host-session");
+const HOST_BIND_PATCH = Symbol.for("pi-openai-toolkit.compaction-host-bind");
+
+type ProjectionHost = {
+	agent: { transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]> };
+};
+
+function installHostProjectionBinding(): void {
+	// Pi does not expose its final Agent.transformContext on ExtensionContext.
+	// Bind the runner to its owning session, including reload-created runners.
+	// Resolve transformContext at call time: hosts may wrap it after binding.
+	const prototype = AgentSession.prototype as unknown as {
+		_bindExtensionCore?: ((this: ProjectionHost, runner: ExtensionRunner) => void) & { [HOST_BIND_PATCH]?: boolean };
+	};
+	const original = prototype._bindExtensionCore;
+	if (!original || original[HOST_BIND_PATCH]) return;
+	const patched = function (this: ProjectionHost, runner: ExtensionRunner) {
+		Object.defineProperty(runner, HOST_SESSION, { value: this, configurable: true });
+		return original.call(this, runner);
+	};
+	Object.defineProperty(patched, HOST_BIND_PATCH, { value: true });
+	prototype._bindExtensionCore = patched;
+}
 
 type ProjectionState = {
 	failure?: string;
@@ -24,7 +47,7 @@ type MarkedCreateContext = typeof ExtensionRunner.prototype.createContext & {
 	[PATCH_MARKER_FIELD]?: true | number;
 };
 
-/** The ordered context-hook chain, applied to a cloned compaction context. */
+/** The final host context projection, applied to a cloned compaction context. */
 export type PiContextHookProjector = (
 	messages: readonly AgentMessage[],
 ) => Promise<readonly AgentMessage[]>;
@@ -36,13 +59,12 @@ export type PiContextHookPatchResult =
 /**
  * Add a narrow projection method to every ExtensionContext created by Pi.
  *
- * Pi 0.87's ordered `ExtensionRunner.emitContext()` runs both `context` and
- * `context_with_system` phases,
- * but the event-level ExtensionContext does not expose the runner. The patch
- * bridges only the method needed by Remote V2; it does not expose the runner
- * or alter Pi's scheduler.
+ * Agent.transformContext includes both extension phases and host projections
+ * such as prepareLoadout's hidden declarations. Context-only hosts retain
+ * emitContext; the bridge does not expose the runner/session or alter scheduling.
  */
 export function installPiContextHookPatch(): PiContextHookPatchResult {
+	installHostProjectionBinding();
 	const prototype = ExtensionRunner.prototype;
 	if (typeof prototype.emitContext !== "function") {
 		return { ok: false, reason: "emit-context-unavailable" };
@@ -59,7 +81,15 @@ export function installPiContextHookPatch(): PiContextHookPatchResult {
 	}
 
 	const patched = function patchedCreateContext(this: ExtensionRunner): ExtensionContext {
-		const context = original.call(this) as PatchedExtensionContext;
+		let context = original.call(this) as PatchedExtensionContext;
+		// Older installed bridges used a non-configurable property. Rebuild only
+		// the context object, retaining lazy getters, to upgrade on /reload.
+		if (PI_CONTEXT_PROJECTOR_FIELD in context) {
+			const descriptors = Object.getOwnPropertyDescriptors(context);
+			delete descriptors[PI_CONTEXT_PROJECTOR_FIELD];
+			delete descriptors[PI_CONTEXT_PROJECTION_REPORTER_FIELD];
+			context = Object.create(Object.getPrototypeOf(context), descriptors);
+		}
 		if (typeof this.emitBeforeProviderRequest === "function" && !("projectProviderPayloadForCompaction" in context)) {
 			Object.defineProperty(context, "projectProviderPayloadForCompaction", {
 				enumerable: false,
@@ -87,7 +117,10 @@ export function installPiContextHookPatch(): PiContextHookPatchResult {
 					const state: ProjectionState = {};
 					activeProjectionByRunner.set(this, state);
 					try {
-						const projected = await this.emitContext([...messages]);
+						const host = (this as ExtensionRunner & { [HOST_SESSION]?: ProjectionHost })[HOST_SESSION];
+						const projected = host?.agent.transformContext
+							? await host.agent.transformContext(structuredClone([...messages]))
+							: await this.emitContext(structuredClone([...messages]));
 						if (state.failure) {
 							throw new Error(`context projection failed: ${state.failure}`);
 						}

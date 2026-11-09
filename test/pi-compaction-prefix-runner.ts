@@ -10,6 +10,8 @@ const source = process.argv[3] ?? "legacy";
 const native = transport.startsWith("native");
 const ws = transport.endsWith("ws");
 const errorCase = source.endsWith("error");
+const loadoutCase = source.includes("loadout");
+const wrappedCase = source.includes("wrapped");
 const sdkRoot = process.env.TOOLKIT_PREFIX_SDK ?? process.argv[4];
 const sdk = await import(sdkRoot ? `${sdkRoot}/pi-coding-agent/dist/index.js` : "@earendil-works/pi-coding-agent");
 const ai = await import(sdkRoot ? `${sdkRoot}/pi-ai/dist/index.js` : "@earendil-works/pi-ai");
@@ -155,20 +157,38 @@ try {
 		assert.deepEqual(loader.getExtensions().errors, []);
 		({ session } = await createAgentSession({
 			cwd: env.cwd, agentDir: env.agentDir, modelRuntime: runtime, model, thinkingLevel: "low",
-			settingsManager: settings, resourceLoader: loader, sessionManager: manager, tools: ["fixture_lookup"],
+			settingsManager: settings, resourceLoader: loader, sessionManager: manager,
+			tools: loadoutCase ? ["fixture_lookup", "edit", "write"] : ["fixture_lookup"],
 			customTools: [{
 				name: "fixture_lookup", label: "lookup", description: "Synthetic fixture only",
 				parameters: { type: "object", properties: { id: { type: "number" } }, required: ["id"] },
 				execute: async () => ({ content: [{ type: "text", text: "FIXTURE-FACT " + "synthetic ledger record ".repeat(1000) }], details: {} }),
+				...(loadoutCase ? { prepareLoadout: () => ({ hiddenDeclarations: ["edit", "write"] }) } : {}),
 			}],
 		}));
 		await session.bindExtensions({ mode: "print", onError: (error: any) => errors.push(error.error) });
+		if (wrappedCase) {
+			const previousTransform = session.agent.transformContext;
+			session.agent.transformContext = async (messages: any[], signal: AbortSignal) => {
+				const transformed = await previousTransform(messages, signal);
+				return transformed.map((message: any, index: number) => index === 0 && message.role === "system"
+					? { ...message, sections: { ...message.sections, fixture_host: "HOST-PROJECTION-MARKER" } }
+					: message);
+			};
+		}
 	}
 	await open();
 	await session.prompt("Look up the fixture");
 	if (failure) throw failure;
 	await session.prompt("Confirm the fact");
 	if (failure) throw failure;
+	if (loadoutCase) {
+		const canonical = JSON.stringify(manager.buildSessionProjection().messages);
+		assert(canonical.includes('"name":"edit"'), "fixture must retain hidden declarations on disk");
+		assert(!JSON.stringify(previous).includes('"name":"edit"'), "host did not filter the normal request");
+	}
+	if (wrappedCase) assert(JSON.stringify(previous).includes("HOST-PROJECTION-MARKER"));
+	if (source.includes("reload")) await session.reload();
 	if (source.startsWith("hook")) assert(JSON.stringify(previous?.input).includes("synthetic fixture reference"), "hosted-search history was not exercised");
 	const before = ordinary;
 	try {
