@@ -3,6 +3,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { ExtensionRunner } from "@earendil-works/pi-coding-agent";
 import {
 	getPiContextHookProjector,
+	getCompactionPayloadProjector,
 	installPiContextHookPatch,
 	PI_CONTEXT_PROJECTOR_FIELD,
 	reportPiContextHookFailure,
@@ -64,4 +65,41 @@ test("installs the context patch idempotently", () => {
 	const second = installPiContextHookPatch();
 	expect(first.ok).toBe(true);
 	expect(second.ok).toBe(true);
+});
+
+test("payload projection propagates caught hook errors and unsubscribes", async () => {
+	installPiContextHookPatch();
+	let listener: ((error: { event: string; error: string }) => void) | undefined;
+	let subscribed = false;
+	const runner = Object.create(ExtensionRunner.prototype);
+	runner.onError = (callback: typeof listener) => {
+		listener = callback; subscribed = true;
+		return () => { subscribed = false; };
+	};
+	runner.emitBeforeProviderRequest = async (payload: unknown) => {
+		listener?.({ event: "before_provider_request", error: "failed transform" });
+		return payload;
+	};
+	const project = getCompactionPayloadProjector(runner.createContext())!;
+	await expect(project({})).rejects.toThrow("failed transform");
+	expect(subscribed).toBe(false);
+	runner.emitBeforeProviderRequest = async (payload: unknown) => payload;
+	await expect(project({ input: [] })).resolves.toEqual({ input: [] });
+	expect(subscribed).toBe(false);
+});
+
+test("reload upgrades an existing context-only bridge without requiring a host restart", () => {
+	const prototype = ExtensionRunner.prototype;
+	const before = prototype.createContext;
+	try {
+		const old = () => ({}) as ReturnType<typeof before>;
+		Object.defineProperty(old, "__piOpenAiToolkitContextHookPatch", { value: true });
+		prototype.createContext = old;
+		expect(installPiContextHookPatch()).toEqual({ ok: true, installed: true });
+		const runner = Object.create(prototype);
+		expect(getCompactionPayloadProjector(runner.createContext())).toBeFunction();
+		expect(installPiContextHookPatch()).toEqual({ ok: true, installed: false, reason: "already-installed" });
+	} finally {
+		prototype.createContext = before;
+	}
 });

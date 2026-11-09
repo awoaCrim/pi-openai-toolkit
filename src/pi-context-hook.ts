@@ -1,10 +1,12 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { ExtensionRunner, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { CompactionPayloadProjector } from "./compaction-request";
 
 /** Context property added by the toolkit's host patch. */
 export const PI_CONTEXT_PROJECTOR_FIELD = "projectContextForCompaction" as const;
 const PI_CONTEXT_PROJECTION_REPORTER_FIELD = "__piOpenAiToolkitReportContextProjectionFailure" as const;
 const PATCH_MARKER_FIELD = "__piOpenAiToolkitContextHookPatch" as const;
+const PATCH_VERSION = 2;
 
 type ProjectionState = {
 	failure?: string;
@@ -14,11 +16,12 @@ const activeProjectionByRunner = new WeakMap<ExtensionRunner, ProjectionState>()
 
 type PatchedExtensionContext = ExtensionContext & {
 	[PI_CONTEXT_PROJECTOR_FIELD]?: PiContextHookProjector;
+	projectProviderPayloadForCompaction?: CompactionPayloadProjector;
 	[PI_CONTEXT_PROJECTION_REPORTER_FIELD]?: (reason: string) => void;
 };
 
 type MarkedCreateContext = typeof ExtensionRunner.prototype.createContext & {
-	[PATCH_MARKER_FIELD]?: true;
+	[PATCH_MARKER_FIELD]?: true | number;
 };
 
 /** The ordered context-hook chain, applied to a cloned compaction context. */
@@ -51,12 +54,30 @@ export function installPiContextHookPatch(): PiContextHookPatchResult {
 	}
 
 	const markedOriginal = original as MarkedCreateContext;
-	if (markedOriginal[PATCH_MARKER_FIELD] === true) {
+	if (markedOriginal[PATCH_MARKER_FIELD] === PATCH_VERSION) {
 		return { ok: true, installed: false, reason: "already-installed" };
 	}
 
 	const patched = function patchedCreateContext(this: ExtensionRunner): ExtensionContext {
 		const context = original.call(this) as PatchedExtensionContext;
+		if (typeof this.emitBeforeProviderRequest === "function" && !("projectProviderPayloadForCompaction" in context)) {
+			Object.defineProperty(context, "projectProviderPayloadForCompaction", {
+				enumerable: false,
+				value: async (payload: unknown) => {
+					let failure: string | undefined;
+					const unsubscribe = this.onError((event) => {
+						if (event.event === "before_provider_request") failure = event.error;
+					});
+					try {
+						const projected = await this.emitBeforeProviderRequest(payload);
+						if (failure) throw new Error(`Compaction payload projection failed: ${failure}`);
+						return projected;
+					} finally {
+						unsubscribe();
+					}
+				},
+			});
+		}
 		if (!(PI_CONTEXT_PROJECTOR_FIELD in context)) {
 			Object.defineProperty(context, PI_CONTEXT_PROJECTOR_FIELD, {
 				configurable: false,
@@ -97,7 +118,7 @@ export function installPiContextHookPatch(): PiContextHookPatchResult {
 		configurable: false,
 		enumerable: false,
 		writable: false,
-		value: true,
+		value: PATCH_VERSION,
 	});
 	prototype.createContext = patched;
 	return { ok: true, installed: true };
@@ -109,6 +130,11 @@ export function getPiContextHookProjector(
 ): PiContextHookProjector | undefined {
 	const candidate = (ctx as PatchedExtensionContext)[PI_CONTEXT_PROJECTOR_FIELD];
 	return typeof candidate === "function" ? candidate : undefined;
+}
+
+export function getCompactionPayloadProjector(ctx: ExtensionContext): CompactionPayloadProjector | undefined {
+	const projector = (ctx as PatchedExtensionContext).projectProviderPayloadForCompaction;
+	return typeof projector === "function" ? projector : undefined;
 }
 
 /** Preserve fail-closed context-hook errors across Pi's emitContext boundary. */

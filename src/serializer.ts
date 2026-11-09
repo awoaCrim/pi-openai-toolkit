@@ -115,7 +115,7 @@ export type ResponsesInputItem =
 export type NativeCompactionRequestBody = CompactionRequestExtras & {
 	model: string;
 	input: ResponsesInputItem[];
-	instructions: string;
+	instructions?: string;
 };
 
 export type SerializeResponsesMessagesOptions = {

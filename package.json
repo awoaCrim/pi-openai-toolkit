@@ -44,6 +44,7 @@
   "files": [
     "src/compact-client.ts",
     "src/compaction-errors.ts",
+    "src/compaction-request.ts",
     "src/compaction-projection.ts",
     "src/pi-context-hook.ts",
     "src/config.ts",

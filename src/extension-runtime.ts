@@ -26,9 +26,11 @@ import { isExactModelAllowed } from "./model-scope";
 import { detectRetiredRemoteWindows, RETIRED_REMOTE_WINDOWS_MESSAGE } from "./retired-remote-windows";
 import { executeNativeCompaction, type NativeCompactionClientResult } from "./compact-client";
 import { qualifiesForStandaloneCompaction, type CompactionErrorInfo } from "./compaction-errors";
+import { buildEncodedCompactionRequest, compactionUsage } from "./compaction-request";
 import { resolveLatestNativeCompactionEntry } from "./details-store";
 import {
 	getPiContextHookProjector,
+	getCompactionPayloadProjector,
 	installPiContextHookPatch,
 	reportPiContextHookFailure,
 	type PiContextHookPatchResult,
@@ -284,8 +286,15 @@ async function runResponsesNativeCompact(
 	});
 
 	const inputProvenance = getRemoteV2InputProvenance(config.remoteV2ContextSource);
-	let requestSource: "session-context" | "non-native-session-context" | "latest-native-replay";
-	let request: NativeCompactionRequestBody;
+	const projectPayload = getCompactionPayloadProjector(ctx);
+	// Ordered payload hooks belong to the selected physical model, never to a
+	// separately configured producer. Such producers keep their own serializer.
+	const useEncoder = projectPayload && consumer.provider === compactor.provider
+		&& consumer.api === compactor.api && consumer.model === compactor.model
+		&& consumer.baseUrl === compactor.baseUrl;
+	let requestSource: "session-context" | "non-native-session-context" | "latest-native-replay" | "provider-encoder";
+	let request: NativeCompactionRequestBody | undefined;
+	let encodingMessages: readonly AgentMessage[] | undefined;
 	if (latestNativeCompaction.ok) {
 		if (hasInvalidatedCompactionContext(branchEntries, latestNativeCompaction.entry.id)) {
 			return { outcome: "unprojected-input", reason: COMPACTION_CHECKPOINT_CONTEXT_EDITED };
@@ -307,6 +316,7 @@ async function runResponsesNativeCompact(
 			if (!projection.ok) {
 				return { outcome: "unprojected-input", reason: projection.reason };
 			}
+			encodingMessages = projection.messages;
 			const summaryIndex = findLatestProjectedCompactionSummaryIndex(
 				projection.messages,
 				latestNativeCompaction.entry.summary,
@@ -317,30 +327,43 @@ async function runResponsesNativeCompact(
 					reason: COMPACTION_PROJECTED_CONTEXT_UNAVAILABLE,
 				};
 			}
-			const input: ResponsesInputItem[] = [
-				...(cloneOpaqueWindow(details.compactedWindow) as ResponsesInputItem[]),
-				...(await serializeMessagesToResponsesInputWithLimits(
-					compactor.currentModel,
-					[...projection.messages.slice(summaryIndex + 1)],
-					{ firstSystemMessageIsUpdate: true },
-				)),
-			];
-			request = {
-				model: compactor.requestModel ?? compactor.model,
-				input,
-				instructions,
-			};
+			if (!useEncoder) {
+				const input: ResponsesInputItem[] = [
+					...(cloneOpaqueWindow(details.compactedWindow) as ResponsesInputItem[]),
+					...(await serializeMessagesToResponsesInputWithLimits(
+						compactor.currentModel,
+						[...projection.messages.slice(summaryIndex + 1)],
+						{ firstSystemMessageIsUpdate: true },
+					)),
+				];
+				request = {
+					model: compactor.requestModel ?? compactor.model,
+					input,
+					instructions,
+				};
+			}
 		} else {
-			const liveTailEntries = branchEntries.slice(latestNativeCompaction.index + 1);
-			const input: ResponsesInputItem[] = [
-				...(cloneOpaqueWindow(details.compactedWindow) as ResponsesInputItem[]),
-				...(await serializeLiveTailToResponsesInputWithLimits({ model: compactor.currentModel, entries: liveTailEntries })),
-			];
-			request = {
-				model: compactor.requestModel ?? compactor.model,
-				input,
-				instructions,
-			};
+			if (useEncoder) {
+				const contextMessages = readSessionContextMessages(ctx);
+				if (!contextMessages) return { outcome: "unprojected-input", reason: COMPACTION_SESSION_CONTEXT_UNAVAILABLE };
+				const retained = removeNativeCompactionRetainedMessages({
+					messages: contextMessages, branchEntries, compactionEntry: latestNativeCompaction.entry,
+					expectedInputProvenance: inputProvenance,
+				});
+				if (!retained.ok) return { outcome: "unprojected-input", reason: COMPACTION_PROJECTED_CONTEXT_UNAVAILABLE };
+				encodingMessages = retained.messages;
+			} else {
+				const liveTailEntries = branchEntries.slice(latestNativeCompaction.index + 1);
+				const input: ResponsesInputItem[] = [
+					...(cloneOpaqueWindow(details.compactedWindow) as ResponsesInputItem[]),
+					...(await serializeLiveTailToResponsesInputWithLimits({ model: compactor.currentModel, entries: liveTailEntries })),
+				];
+				request = {
+					model: compactor.requestModel ?? compactor.model,
+					input,
+					instructions,
+				};
+			}
 		}
 	} else if (
 		latestNativeCompaction.reason === "no-compaction" ||
@@ -354,19 +377,25 @@ async function runResponsesNativeCompact(
 			if (!projection.ok) {
 				return { outcome: "unprojected-input", reason: projection.reason };
 			}
-			const serialized = await serializeMessagesToCompactRequestWithLimits({
-				model: compactor.currentModel,
-				messages: [...projection.messages],
-				instructions,
-			});
-			request = { ...serialized, model: compactor.requestModel ?? serialized.model };
+			encodingMessages = projection.messages;
+			if (!useEncoder) {
+				const serialized = await serializeMessagesToCompactRequestWithLimits({
+					model: compactor.currentModel,
+					messages: [...projection.messages],
+					instructions,
+				});
+				request = { ...serialized, model: compactor.requestModel ?? serialized.model };
+			}
 		} else {
-			const serialized = await serializeMessagesToCompactRequestWithLimits({
-				model: compactor.currentModel,
-				messages: getLegacySessionContextMessages(event, ctx),
-				instructions,
-			});
-			request = { ...serialized, model: compactor.requestModel ?? serialized.model };
+			encodingMessages = getLegacySessionContextMessages(event, ctx);
+			if (!useEncoder) {
+				const serialized = await serializeMessagesToCompactRequestWithLimits({
+					model: compactor.currentModel,
+					messages: [...encodingMessages],
+					instructions,
+				});
+				request = { ...serialized, model: compactor.requestModel ?? serialized.model };
+			}
 		}
 	} else {
 		writeDebugArtifact(
@@ -404,9 +433,18 @@ async function runResponsesNativeCompact(
 		baseUrl: consumer.baseUrl,
 		sessionId: getSessionId(ctx),
 	}, compactor.currentModel);
-	if (extras) {
+	if (extras && request) {
 		request = { ...request, ...extras };
 	}
+	if (useEncoder && encodingMessages) {
+		request = await buildEncodedCompactionRequest({
+			runtime: compactor, messages: encodingMessages, projectPayload,
+			thinkingLevel: ctx.thinkingLevel, customInstructions: event.customInstructions, signal: event.signal,
+			cache: extras,
+		});
+		requestSource = "provider-encoder";
+	}
+	if (!request) return { outcome: "unprojected-input", reason: COMPACTION_SESSION_CONTEXT_UNAVAILABLE };
 
 	if (event.signal?.aborted || !isCurrent() || refuseRetiredSession(ctx)) return { outcome: "aborted" };
 	let protocol: "remote-v2" | "standalone-compact" = "remote-v2";
@@ -506,6 +544,8 @@ async function runResponsesNativeCompact(
 		tokensBefore: event.preparation.tokensBefore,
 		details,
 	});
+	const usage = compactionUsage(compactResult.response.usage, compactor.currentModel);
+	if (usage) compaction.usage = usage;
 
 	writeDebugArtifact(
 		"compaction-event",

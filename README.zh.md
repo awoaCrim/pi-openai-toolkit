@@ -53,6 +53,8 @@ Toolkit 只读取一个全局配置文件，即使扩展安装在项目内也一
 
 可用 `context.remoteCompaction.model` 指定同一有效 base URL 下的独立压缩模型，不改变当前模型。指定模型的完整 `provider/model-id` 与当前模型相同时，直接复用当前运行信息、鉴权快照和 session，不重复选择模型，也不会仅因模型相同就改用原生文本摘要。普通远程压缩的远程尝试全部失败后，会明确提示并继续文本摘要。`nativeFallback.enabled: false` 只关闭 Toolkit 的指定模型回退层，不关闭 Pi 默认摘要。取消操作、来源不匹配或已封存历史被修改时，仍会取消，不能绕过检查点安全检查。详见[上下文配置](docs/configuration.md#context)和[检查点规则](docs/internals.md#remote-compaction-v2-wire-contract)。
 
+同模型 Remote V2 使用 Pi 的正常请求编码器保留可缓存前缀，不再重新拼装工具声明和指令。上下文钩子会添加历史内容（例如 hosted search 证据）时，请使用 `context.remoteCompaction.inputSource: "pi-context-hook"`；legacy 来源仍不包含这些变换。实际命中取决于后端及输入是否保持一致。远程压缩返回的已知用量计入 Pi 的压缩统计；缺失用量不视为零。
+
 **Remote Windows 已完整移除**，包括四个工具和旧模型选择恢复逻辑。旧窗口会话不能续跑：Toolkit 会拒绝包含旧标记的分支，避免把已退休历史重新发送给模型。请新建会话；原文件不会被改写或删除。闲置窗口配置只提示退役，仍选择 `remote-windows` 的配置则必须明确改用受支持模式。详见[退役说明](docs/configuration.md#removed-remote-windows)。压缩与生图共用的 Codex gateway 传输支持仍然保留。
 
 ## Codex Fast
