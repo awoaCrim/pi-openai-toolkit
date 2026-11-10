@@ -28,6 +28,11 @@ for (const version of versions) {
 		assert(result.stdout.includes(`OK Pi ${version}: capture=${version === "0.99.0"}`));
 		if (version === "0.87.0") assert(result.stderr.includes("raw provider stream events"));
 		process.stdout.write(result.stdout);
+		const prefix = runSmokeRunner("pi-compaction-prefix-runner.ts",
+			["gateway-sse", version === "0.87.0" ? "legacy" : "hook", join(root, "node_modules/@earendil-works")], "node");
+		assert.equal(prefix.status, 0, prefix.error?.message ?? prefix.stderr);
+		assert(prefix.stdout.includes("OK"));
+		process.stdout.write(`OK Pi ${version}: remote compaction prefix/usage/reopen\n`);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

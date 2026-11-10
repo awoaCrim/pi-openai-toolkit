@@ -53,6 +53,8 @@ Set `defaults.context.mode` or an individual model's `context.mode`:
 
 Set `context.remoteCompaction.model` to use a separate producer on the same effective base URL without changing the active model. When its full `provider/model-id` matches the current model, Toolkit directly reuses the current runtime, authentication snapshot, and session; it does not select the model again or switch to native summarization merely because the models match. For ordinary remote compaction, exhausted remote attempts warn before continuing with a native text summary. `nativeFallback.enabled: false` disables only Toolkit's configured-model tier, not Pi's default summary. Aborts, incompatible provenance, and edits to sealed history still cancel rather than bypassing checkpoint safety. See [context settings](docs/configuration.md#context) and [checkpoint rules](docs/internals.md#remote-compaction-v2-wire-contract).
 
+Same-model Remote V2 uses Pi's normal request encoder to preserve cacheable prefixes instead of rebuilding tool declarations and instructions. Use `context.remoteCompaction.inputSource: "pi-context-hook"` when context hooks add history, such as hosted-search evidence; the legacy source still omits those transforms. Cache hits depend on the backend and unchanged input. Known remote compression usage is included in Pi's compaction accounting; missing usage is not treated as zero.
+
 **Remote Windows has been removed**, including its four tools and model-selection recovery. Old window sessions are not continuable: Toolkit refuses branches containing their markers instead of resending retired history. Start a new session; existing files are not rewritten or deleted. Dormant window settings are ignored with a warning, but a selected `remote-windows` mode must be changed explicitly. See [retirement guidance](docs/configuration.md#removed-remote-windows). Shared Codex gateway transport remains available to compaction and images.
 
 ## Codex Fast
@@ -145,6 +147,6 @@ npm run test:search-compat
 npm pack --dry-run
 ```
 
-Tests use Bun, included in the development dependencies. `test:search-compat` installs the published Pi 0.87.0 and 0.99.0 runtimes into disposable directories, verifies the warning on the older runtime and real SSE capture/replay on the feature minimum, and makes no live-provider requests. Keep JSON examples identical in both READMEs; the documentation tests check this.
+Tests use Bun, included in the development dependencies. `test:search-compat` installs the published Pi 0.87.0 and 0.99.0 runtimes into disposable directories, verifies the warning on the older runtime and real SSE capture/replay on the feature minimum, and checks compaction prefix/usage/reopen through Node's host loader. It makes no live-provider requests. Keep JSON examples identical in both READMEs; the documentation tests check this.
 
 MIT © awoaCrim and contributors. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for third-party attribution.

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 /** Isolate credentials/settings and native HOME lookup before the SDK process starts. */
-export function runSmokeRunner(runner: string, args: string[]) {
+export function runSmokeRunner(runner: string, args: string[], executable = process.execPath) {
 	const env: NodeJS.ProcessEnv = {};
 	for (const [key, value] of Object.entries(process.env)) {
 		if (["PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "PATHEXT"].includes(key.toUpperCase())) env[key] = value;
@@ -19,7 +19,7 @@ export function runSmokeRunner(runner: string, args: string[]) {
 			LOCALAPPDATA: join(home, "AppData", "Local"),
 			PI_CODING_AGENT_DIR: join(home, ".pi", "agent"), PI_OFFLINE: "1",
 		});
-		return spawnSync(process.execPath, [join(import.meta.dir, runner), ...args], {
+		return spawnSync(executable, [join(import.meta.dir, runner), ...args], {
 			cwd: resolve(import.meta.dir, ".."), encoding: "utf8", env, timeout: 30000,
 		});
 	} finally {

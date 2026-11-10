@@ -153,11 +153,17 @@ try {
 						assert((body.input as Array<{ type?: string }>).some((item) => item.type === "function_call"));
 						assert((body.input as Array<{ type?: string }>).some((item) => item.type === "function_call_output"));
 					} else {
-						assert.deepEqual((body.input as unknown[]).slice(0, canonicalWindow(compact - 1).length), canonicalWindow(compact - 1));
+						const input = body.input as Array<Record<string, unknown>>;
+						const checkpoint = input.findIndex((item) => item.type === "compaction");
+						const window = canonicalWindow(compact - 1);
+						const windowCheckpoint = window.findIndex((item) => item.type === "compaction");
+						assert(checkpoint >= windowCheckpoint, "canonical checkpoint missing");
+						assert.deepEqual(input.slice(checkpoint - windowCheckpoint, checkpoint - windowCheckpoint + window.length), window);
 						assert.equal(text.split(`opaque-${compact - 1}`).length - 1, 1);
 					}
 					output = canonicalWindow(compact);
-					return Response.json({ id: `standalone-${compact}`, output, future: { responseField: true } });
+					return Response.json({ id: `standalone-${compact}`, output, future: { responseField: true },
+						usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110, input_tokens_details: { cached_tokens: 80 } } });
 				}
 				output = [{ type: "compaction", encrypted_content: `opaque-${compact}` }];
 			} else {
@@ -215,7 +221,11 @@ try {
 				const disk = await readFile(sm.getSessionFile()!, "utf8");
 				const checkpoint = disk.trim().split("\n").map((line) => JSON.parse(line)).findLast((entry) => entry.type === "compaction");
 				assert.deepEqual(checkpoint.details.compactedWindow, standalone ? canonicalWindow(1) : [{ type: "compaction", encrypted_content: "opaque-1" }]);
-				if (standalone) assert.equal(checkpoint.summary, "[OpenAI standalone opaque compaction window]");
+				if (standalone) {
+					assert.equal(checkpoint.summary, "[OpenAI standalone opaque compaction window]");
+					assert.equal(checkpoint.usage?.cacheRead, 80);
+					assert.equal(checkpoint.usage?.input, 20);
+				}
 				else {
 					assert.equal(checkpoint.fromHook, true);
 					assert.equal(checkpoint.details.strategy, "openai-remote-compaction-v2");

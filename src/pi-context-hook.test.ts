@@ -3,6 +3,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { ExtensionRunner } from "@earendil-works/pi-coding-agent";
 import {
 	getPiContextHookProjector,
+	getCompactionPayloadProjector,
 	installPiContextHookPatch,
 	PI_CONTEXT_PROJECTOR_FIELD,
 	reportPiContextHookFailure,
@@ -64,4 +65,88 @@ test("installs the context patch idempotently", () => {
 	const second = installPiContextHookPatch();
 	expect(first.ok).toBe(true);
 	expect(second.ok).toBe(true);
+});
+
+test("payload projection propagates caught hook errors and unsubscribes", async () => {
+	installPiContextHookPatch();
+	let listener: ((error: { event: string; error: string }) => void) | undefined;
+	let subscribed = false;
+	const runner = Object.create(ExtensionRunner.prototype);
+	runner.onError = (callback: typeof listener) => {
+		listener = callback; subscribed = true;
+		return () => { subscribed = false; };
+	};
+	runner.emitBeforeProviderRequest = async (payload: unknown) => {
+		listener?.({ event: "before_provider_request", error: "failed transform" });
+		return payload;
+	};
+	const project = getCompactionPayloadProjector(runner.createContext())!;
+	await expect(project({})).rejects.toThrow("failed transform");
+	expect(subscribed).toBe(false);
+	runner.emitBeforeProviderRequest = async (payload: unknown) => payload;
+	await expect(project({ input: [] })).resolves.toEqual({ input: [] });
+	expect(subscribed).toBe(false);
+});
+
+test("reload upgrades an existing context-only bridge without requiring a host restart", () => {
+	const prototype = ExtensionRunner.prototype;
+	const before = prototype.createContext;
+	try {
+		const old = () => ({}) as ReturnType<typeof before>;
+		Object.defineProperty(old, "__piOpenAiToolkitContextHookPatch", { value: true });
+		prototype.createContext = old;
+		expect(installPiContextHookPatch()).toEqual({ ok: true, installed: true });
+		const runner = Object.create(prototype);
+		expect(getCompactionPayloadProjector(runner.createContext())).toBeFunction();
+		expect(installPiContextHookPatch()).toEqual({ ok: true, installed: false, reason: "already-installed" });
+	} finally {
+		prototype.createContext = before;
+	}
+});
+
+test("reload replaces a v2 non-configurable projector while preserving lazy context getters", async () => {
+	const prototype = ExtensionRunner.prototype;
+	const before = prototype.createContext;
+	let model = "first";
+	try {
+		const old = () => Object.defineProperties({}, {
+			model: { get: () => model, enumerable: true },
+			projectContextForCompaction: { value: async () => { throw new Error("old projector"); } },
+			__piOpenAiToolkitReportContextProjectionFailure: { value: () => { throw new Error("old reporter"); } },
+		}) as ReturnType<typeof before>;
+		Object.defineProperty(old, "__piOpenAiToolkitContextHookPatch", { value: 2 });
+		prototype.createContext = old;
+		expect(installPiContextHookPatch().ok).toBe(true);
+		const runner = Object.create(prototype);
+		runner.emitContext = async (messages: AgentMessage[]) => {
+			reportPiContextHookFailure(runner.createContext(), "new reporter");
+			return messages;
+		};
+		const context = runner.createContext();
+		model = "second";
+		expect(context.model).toBe("second");
+		await expect(getPiContextHookProjector(context)!([])).rejects.toThrow("new reporter");
+	} finally {
+		prototype.createContext = before;
+	}
+});
+
+test("uses the bound host transform exactly once and resolves wrappers dynamically", async () => {
+	installPiContextHookPatch();
+	const runner = Object.create(ExtensionRunner.prototype);
+	let hooks = 0;
+	runner.emitContext = async (messages: AgentMessage[]) => { hooks++; return messages; };
+	const host = { agent: { transformContext: async (messages: AgentMessage[]) => runner.emitContext(messages) } };
+	Object.defineProperty(runner, Symbol.for("pi-openai-toolkit.compaction-host-session"), { value: host });
+	const context = runner.createContext();
+	const original = host.agent.transformContext;
+	host.agent.transformContext = async (messages) => {
+		const projected = await original(messages);
+		(projected[0] as any).content = "host projection";
+		return projected;
+	};
+	const messages = [{ role: "user", content: "original" } as never];
+	expect(await getPiContextHookProjector(context)!(messages)).toEqual([{ role: "user", content: "host projection" }]);
+	expect(messages[0]).toEqual({ role: "user", content: "original" });
+	expect(hooks).toBe(1);
 });
