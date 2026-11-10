@@ -147,6 +147,6 @@ npm run test:search-compat
 npm pack --dry-run
 ```
 
-测试使用 Bun，已列入开发依赖。`test:search-compat` 将已发布的 Pi 0.87.0 和 0.99.0 安装到临时目录，验证旧版警告，以及功能最低版本下通过真实 SSE 流程捕获和重放；不请求真实模型服务。修改 README 的 JSON 示例时，同步更新中英文版本，文档测试会检查两者一致。
+测试使用 Bun，已列入开发依赖。`test:search-compat` 将已发布的 Pi 0.87.0 和 0.99.0 安装到临时目录，验证旧版警告，以及功能最低版本下通过真实 SSE 流程捕获和重放，并通过 Node 宿主加载器检查压缩前缀、用量统计与重开会话；不请求真实模型服务。修改 README 的 JSON 示例时，同步更新中英文版本，文档测试会检查两者一致。
 
 MIT © awoaCrim 与贡献者。许可证见 [LICENSE](LICENSE)，第三方来源与致谢见 [NOTICE](NOTICE)。
